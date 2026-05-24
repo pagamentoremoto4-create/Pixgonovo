@@ -239,32 +239,22 @@ Confira:
 
         pix?.qr_code;
 
-      const qrImage =
-
-        pix?.data?.qr_image_url ||
-
-        pix?.data?.qr_code_url ||
-
-        pix?.qr_image_url;
-
       await enviarTexto(
-
         from,
 
-`✅ *PIX GERADO*
+`✅ *PIX GERADO COM SUCESSO!*
 
-💰 Valor:
-R$ ${valor.toFixed(2)}
+💰 Valor: R$ ${valor.toFixed(2)}
 
-📋 *PIX COPIA E COLA*
+📋 *COPIA E COLA (PIX):*
 
-${qrCode || "PIX indisponível"}
+━━━━━━━━━━━━━━━━━━
+${qrCode}
+━━━━━━━━━━━━━━━━━━
 
-🖼️ QR Code:
-${qrImage || ""}
+👉 Toque e segure para copiar o código acima.
 
 ⏳ Expira em 20 minutos.`
-
       );
 
       if (paymentId) {
@@ -491,9 +481,7 @@ width="300"
 />
 
 <p>
-WhatsApp >
-Aparelhos conectados >
-Conectar aparelho
+WhatsApp > Aparelhos conectados > Conectar aparelho
 </p>
 
 </body>
