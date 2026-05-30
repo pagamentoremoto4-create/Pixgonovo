@@ -32,6 +32,7 @@ if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 let sock = null;
 let qrCodeBase64 = null;
 let conectado = false;
+const processedMessages = new Set();
 
 const db = new sqlite3.Database(DB_PATH);
 
@@ -83,6 +84,7 @@ async function initDB() {
     status TEXT DEFAULT 'EM ANDAMENTO',
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     concluido_em TEXT,
+    cancelado_em TEXT,
     pago INTEGER DEFAULT 0
   )`);
 
@@ -103,47 +105,24 @@ async function initDB() {
     status TEXT DEFAULT 'pending',
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  await migrateDB();
+}
+
+async function migrateDB() {
+  const cols = await all("PRAGMA table_info(servicos)");
+  const names = cols.map(c => c.name);
+  if (!names.includes("cancelado_em")) {
+    await run("ALTER TABLE servicos ADD COLUMN cancelado_em TEXT");
+  }
 }
 
 function onlyDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
-function getChatJid(msg) {
-  return (
-    msg?.key?.remoteJidAlt ||
-    msg?.key?.remoteJid ||
-    ""
-  );
-}
-
 function jidToNumber(jid) {
   return onlyDigits(String(jid || "").split("@")[0]);
-}
-
-function nomeSeguro(nome) {
-  const n = String(nome || "").trim();
-  if (!n) return "Cliente";
-  // Quando a mensagem é enviada pelo próprio admin, o pushName pode ser o nome do bot.
-  // Não queremos salvar CentralUnlocker como nome do cliente.
-  if (/central\s*unlocker|centralunlocker/i.test(n)) return "Cliente";
-  return n;
-}
-
-async function obterClienteDaConversa(msg, fallbackNome = "Cliente") {
-  const jid = getChatJid(msg);
-  const existente = await get("SELECT * FROM clientes WHERE jid = ?", [jid]);
-
-  let nome = "Cliente";
-
-  if (msg?.key?.fromMe) {
-    // Admin digitando na conversa do cliente: usa o nome já salvo anteriormente.
-    nome = existente?.nome || nomeSeguro(fallbackNome);
-  } else {
-    nome = nomeSeguro(msg.pushName || fallbackNome || existente?.nome || "Cliente");
-  }
-
-  return await ensureCliente(jid, nome);
 }
 
 function formatMoney(value) {
@@ -165,15 +144,6 @@ function dateBR(dateString) {
   return d.toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 }
 
-function isAdminMessage(msg) {
-  if (msg.key.fromMe) return true;
-
-  const participant = msg.key.participant || msg.participant || "";
-  const senderNumber = jidToNumber(participant || msg.key.remoteJid);
-
-  return ADMIN_NUMBER && senderNumber === ADMIN_NUMBER;
-}
-
 function isGroupJid(jid) {
   return String(jid || "").endsWith("@g.us");
 }
@@ -188,23 +158,54 @@ function getTextMessage(msg) {
   );
 }
 
+function getSenderNumber(msg) {
+  if (msg.key.fromMe) return ADMIN_NUMBER;
+  const participant = msg.key.participant || msg.participant || msg.key.remoteJid;
+  return jidToNumber(participant);
+}
+
+function isAdminMessage(msg) {
+  const senderNumber = getSenderNumber(msg);
+  return Boolean(ADMIN_NUMBER && senderNumber === ADMIN_NUMBER);
+}
+
+function isBotName(name) {
+  const n = String(name || "").toLowerCase();
+  return n.includes("centralunlocker") || n.includes("central unlocker");
+}
+
 async function ensureCliente(jid, nome = "Cliente") {
   const numero = jidToNumber(jid);
   const existente = await get("SELECT * FROM clientes WHERE jid = ?", [jid]);
 
+  let nomeLimpo = String(nome || "Cliente").trim();
+  if (!nomeLimpo || isBotName(nomeLimpo)) nomeLimpo = "Cliente";
+
   if (!existente) {
     await run(
       "INSERT INTO clientes (jid, numero, nome, saldo) VALUES (?, ?, ?, 0)",
-      [jid, numero, nome || "Cliente"]
+      [jid, numero, nomeLimpo]
     );
-  } else if (nome && nome !== "Cliente" && existente.nome !== nome) {
+  } else if (nomeLimpo !== "Cliente" && existente.nome !== nomeLimpo) {
     await run(
       "UPDATE clientes SET nome = ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?",
-      [nome, jid]
+      [nomeLimpo, jid]
     );
   }
 
   return await get("SELECT * FROM clientes WHERE jid = ?", [jid]);
+}
+
+async function getClienteDoChat(msg, nomeFallback = "Cliente") {
+  const clienteJid = msg.key.remoteJid;
+  const existente = await get("SELECT * FROM clientes WHERE jid = ?", [clienteJid]);
+  let nome = existente?.nome || nomeFallback || "Cliente";
+
+  if (msg.key.fromMe && (!existente || existente.nome === "Cliente" || isBotName(existente.nome))) {
+    nome = "Cliente";
+  }
+
+  return await ensureCliente(clienteJid, nome);
 }
 
 async function iniciarWhatsApp() {
@@ -254,7 +255,14 @@ async function iniciarWhatsApp() {
     const msg = messages[0];
     if (!msg.message) return;
 
-    const from = getChatJid(msg);
+    const messageId = msg.key.id;
+    if (messageId && processedMessages.has(messageId)) return;
+    if (messageId) {
+      processedMessages.add(messageId);
+      if (processedMessages.size > 1000) processedMessages.clear();
+    }
+
+    const from = msg.key.remoteJid;
     if (isGroupJid(from)) return;
 
     const textoOriginal = getTextMessage(msg).trim();
@@ -262,12 +270,11 @@ async function iniciarWhatsApp() {
 
     const comando = textoOriginal.toLowerCase();
     const admin = isAdminMessage(msg);
-    const nomeCliente = nomeSeguro(msg.pushName || "Cliente");
+    const nomeCliente = msg.pushName || msg.notifyName || "Cliente";
 
-    console.log("📩 MENSAGEM:", comando, "FROM:", from, "ADMIN:", admin);
+    console.log("📩 MENSAGEM:", comando, "FROM:", from, "FROMME:", msg.key.fromMe, "ADMIN:", admin);
 
     try {
-      // Admin digitando na conversa do cliente aparece como fromMe e remoteJid = cliente.
       if (admin) {
         if (await tratarComandoAdmin(msg, from, textoOriginal, comando, nomeCliente)) return;
       } else {
@@ -286,48 +293,6 @@ async function tratarComandoAdmin(msg, from, textoOriginal, comando, nomeCliente
   const partes = textoOriginal.trim().split(/\s+/);
   const cmd = partes[0].toLowerCase();
 
-  if (cmd === "nome") {
-    const novoNome = partes.slice(1).join(" ").trim();
-    if (!novoNome) {
-      await enviarTexto(from, "❌ Use: nome Adriana Silva");
-      return true;
-    }
-
-    const jid = getChatJid(msg);
-    await ensureCliente(jid, novoNome);
-    await run("UPDATE clientes SET nome = ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?", [novoNome, jid]);
-
-    await enviarTexto(from,
-`✅ *NOME DO CLIENTE ATUALIZADO*
-
-👤 Cliente: ${novoNome}
-
-🏢 *CentralUnlocker*`
-    );
-    return true;
-  }
-
-  if (cmd === "numero") {
-    const novoNumero = onlyDigits(partes[1] || "");
-    if (!novoNumero) {
-      await enviarTexto(from, "❌ Use: numero 5575999999999");
-      return true;
-    }
-
-    const jid = getChatJid(msg);
-    await ensureCliente(jid, nomeCliente);
-    await run("UPDATE clientes SET numero = ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?", [novoNumero, jid]);
-
-    await enviarTexto(from,
-`✅ *NÚMERO DO CLIENTE ATUALIZADO*
-
-📱 Número: ${novoNumero}
-
-🏢 *CentralUnlocker*`
-    );
-    return true;
-  }
-
   if (cmd === "servico") {
     const valor = Number(partes[1]?.replace(",", "."));
     const imei = partes[partes.length - 1];
@@ -343,7 +308,34 @@ servico 180 desbloqueio tim 356789123456789`
       return true;
     }
 
-    const cliente = await obterClienteDaConversa(msg, nomeCliente);
+    const duplicado = await get(
+      "SELECT * FROM servicos WHERE imei = ? AND status = 'EM ANDAMENTO'",
+      [imei]
+    );
+
+    if (duplicado) {
+      await enviarTexto(from,
+`⚠️ *SERVIÇO JÁ REGISTRADO*
+
+🔢 Protocolo: #${duplicado.protocolo}
+👤 Cliente: ${duplicado.nome}
+📱 Número: ${duplicado.numero}
+
+📱 IMEI:
+${imei}
+
+🛠 Serviço:
+${duplicado.descricao}
+
+📍 Status:
+${duplicado.status}
+
+🏢 *CentralUnlocker*`
+      );
+      return true;
+    }
+
+    const cliente = await getClienteDoChat(msg, nomeCliente);
 
     const result = await run(
       `INSERT INTO servicos (cliente_jid, numero, nome, imei, descricao, valor, status)
@@ -372,6 +364,27 @@ ${formatMoney(valor)}
 
 📍 Status:
 EM ANDAMENTO
+
+🏢 *CentralUnlocker*`
+    );
+    return true;
+  }
+
+  if (cmd === "nome") {
+    const novoNome = partes.slice(1).join(" ").trim();
+    if (!novoNome) {
+      await enviarTexto(from, "❌ Use: nome João Silva");
+      return true;
+    }
+
+    await ensureCliente(from, novoNome);
+    await run("UPDATE clientes SET nome = ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?", [novoNome, from]);
+    await run("UPDATE servicos SET nome = ? WHERE cliente_jid = ?", [novoNome, from]);
+
+    await enviarTexto(from,
+`✅ *NOME ATUALIZADO*
+
+👤 Cliente: ${novoNome}
 
 🏢 *CentralUnlocker*`
     );
@@ -408,9 +421,18 @@ EM ANDAMENTO
       return true;
     }
 
+    if (servico.status === "CANCELADO") {
+      await enviarTexto(from, "❌ Este serviço está cancelado.");
+      return true;
+    }
+
+    if (servico.status === "CONCLUÍDO") {
+      await enviarTexto(from, "⚠️ Este serviço já foi concluído.");
+      return true;
+    }
+
     await run("UPDATE servicos SET status = 'CONCLUÍDO', concluido_em = CURRENT_TIMESTAMP WHERE protocolo = ?", [protocolo]);
 
-    // Soma como saldo em aberto do cliente.
     await ensureCliente(servico.cliente_jid, servico.nome);
     await run(
       "UPDATE clientes SET saldo = saldo + ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?",
@@ -445,6 +467,61 @@ O sistema irá gerar automaticamente o PIX.
 `✅ Serviço #${servico.protocolo} marcado como concluído.
 
 Mensagem enviada ao cliente.
+
+🏢 *CentralUnlocker*`
+    );
+    return true;
+  }
+
+  if (cmd === "cancelar") {
+    const protocolo = Number(partes[1]);
+    if (!protocolo) {
+      await enviarTexto(from, "❌ Use: cancelar 1001");
+      return true;
+    }
+
+    const servico = await get("SELECT * FROM servicos WHERE protocolo = ?", [protocolo]);
+    if (!servico) {
+      await enviarTexto(from, "❌ Protocolo não encontrado.");
+      return true;
+    }
+
+    if (servico.status === "CANCELADO") {
+      await enviarTexto(from, "⚠️ Este serviço já está cancelado.");
+      return true;
+    }
+
+    await run("UPDATE servicos SET status = 'CANCELADO', cancelado_em = CURRENT_TIMESTAMP WHERE protocolo = ?", [protocolo]);
+
+    await enviarTexto(servico.cliente_jid,
+`❌ *SERVIÇO CANCELADO*
+
+🔢 Protocolo: #${servico.protocolo}
+
+📱 IMEI:
+${servico.imei}
+
+🛠 Serviço:
+${servico.descricao}
+
+Seu pedido foi cancelado.
+
+🏢 *CentralUnlocker*`
+    );
+
+    await enviarTexto(from,
+`❌ *SERVIÇO CANCELADO*
+
+🔢 Protocolo: #${servico.protocolo}
+
+👤 Cliente: ${servico.nome}
+📱 Número: ${servico.numero}
+
+🛠 Serviço:
+${servico.descricao}
+
+📍 Status:
+CANCELADO
 
 🏢 *CentralUnlocker*`
     );
@@ -487,7 +564,7 @@ ${imei}
       return true;
     }
 
-    const cliente = await obterClienteDaConversa(msg, nomeCliente);
+    const cliente = await getClienteDoChat(msg, nomeCliente);
     await run("UPDATE clientes SET saldo = saldo + ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?", [valor, cliente.jid]);
     const atualizado = await get("SELECT * FROM clientes WHERE jid = ?", [cliente.jid]);
 
@@ -514,7 +591,7 @@ ${formatMoney(atualizado.saldo)}
       return true;
     }
 
-    const cliente = await obterClienteDaConversa(msg, nomeCliente);
+    const cliente = await getClienteDoChat(msg, nomeCliente);
     const novoSaldo = Math.max(0, Number(cliente.saldo || 0) - valor);
 
     await run("UPDATE clientes SET saldo = ?, atualizado_em = CURRENT_TIMESTAMP WHERE jid = ?", [novoSaldo, cliente.jid]);
