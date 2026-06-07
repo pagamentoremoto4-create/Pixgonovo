@@ -154,11 +154,30 @@ function basicAuth(req, res, next) {
   return res.status(401).send('Login necessário');
 }
 
+function active(path) { return ''; }
+
 function page(title, body) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
   <style>
-  body{font-family:Arial,sans-serif;background:#0f172a;color:#e5e7eb;margin:0} a{color:#93c5fd;text-decoration:none}.wrap{max-width:1200px;margin:0 auto;padding:20px}.nav{background:#111827;padding:14px;display:flex;gap:14px;flex-wrap:wrap}.card{background:#111827;border:1px solid #273449;border-radius:12px;padding:16px;margin:12px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.btn{display:inline-block;background:#2563eb;color:white;padding:9px 12px;border-radius:8px;border:0;cursor:pointer;margin:3px}.btn.red{background:#dc2626}.btn.green{background:#16a34a}.btn.gray{background:#475569}.btn.orange{background:#f97316}input,select,textarea{padding:10px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e5e7eb;width:100%;box-sizing:border-box}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #273449;padding:9px;text-align:left}.muted{color:#94a3b8}.status{font-weight:bold}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-  </style></head><body><div class="nav"><b>🏢 CentralUnlocker</b><a href="/admin">Dashboard</a><a href="/admin/pedidos">Pedidos</a><a href="/admin/revendas">Revendas</a><a href="/admin/servicos">Serviços</a><a href="/admin/financeiro">Financeiro</a><a href="/admin/backup">Backup</a></div><div class="wrap">${body}</div></body></html>`;
+  :root{--bg:#07111d;--panel:#111b28;--panel2:#152231;--line:#243244;--text:#f3f4f6;--muted:#94a3b8;--green:#16c784;--blue:#2563eb;--orange:#f59e0b;--red:#ef4444;--purple:#8b5cf6}
+  *{box-sizing:border-box} body{font-family:Inter,Arial,sans-serif;background:radial-gradient(circle at top left,#102033 0,#07111d 45%,#020617 100%);color:var(--text);margin:0} a{color:inherit;text-decoration:none}.layout{display:flex;min-height:100vh}.side{width:260px;background:linear-gradient(180deg,#05101d,#020617);border-right:1px solid #102033;position:fixed;left:0;top:0;bottom:0;padding:22px 14px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:22px;margin-bottom:32px}.lock{background:#052e1a;color:#22c55e;border:1px solid #14532d;border-radius:12px;padding:8px}.brand span{display:block;line-height:1.05}.brand b{color:#22c55e}.menu{display:flex;flex-direction:column;gap:8px}.menu a{padding:14px 16px;border-radius:12px;color:#dbeafe;display:flex;gap:12px;align-items:center;font-weight:600}.menu a:hover,.menu a.active{background:linear-gradient(90deg,#064e3b,#052e2b);color:#22c55e;box-shadow:inset 4px 0 #22c55e}.ver{position:absolute;bottom:20px;left:18px;right:18px;color:#94a3b8;font-size:13px}.main{margin-left:260px;width:calc(100% - 260px)}.topbar{height:72px;background:rgba(15,23,42,.72);border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;padding:0 28px;position:sticky;top:0;z-index:5;backdrop-filter:blur(10px)}.hamb{font-size:26px}.admin{display:flex;align-items:center;gap:10px;color:#e5e7eb}.online{color:#22c55e;font-size:12px}.wrap{max-width:1680px;margin:0 auto;padding:22px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}.card{background:linear-gradient(180deg,var(--panel),#0f172a);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 10px 30px rgba(0,0,0,.18)}.metric{display:flex;align-items:center;gap:14px;min-height:118px}.icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}.i-orange{background:#f59e0b}.i-blue{background:#2563eb}.i-green{background:#16a34a}.i-red{background:#dc2626}.i-purple{background:#7c3aed}.i-cyan{background:#0891b2}.metric h2{margin:0;font-size:14px;text-transform:uppercase;color:#cbd5e1}.metric h1{margin:5px 0 0;font-size:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.btn{display:inline-flex;align-items:center;gap:6px;background:#2563eb;color:white;padding:9px 12px;border-radius:8px;border:0;cursor:pointer;margin:3px;font-weight:700}.btn.red{background:#dc2626}.btn.green{background:#16a34a}.btn.gray{background:#475569}.btn.orange{background:#f59e0b;color:#111827}.btn.small{padding:7px 9px;font-size:13px}.btn.iconbtn{width:34px;height:34px;justify-content:center;padding:0}input,select,textarea{padding:10px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e5e7eb;width:100%;box-sizing:border-box}input.inline{width:160px}.searchbar{display:flex;gap:10px;align-items:center;max-width:520px}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.75)}table{width:100%;border-collapse:collapse;min-width:900px}td,th{border-bottom:1px solid #273449;padding:12px;text-align:left;vertical-align:middle}th{font-size:13px;text-transform:uppercase;color:#e5e7eb;background:#152231}td{color:#f8fafc}.muted{color:#94a3b8}.status{font-weight:800;border-radius:6px;padding:6px 10px;display:inline-block;font-size:12px}.st-pendente{background:#3b2b07;color:#fbbf24;border:1px solid #92400e}.st-processo{background:#0b2c5f;color:#60a5fa;border:1px solid #1d4ed8}.st-finalizado{background:#063b25;color:#22c55e;border:1px solid #15803d}.st-cancelado{background:#3b0a0a;color:#f87171;border:1px solid #991b1b}.actions{display:flex;gap:6px;align-items:center;white-space:nowrap}.actions form{display:inline-flex;gap:5px;align-items:center;margin:0}.section-title{display:flex;align-items:center;gap:8px;margin:18px 0 12px}.pill{background:#052e1a;color:#22c55e;border-radius:999px;padding:4px 10px;font-weight:800}.listitem{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #273449;padding:13px 0}.listitem:last-child{border-bottom:0}@media(max-width:900px){.side{position:relative;width:100%;height:auto}.layout{display:block}.main{margin-left:0;width:100%}.topbar{position:relative}.grid{grid-template-columns:1fr}.searchbar{max-width:none}.wrap{padding:12px}}
+  </style></head><body><div class="layout"><aside class="side"><div class="brand"><div class="lock">🔒</div><span>CENTRAL<br><b>UNLOCKER</b></span></div><nav class="menu"><a href="/admin">🏠 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/backup">☁️ Backup</a></nav><div class="ver"><b>CENTRAL <span style="color:#22c55e">UNLOCKER</span></b><br>Versão 2.1.0</div></aside><main class="main"><div class="topbar"><div class="hamb">☰</div><div class="admin"><div><b>Administrador</b><br><span class="online">● online</span></div><div style="font-size:34px">👤</div></div></div><div class="wrap">${body}</div></main></div></body></html>`;
+}
+
+function statusBadge(status) {
+  const st = String(status || '').toUpperCase();
+  const cls = st === 'EM PROCESSO' ? 'st-processo' : st === 'FINALIZADO' ? 'st-finalizado' : st === 'CANCELADO' ? 'st-cancelado' : 'st-pendente';
+  return `<span class="status ${cls}">${st}</span>`;
+}
+
+function pedidoActions(p, returnTo = '/admin/pedidos') {
+  const rt = String(returnTo || '/admin/pedidos').replace(/"/g, '&quot;');
+  return `<div class="actions">
+    <form method="post" action="/admin/pedido/${p.id}/editar-imei"><input type="hidden" name="returnTo" value="${rt}"><input class="inline" name="imei" value="${p.imei || ''}" placeholder="IMEI"><button class="btn iconbtn" title="Editar IMEI">✏️</button></form>
+    <form method="post" action="/admin/pedido/${p.id}/processo"><input type="hidden" name="returnTo" value="${rt}"><button class="btn orange iconbtn" title="Em Processo">🔄</button></form>
+    <form method="post" action="/admin/pedido/${p.id}/finalizar"><input type="hidden" name="returnTo" value="${rt}"><button class="btn green iconbtn" title="Finalizar">✅</button></form>
+    <form method="post" action="/admin/pedido/${p.id}/cancelar"><input type="hidden" name="returnTo" value="${rt}"><input class="inline" name="motivo" placeholder="Motivo"><button class="btn red iconbtn" title="Cancelar">❌</button></form>
+  </div>`;
 }
 
 async function precoDaRevenda(revendaId, servicoId) {
@@ -222,6 +241,32 @@ async function tratarWhatsApp(from, textoOriginal, texto) {
   if (isAdminJid(from) && texto === 'backup') {
     const arq = await criarBackup();
     await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`);
+    return;
+  }
+
+  // PIX livre para cliente final, revenda ou qualquer contato: pagar 50 / pagar 180
+  if (texto.startsWith('pagar') && partes[1]) {
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) { await enviarTexto(from, `❌ Informe um valor mínimo de R$10.
+
+Exemplo:
+pagar 180`); return; }
+    await enviarTexto(from, '⏳ Gerando PIX...');
+    const pix = await gerarPix(valor, from);
+    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
+    const paymentId = pix?.data?.payment_id || pix?.payment_id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.qr_code;
+    await enviarTexto(from, `✅ PIX GERADO
+
+💰 Valor: ${brl(valor)}
+
+Vou enviar o copia e cola na próxima mensagem.
+⏳ Expira em 20 minutos.`);
+    await enviarTexto(from, qrCode || 'PIX indisponível');
+    if (paymentId) {
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, valor, status) VALUES (?, NULL, ?, ?, "pending")', [paymentId, from, valor]);
+      verificarPagamentoLivre(paymentId, from, valor);
+    }
     return;
   }
 
@@ -341,6 +386,31 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
   }, 30000);
 }
 
+async function verificarPagamentoLivre(paymentId, jid, valorPix) {
+  let tentativas = 0;
+  const interval = setInterval(async () => {
+    tentativas++;
+    const status = await consultarStatus(paymentId);
+    if (status?.success && status.data?.status === 'completed') {
+      clearInterval(interval);
+      await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
+      await enviarTexto(jid, `✅ Pagamento confirmado
+
+💰 Valor: ${brl(valorPix)}
+
+Obrigado pela preferência.
+
+🏢 CentralUnlocker`);
+    }
+    if (status?.success && status.data?.status === 'expired') {
+      clearInterval(interval);
+      await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]);
+      await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+    }
+    if (tentativas >= 40) clearInterval(interval);
+  }, 30000);
+}
+
 async function notificarPedido(pedido, tipo, motivo = '') {
   if (!pedido.revenda_jid) return;
   if (tipo === 'processo') {
@@ -370,30 +440,48 @@ app.get('/admin', async (req, res) => {
   const c = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"');
   const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas');
   const rev = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
-  res.send(page('Dashboard', `<h1>📊 Dashboard</h1><div class="grid">
-  <div class="card"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card"><h2>💰 Total a receber</h2><h1>${brl(saldo.total)}</h1></div><div class="card"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
+  res.send(page('Dashboard', `<div class="top"><h1>📊 Dashboard</h1><a class="btn gray" href="/admin/pedidos">Ver pedidos</a></div><div class="grid">
+  <div class="card metric"><div class="icon i-orange">📄</div><div><h2>Pendentes</h2><h1>${p.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
+  <div class="card metric"><div class="icon i-blue">🔄</div><div><h2>Em Processo</h2><h1>${ep.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
+  <div class="card metric"><div class="icon i-green">✅</div><div><h2>Finalizados</h2><h1>${f.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
+  <div class="card metric"><div class="icon i-red">❌</div><div><h2>Cancelados</h2><h1>${c.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
+  <div class="card metric"><div class="icon i-purple">$</div><div><h2>Total a Receber</h2><h1>${brl(saldo.total)}</h1><span class="muted">Ver detalhes</span></div></div>
+  <div class="card metric"><div class="icon i-cyan">🏪</div><div><h2>Revendas Ativas</h2><h1>${rev.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
   </div>`));
 });
 
 app.get('/admin/pedidos', async (req, res) => {
   const status = req.query.status || '';
-  const rows = await all(`SELECT * FROM pedidos ${status ? 'WHERE status=?' : ''} ORDER BY id DESC LIMIT 300`, status ? [status] : []);
-  let html = `<div class="top"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div><table><tr><th>ID</th><th>Revenda</th><th>Serviço</th><th>IMEI</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  const busca = onlyDigits(req.query.imei || '');
+  const where = [];
+  const params = [];
+  if (status) { where.push('status=?'); params.push(status); }
+  if (busca) { where.push('imei LIKE ?'); params.push(`%${busca}%`); }
+  const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 300`;
+  const rows = await all(sql, params);
+  let html = `<div class="top"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
+  <div class="card"><form class="searchbar" method="get" action="/admin/pedidos"><input name="imei" placeholder="🔍 Buscar IMEI" value="${busca || ''}"><button class="btn green">Buscar</button></form></div>
+  <div class="tablewrap"><table><tr><th>IMEI</th><th>Serviço</th><th>Revenda</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>`;
   for (const o of rows) {
-    html += `<tr><td>#${o.id}</td><td>${o.revenda_nome}</td><td>${o.servico_nome}</td><td>${o.imei}</td><td>${brl(o.valor)}</td><td class="status">${o.status}</td><td>
-    <form style="display:inline" method="post" action="/admin/pedido/${o.id}/processo"><button class="btn orange">🔄 Em Processo</button></form>
-    <form style="display:inline" method="post" action="/admin/pedido/${o.id}/finalizar"><button class="btn green">✅ Finalizar</button></form>
-    <form style="display:inline" method="post" action="/admin/pedido/${o.id}/cancelar"><input name="motivo" placeholder="Motivo" style="width:150px"><button class="btn red">❌ Cancelar</button></form>
-    </td></tr>`;
+    html += `<tr><td><b>${o.imei}</b><br><span class="muted">#${o.id}</span></td><td>${o.servico_nome}</td><td>${o.revenda_nome}</td><td>${brl(o.valor)}</td><td>${statusBadge(o.status)}</td><td>${o.criado_em || '-'}</td><td>${pedidoActions(o, '/admin/pedidos' + (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''))}</td></tr>`;
   }
-  html += '</table>';
+  html += '</table></div>';
   res.send(page('Pedidos', html));
+});
+
+app.post('/admin/pedido/:id/editar-imei', async (req, res) => {
+  const novoImei = onlyDigits(req.body.imei || '');
+  const returnTo = req.body.returnTo || '/admin/pedidos';
+  if (/^\d{14,17}$/.test(novoImei)) {
+    await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novoImei, req.params.id]);
+  }
+  res.redirect(returnTo);
 });
 
 app.post('/admin/pedido/:id/processo', async (req, res) => {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (pedido) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]); await notificarPedido(pedido, 'processo'); }
-  res.redirect('/admin/pedidos');
+  res.redirect(req.body.returnTo || '/admin/pedidos');
 });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
@@ -406,13 +494,13 @@ app.post('/admin/pedido/:id/finalizar', async (req, res) => {
     const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
     await notificarPedido(atualizado, 'finalizar');
   }
-  res.redirect('/admin/pedidos');
+  res.redirect(req.body.returnTo || '/admin/pedidos');
 });
 app.post('/admin/pedido/:id/cancelar', async (req, res) => {
   const motivo = req.body.motivo || 'Não informado';
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (pedido) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, pedido.id]); await notificarPedido(pedido, 'cancelar', motivo); }
-  res.redirect('/admin/pedidos');
+  res.redirect(req.body.returnTo || '/admin/pedidos');
 });
 
 app.get('/admin/revendas', async (req, res) => {
@@ -466,9 +554,16 @@ app.post('/admin/revenda/:id/pagamento', async (req, res) => {
 
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
-  let html = `<h1>🛠 Serviços</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">Adicionar Serviço</button></form></div><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`;
-  for (const s of rows) html += `<tr><td>${s.id}</td><td><a href="/admin/servico/${s.id}/imeis">${s.nome}</a></td><td>${brl(s.preco_padrao)}</td><td>${s.ativo ? 'Ativo' : 'Inativo'}</td><td>${s.total}</td><td><form style="display:inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form></td></tr>`;
-  html += '</table>';
+  let html = `<div class="top"><h1>🛠 Serviços</h1><a class="btn gray" href="/admin/pedidos">Ver pedidos</a></div>
+  <div class="card"><form method="post" action="/admin/servicos"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">➕ Adicionar Serviço</button></form></div>
+  <div class="tablewrap"><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`;
+  for (const sv of rows) html += `<tr><td>#${sv.id}</td><td><a href="/admin/servico/${sv.id}/imeis"><b>${sv.nome}</b></a></td><td>${brl(sv.preco_padrao)}</td><td>${sv.ativo ? '<span class="status st-finalizado">ATIVO</span>' : '<span class="status st-cancelado">INATIVO</span>'}</td><td><span class="pill">${sv.total}</span></td><td><div class="actions">
+    <form method="post" action="/admin/servico/${sv.id}/editar"><input class="inline" name="nome" value="${sv.nome}"><input class="inline" name="preco" value="${sv.preco_padrao}"><button class="btn iconbtn" title="Editar">✏️</button></form>
+    <form method="post" action="/admin/servico/${sv.id}/toggle"><button class="btn gray small">${sv.ativo ? 'Desativar' : 'Ativar'}</button></form>
+    <form method="post" action="/admin/servico/${sv.id}/excluir" onsubmit="return confirm('Excluir definitivamente este serviço e todos os pedidos vinculados?')"><button class="btn red small">🗑️ Excluir</button></form>
+    <a class="btn small" href="/admin/servico/${sv.id}/imeis">📱 IMEIs</a>
+  </div></td></tr>`;
+  html += '</table></div>';
   res.send(page('Serviços', html));
 });
 app.post('/admin/servicos', async (req, res) => {
@@ -477,17 +572,30 @@ app.post('/admin/servicos', async (req, res) => {
   for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n\nDigite menu para ver sua tabela.`);
   res.redirect('/admin/servicos');
 });
+app.post('/admin/servico/:id/editar', async (req, res) => {
+  const nome = String(req.body.nome || '').trim();
+  const preco = Number(String(req.body.preco || '0').replace(',', '.'));
+  if (nome) await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=? WHERE id=?', [nome, preco, req.params.id]);
+  res.redirect('/admin/servicos');
+});
 app.post('/admin/servico/:id/toggle', async (req, res) => {
-  const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
-  if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]);
+  const sv = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
+  if (sv) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [sv.ativo ? 0 : 1, sv.id]);
+  res.redirect('/admin/servicos');
+});
+app.post('/admin/servico/:id/excluir', async (req, res) => {
+  await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]);
+  await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]);
+  await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]);
   res.redirect('/admin/servicos');
 });
 app.get('/admin/servico/:id/imeis', async (req, res) => {
-  const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
+  const sv = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
   const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]);
-  let html = `<h1>📱 IMEIs - ${s.nome}</h1><table><tr><th>ID</th><th>IMEI</th><th>Revenda</th><th>Valor</th><th>Status</th><th>Data</th></tr>`;
-  for (const p of rows) html += `<tr><td>#${p.id}</td><td>${p.imei}</td><td>${p.revenda_nome}</td><td>${brl(p.valor)}</td><td>${p.status}</td><td>${p.criado_em}</td></tr>`;
-  html += '</table>';
+  let html = `<div class="top"><h1>📱 ${sv?.nome || 'Serviço'}</h1><a class="btn gray" href="/admin/servicos">Voltar</a></div>
+  <div class="tablewrap"><table><tr><th>IMEI</th><th>Revenda</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>`;
+  for (const p of rows) html += `<tr><td><b>${p.imei}</b><br><span class="muted">#${p.id}</span></td><td>${p.revenda_nome}</td><td>${brl(p.valor)}</td><td>${statusBadge(p.status)}</td><td>${p.criado_em || '-'}</td><td>${pedidoActions(p, `/admin/servico/${req.params.id}/imeis`)}</td></tr>`;
+  html += '</table></div>';
   res.send(page('IMEIs', html));
 });
 
