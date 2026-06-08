@@ -1,35 +1,41 @@
-# CentralUnlocker V3 - Fix Revenda Número
+# CentralUnlocker - Cadastro de Revenda pelo WhatsApp
 
-## Render
-Build Command: `npm install`
-Start Command: `npm start`
+## Novo fluxo
 
-## Variáveis
-- PIXGO_API_KEY=sua chave PixGo
-- ADMIN_NUMBER=seu número com DDI e DDD. Ex: 5575999999999
-- DB_PATH=/data/database.db
-- ADMIN_PANEL_USER=admin
-- ADMIN_PANEL_PASS=sua senha
-- BASE_URL=https://seuapp.onrender.com
+O admin pode cadastrar revenda direto na conversa do WhatsApp com o bot.
 
-## Correções desta versão
-- Normaliza WhatsApp da revenda automaticamente para 55 + DDD + número.
-- Reconhece revenda mesmo se o WhatsApp/Baileys enviar formatos diferentes.
-- Corrige busca da revenda no comando `menu`.
-- Envia boas-vindas e tutorial ao cadastrar revenda.
-- Botão para reenviar boas-vindas no painel de revendas.
-- Mantém comando `pagar valor` livre para qualquer pessoa.
-- Mantém painel web `/admin`.
+### Opção 1: cadastro guiado
+Envie para o bot:
 
-## Comandos
-Cliente final:
-`pagar 100`
+```txt
+cadastrar revenda
+```
 
-Revenda:
-`menu`
+O bot vai perguntar:
+1. Nome da revenda
+2. WhatsApp da revenda com DDD
 
-Admin WhatsApp:
-`backup`
+Depois ele salva no banco, ativa a revenda e envia boas-vindas/tutorial para ela.
 
-Painel:
-`https://SEUAPP.onrender.com/admin`
+### Opção 2: cadastro rápido em uma linha
+Envie:
+
+```txt
+addrevenda Nome da Revenda | 5575999999999
+```
+
+Ou:
+
+```txt
+cadastrar revenda Nome da Revenda | 5575999999999
+```
+
+### Exemplo
+```txt
+addrevenda João Unlock | 75999999999
+```
+
+O sistema normaliza automaticamente para Brasil `55 + DDD + número`.
+
+## Observação
+Apenas o número configurado na variável `ADMIN_NUMBER` consegue cadastrar revendas pelo WhatsApp.

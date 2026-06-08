@@ -390,6 +390,9 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   }
 
   if (admin) {
+    // Cadastro de revenda direto na conversa do WhatsApp
+    if (await tratarCadastroRevendaConversa(from, textoOriginal, texto)) return;
+
     // Painel admin pelo WhatsApp removido. Mantém apenas backup manual e cadastro rápido de serviço em conversas de clientes.
     if (texto === 'backup') {
       const arq = await criarBackup();
@@ -459,9 +462,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
       const ultima = ultimoErroImei.get(from) || 0;
       if (agora - ultima > 15000) {
         ultimoErroImei.set(from, agora);
-        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.
-
-Digite cancelar para sair.');
+        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.\n\nDigite cancelar para sair.');
       }
       return;
     }
@@ -584,6 +585,75 @@ async function enviarBoasVindasTutorialRevenda(revenda) {
     console.log('❌ ERRO BOAS-VINDAS:', e.message);
     return false;
   }
+}
+
+async function cadastrarRevendaDireto(from, nome, whatsapp) {
+  nome = String(nome || '').trim();
+  const w = normalizarNumeroWhatsApp(whatsapp);
+  if (!nome || nome.length < 2) {
+    await enviarTexto(from, '❌ Nome inválido. Envie o nome da revenda.');
+    return null;
+  }
+  if (!w || !/^55\d{10,11}$/.test(w)) {
+    await enviarTexto(from, '❌ Número inválido. Envie com DDD.\n\nExemplo:\n75999999999\nou\n5575999999999');
+    return null;
+  }
+
+  const jid = numberToJid(w);
+  let revenda = await get('SELECT * FROM revendas WHERE whatsapp=? OR jid=?', [w, jid]);
+
+  if (revenda) {
+    await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, w, jid, revenda.id]);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  } else {
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha']);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+  }
+
+  await enviarTexto(from, `✅ *REVENDA CADASTRADA*\n\n🏪 Nome: ${revenda.nome}\n📞 WhatsApp: ${revenda.whatsapp}\n🆔 ID: #${revenda.id}\n📍 Status: ${revenda.status}\n\nO bot vai enviar as boas-vindas para a revenda agora.`);
+  const enviado = await enviarBoasVindasTutorialRevenda(revenda);
+  if (!enviado) await enviarTexto(from, '⚠️ Revenda salva, mas não consegui enviar mensagem para ela. Peça para ela mandar uma mensagem para o bot primeiro e reenvie as boas-vindas pelo painel.');
+  return revenda;
+}
+
+async function tratarCadastroRevendaConversa(from, textoOriginal, texto) {
+  const sess = adminSessao.get(from);
+
+  // Formato rápido em uma linha:
+  // addrevenda Nome | 5575999999999
+  // cadastrar revenda Nome | 5575999999999
+  const rapido = textoOriginal.match(/^(?:addrevenda|cadastrar\s+revenda)\s+(.+?)\s*\|\s*([+\d\s().-]+)$/i);
+  if (rapido) {
+    adminSessao.delete(from);
+    await cadastrarRevendaDireto(from, rapido[1], rapido[2]);
+    return true;
+  }
+
+  if (['cadastrar revenda', 'cadastro revenda', 'nova revenda', 'addrevenda'].includes(texto)) {
+    pedidoSessao.delete(from);
+    adminSessao.set(from, { etapa: 'cadastro_revenda_nome' });
+    await enviarTexto(from, `🏪 *CADASTRAR REVENDA*\n\nEnvie o *nome da revenda*.\n\nExemplo:\nJoão Unlock\n\nPara cancelar, digite *cancelar*.`);
+    return true;
+  }
+
+  if (sess?.etapa === 'cadastro_revenda_nome') {
+    const nome = textoOriginal.trim();
+    if (nome.length < 2) {
+      await enviarTexto(from, '❌ Nome muito curto. Envie o nome da revenda.');
+      return true;
+    }
+    adminSessao.set(from, { etapa: 'cadastro_revenda_numero', nome });
+    await enviarTexto(from, `✅ Nome salvo: *${nome}*\n\nAgora envie o WhatsApp da revenda com DDD.\n\nExemplo:\n75999999999\nou\n5575999999999`);
+    return true;
+  }
+
+  if (sess?.etapa === 'cadastro_revenda_numero') {
+    await cadastrarRevendaDireto(from, sess.nome, textoOriginal);
+    adminSessao.delete(from);
+    return true;
+  }
+
+  return false;
 }
 
 async function tratarAdminWhatsApp(from, textoOriginal, texto, nomeContato) {
