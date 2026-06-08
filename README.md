@@ -25,3 +25,8 @@ menu
 ## Observação
 
 O bot continua ignorando mensagens enviadas pelo próprio WhatsApp, exceto comandos seguros de cadastro/ativação de revenda.
+
+
+## Correção IMEI
+- O sistema agora aceita somente IMEI com exatamente 15 dígitos.
+- Validação aplicada no fluxo da revenda, cadastro rápido de serviço, edição pelo WhatsApp e edição pelo painel.

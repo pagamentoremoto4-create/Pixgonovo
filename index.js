@@ -469,7 +469,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
 
   if (sess?.etapa === 'imei') {
     const imei = onlyDigits(textoOriginal);
-    if (!/^\d{14,17}$/.test(imei)) {
+    if (!/^\d{15}$/.test(imei)) {
       const agora = Date.now();
       const ultima = ultimoErroImei.get(from) || 0;
       if (agora - ultima > 15000) {
@@ -497,7 +497,7 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   const imei = onlyDigits(partes[partes.length - 1]);
   const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
   const nomeServico = partes.slice(1, -2).join(' ').trim();
-  if (!nomeServico || !valor || !/^\d{14,17}$/.test(imei)) {
+  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
     await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
     return true;
   }
@@ -804,7 +804,7 @@ async function adminCancelarPedido(from, id, motivo) {
 }
 async function adminEditarIMEI(from, id, novoImei) {
   novoImei = onlyDigits(novoImei || '');
-  if (!/^\d{14,17}$/.test(novoImei)) { await enviarTexto(from, 'Use: editarimei ID novoimei'); return; }
+  if (!/^\d{15}$/.test(novoImei)) { await enviarTexto(from, 'Use: editarimei ID IMEI com 15 dígitos'); return; }
   await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novoImei, id]);
   await enviarTexto(from, `✅ IMEI do pedido #${id} atualizado para ${novoImei}.`);
 }
@@ -980,7 +980,7 @@ app.get('/admin/pedidos', async (req, res) => {
   <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar IMEI, WhatsApp ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
   res.send(page('Pedidos', html));
 });
-app.post('/admin/pedido/:id/editarimei', async (req, res) => { const imei = onlyDigits(req.body.imei); if (/^\d{14,17}$/.test(imei)) await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [imei, req.params.id]); res.redirect(req.get('referer') || '/admin/pedidos'); });
+app.post('/admin/pedido/:id/editarimei', async (req, res) => { const imei = onlyDigits(req.body.imei); if (/^\d{15}$/.test(imei)) await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [imei, req.params.id]); res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/processo', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'processo'); } res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) await finalizarPedido(p); res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'cancelar', motivo); } res.redirect(req.get('referer') || '/admin/pedidos'); });
