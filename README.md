@@ -1,35 +1,35 @@
-# CentralUnlocker V3 Corrigido
-
-## Correções desta versão
-- Corrigido cadastro `servico nome valor imei` para pegar o chat/conversa do cliente.
-- Melhora para casos em que o WhatsApp usa `@lid`, tentando priorizar JID de telefone real quando disponível.
-- Removido o painel Admin pelo WhatsApp (`/admin`).
-- Mantido comando `backup` para o ADMIN.
+# CentralUnlocker V3 - Fix Revenda Número
 
 ## Render
 Build Command: `npm install`
 Start Command: `npm start`
 
-## Environment Variables
+## Variáveis
 - PIXGO_API_KEY=sua chave PixGo
-- ADMIN_NUMBER=seu número com DDI e DDD, somente números
+- ADMIN_NUMBER=seu número com DDI e DDD. Ex: 5575999999999
 - DB_PATH=/data/database.db
 - ADMIN_PANEL_USER=admin
 - ADMIN_PANEL_PASS=sua senha
+- BASE_URL=https://seuapp.onrender.com
 
-Crie um Persistent Disk no Render:
-Mount Path: `/data`
-Size: 1 GB
+## Correções desta versão
+- Normaliza WhatsApp da revenda automaticamente para 55 + DDD + número.
+- Reconhece revenda mesmo se o WhatsApp/Baileys enviar formatos diferentes.
+- Corrige busca da revenda no comando `menu`.
+- Envia boas-vindas e tutorial ao cadastrar revenda.
+- Botão para reenviar boas-vindas no painel de revendas.
+- Mantém comando `pagar valor` livre para qualquer pessoa.
+- Mantém painel web `/admin`.
 
-## Painel Web
-Abra: `https://SEU-APP.onrender.com/admin`
-
-## WhatsApp
+## Comandos
 Cliente final:
-`pagar 180`
-
-Cadastro rápido pelo admin na conversa do cliente:
-`servico desbloqueio tim 180 356789123456789`
+`pagar 100`
 
 Revenda:
 `menu`
+
+Admin WhatsApp:
+`backup`
+
+Painel:
+`https://SEUAPP.onrender.com/admin`
