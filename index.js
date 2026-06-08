@@ -336,10 +336,35 @@ async function iniciarWhatsApp() {
       if (isGroup(msg.key?.remoteJid)) return;
 
       const textoFromMe = getText(msg).trim();
+
       if (/^(cadastrar|ativar)\s+revenda(\s+.+)?$/i.test(textoFromMe)) {
-        try { await cadastrarRevendaPelaConversaAdmin(msg.key.remoteJid, textoFromMe); }
-        catch (e) { console.log('❌ ERRO CADASTRO FROMME:', e); await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar revenda.'); }
+        try {
+          await cadastrarRevendaPelaConversaAdmin(msg.key.remoteJid, textoFromMe);
+        } catch (e) {
+          console.log('❌ ERRO CADASTRO FROMME:', e);
+          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar revenda.');
+        }
+        return;
       }
+
+      // Permite que o admin cadastre serviço para cliente final direto na conversa do cliente.
+      // Exemplo: servico desbloqueio tim 180 356789123456789
+      if (/^servico\s+/i.test(textoFromMe)) {
+        try {
+          await tratarServicoClienteFinal(
+            msg,
+            msg.key.remoteJid,
+            textoFromMe,
+            textoFromMe.toLowerCase(),
+            'Cliente'
+          );
+        } catch (e) {
+          console.log('❌ ERRO SERVIÇO CLIENTE FROMME:', e);
+          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar serviço do cliente.');
+        }
+        return;
+      }
+
       return;
     }
 
