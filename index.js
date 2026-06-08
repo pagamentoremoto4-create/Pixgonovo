@@ -35,17 +35,14 @@ if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 let sock = null;
 let qrCodeBase64 = null;
 let conectado = false;
-let pendingRestoreFile = null;
 let db = new sqlite3.Database(DB_PATH);
 
-const cadastroSessao = new Map();
 const pedidoSessao = new Map();
+const adminSessao = new Map();
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) reject(err); else resolve(this);
-    });
+    db.run(sql, params, function (err) { err ? reject(err) : resolve(this); });
   });
 }
 function get(sql, params = []) {
@@ -60,14 +57,23 @@ function all(sql, params = []) {
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
 function jidToNumber(jid) { return onlyDigits(String(jid || '').split('@')[0]); }
+function numberToJid(number) { return `${onlyDigits(number)}@s.whatsapp.net`; }
 function brl(v) { return Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
-function nowBR(d = new Date()) { return d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function today() { return new Date().toISOString().slice(0, 10); }
-function getText(msg) {
-  return msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || '';
-}
+function dateSql(d = new Date()) { return d.toISOString().slice(0, 19).replace('T', ' '); }
+function getText(msg) { return msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || ''; }
 function isGroup(jid) { return String(jid || '').endsWith('@g.us'); }
-function isAdminJid(jid) { return ADMIN_NUMBER && jidToNumber(jid) === ADMIN_NUMBER; }
+function isAdminNumber(n) { return ADMIN_NUMBER && onlyDigits(n) === ADMIN_NUMBER; }
+function isAdminJid(jid) { return isAdminNumber(jidToNumber(jid)); }
+function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
+function statusClass(status) { return String(status||'').replace(/\s+/g,'-').toLowerCase(); }
+
+async function addColumnIfMissing(table, column, definition) {
+  const cols = await all(`PRAGMA table_info(${table})`);
+  if (!cols.some(c => c.name === column)) {
+    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 async function initDB() {
   await run(`CREATE TABLE IF NOT EXISTS revendas (
@@ -75,8 +81,8 @@ async function initDB() {
     nome TEXT NOT NULL,
     whatsapp TEXT,
     jid TEXT,
-    login TEXT UNIQUE NOT NULL,
-    senha TEXT NOT NULL,
+    login TEXT UNIQUE,
+    senha TEXT,
     status TEXT DEFAULT 'ATIVA',
     saldo REAL DEFAULT 0,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -100,6 +106,10 @@ async function initDB() {
 
   await run(`CREATE TABLE IF NOT EXISTS pedidos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    origem TEXT DEFAULT 'REVENDA',
+    cliente_nome TEXT,
+    cliente_numero TEXT,
+    cliente_jid TEXT,
     revenda_id INTEGER,
     revenda_nome TEXT,
     revenda_jid TEXT,
@@ -120,6 +130,8 @@ async function initDB() {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     revenda_id INTEGER,
     revenda_nome TEXT,
+    cliente_jid TEXT,
+    cliente_numero TEXT,
     valor REAL,
     origem TEXT,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
@@ -129,10 +141,24 @@ async function initDB() {
     payment_id TEXT PRIMARY KEY,
     revenda_id INTEGER,
     revenda_jid TEXT,
+    cliente_jid TEXT,
+    cliente_numero TEXT,
     valor REAL,
     status TEXT DEFAULT 'pending',
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  await addColumnIfMissing('revendas', 'jid', 'TEXT');
+  await addColumnIfMissing('revendas', 'login', 'TEXT');
+  await addColumnIfMissing('revendas', 'senha', 'TEXT');
+  await addColumnIfMissing('pedidos', 'origem', "TEXT DEFAULT 'REVENDA'");
+  await addColumnIfMissing('pedidos', 'cliente_nome', 'TEXT');
+  await addColumnIfMissing('pedidos', 'cliente_numero', 'TEXT');
+  await addColumnIfMissing('pedidos', 'cliente_jid', 'TEXT');
+  await addColumnIfMissing('pix_pedidos', 'cliente_jid', 'TEXT');
+  await addColumnIfMissing('pix_pedidos', 'cliente_numero', 'TEXT');
+  await addColumnIfMissing('pagamentos', 'cliente_jid', 'TEXT');
+  await addColumnIfMissing('pagamentos', 'cliente_numero', 'TEXT');
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -154,30 +180,12 @@ function basicAuth(req, res, next) {
   return res.status(401).send('Login necessário');
 }
 
-function active(path) { return ''; }
-
 function page(title, body) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
   <style>
-  :root{--bg:#07111d;--panel:#111b28;--panel2:#152231;--line:#243244;--text:#f3f4f6;--muted:#94a3b8;--green:#16c784;--blue:#2563eb;--orange:#f59e0b;--red:#ef4444;--purple:#8b5cf6}
-  *{box-sizing:border-box} body{font-family:Inter,Arial,sans-serif;background:radial-gradient(circle at top left,#102033 0,#07111d 45%,#020617 100%);color:var(--text);margin:0} a{color:inherit;text-decoration:none}.layout{display:flex;min-height:100vh}.side{width:260px;background:linear-gradient(180deg,#05101d,#020617);border-right:1px solid #102033;position:fixed;left:0;top:0;bottom:0;padding:22px 14px}.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:22px;margin-bottom:32px}.lock{background:#052e1a;color:#22c55e;border:1px solid #14532d;border-radius:12px;padding:8px}.brand span{display:block;line-height:1.05}.brand b{color:#22c55e}.menu{display:flex;flex-direction:column;gap:8px}.menu a{padding:14px 16px;border-radius:12px;color:#dbeafe;display:flex;gap:12px;align-items:center;font-weight:600}.menu a:hover,.menu a.active{background:linear-gradient(90deg,#064e3b,#052e2b);color:#22c55e;box-shadow:inset 4px 0 #22c55e}.ver{position:absolute;bottom:20px;left:18px;right:18px;color:#94a3b8;font-size:13px}.main{margin-left:260px;width:calc(100% - 260px)}.topbar{height:72px;background:rgba(15,23,42,.72);border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;padding:0 28px;position:sticky;top:0;z-index:5;backdrop-filter:blur(10px)}.hamb{font-size:26px}.admin{display:flex;align-items:center;gap:10px;color:#e5e7eb}.online{color:#22c55e;font-size:12px}.wrap{max-width:1680px;margin:0 auto;padding:22px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}.card{background:linear-gradient(180deg,var(--panel),#0f172a);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 10px 30px rgba(0,0,0,.18)}.metric{display:flex;align-items:center;gap:14px;min-height:118px}.icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px}.i-orange{background:#f59e0b}.i-blue{background:#2563eb}.i-green{background:#16a34a}.i-red{background:#dc2626}.i-purple{background:#7c3aed}.i-cyan{background:#0891b2}.metric h2{margin:0;font-size:14px;text-transform:uppercase;color:#cbd5e1}.metric h1{margin:5px 0 0;font-size:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.btn{display:inline-flex;align-items:center;gap:6px;background:#2563eb;color:white;padding:9px 12px;border-radius:8px;border:0;cursor:pointer;margin:3px;font-weight:700}.btn.red{background:#dc2626}.btn.green{background:#16a34a}.btn.gray{background:#475569}.btn.orange{background:#f59e0b;color:#111827}.btn.small{padding:7px 9px;font-size:13px}.btn.iconbtn{width:34px;height:34px;justify-content:center;padding:0}input,select,textarea{padding:10px;border-radius:8px;border:1px solid #334155;background:#020617;color:#e5e7eb;width:100%;box-sizing:border-box}input.inline{width:160px}.searchbar{display:flex;gap:10px;align-items:center;max-width:520px}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:rgba(15,23,42,.75)}table{width:100%;border-collapse:collapse;min-width:900px}td,th{border-bottom:1px solid #273449;padding:12px;text-align:left;vertical-align:middle}th{font-size:13px;text-transform:uppercase;color:#e5e7eb;background:#152231}td{color:#f8fafc}.muted{color:#94a3b8}.status{font-weight:800;border-radius:6px;padding:6px 10px;display:inline-block;font-size:12px}.st-pendente{background:#3b2b07;color:#fbbf24;border:1px solid #92400e}.st-processo{background:#0b2c5f;color:#60a5fa;border:1px solid #1d4ed8}.st-finalizado{background:#063b25;color:#22c55e;border:1px solid #15803d}.st-cancelado{background:#3b0a0a;color:#f87171;border:1px solid #991b1b}.actions{display:flex;gap:6px;align-items:center;white-space:nowrap}.actions form{display:inline-flex;gap:5px;align-items:center;margin:0}.section-title{display:flex;align-items:center;gap:8px;margin:18px 0 12px}.pill{background:#052e1a;color:#22c55e;border-radius:999px;padding:4px 10px;font-weight:800}.listitem{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #273449;padding:13px 0}.listitem:last-child{border-bottom:0}@media(max-width:900px){.side{position:relative;width:100%;height:auto}.layout{display:block}.main{margin-left:0;width:100%}.topbar{position:relative}.grid{grid-template-columns:1fr}.searchbar{max-width:none}.wrap{padding:12px}}
-  </style></head><body><div class="layout"><aside class="side"><div class="brand"><div class="lock">🔒</div><span>CENTRAL<br><b>UNLOCKER</b></span></div><nav class="menu"><a href="/admin">🏠 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/backup">☁️ Backup</a></nav><div class="ver"><b>CENTRAL <span style="color:#22c55e">UNLOCKER</span></b><br>Versão 2.1.0</div></aside><main class="main"><div class="topbar"><div class="hamb">☰</div><div class="admin"><div><b>Administrador</b><br><span class="online">● online</span></div><div style="font-size:34px">👤</div></div></div><div class="wrap">${body}</div></main></div></body></html>`;
-}
-
-function statusBadge(status) {
-  const st = String(status || '').toUpperCase();
-  const cls = st === 'EM PROCESSO' ? 'st-processo' : st === 'FINALIZADO' ? 'st-finalizado' : st === 'CANCELADO' ? 'st-cancelado' : 'st-pendente';
-  return `<span class="status ${cls}">${st}</span>`;
-}
-
-function pedidoActions(p, returnTo = '/admin/pedidos') {
-  const rt = String(returnTo || '/admin/pedidos').replace(/"/g, '&quot;');
-  return `<div class="actions">
-    <form method="post" action="/admin/pedido/${p.id}/editar-imei"><input type="hidden" name="returnTo" value="${rt}"><input class="inline" name="imei" value="${p.imei || ''}" placeholder="IMEI"><button class="btn iconbtn" title="Editar IMEI">✏️</button></form>
-    <form method="post" action="/admin/pedido/${p.id}/processo"><input type="hidden" name="returnTo" value="${rt}"><button class="btn orange iconbtn" title="Em Processo">🔄</button></form>
-    <form method="post" action="/admin/pedido/${p.id}/finalizar"><input type="hidden" name="returnTo" value="${rt}"><button class="btn green iconbtn" title="Finalizar">✅</button></form>
-    <form method="post" action="/admin/pedido/${p.id}/cancelar"><input type="hidden" name="returnTo" value="${rt}"><input class="inline" name="motivo" placeholder="Motivo"><button class="btn red iconbtn" title="Cancelar">❌</button></form>
-  </div>`;
+  :root{--bg:#07111f;--panel:#0b1728;--panel2:#101d32;--line:#21324d;--txt:#e5eefc;--muted:#8fa2bf;--blue:#2563eb;--green:#16a34a;--red:#dc2626;--orange:#f97316;--cyan:#06b6d4}*{box-sizing:border-box}body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#06111f,#111827);color:var(--txt);margin:0}a{color:#93c5fd;text-decoration:none}.layout{display:flex;min-height:100vh}.side{width:245px;background:#07101d;border-right:1px solid var(--line);padding:18px;position:sticky;top:0;height:100vh}.brand{font-weight:800;font-size:20px;margin-bottom:24px;color:white}.side a{display:block;padding:12px 14px;border-radius:12px;margin:6px 0;color:#cbd5e1}.side a:hover{background:#13243c}.main{flex:1}.topbar{height:64px;background:rgba(15,23,42,.7);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;backdrop-filter:blur(8px);z-index:2}.wrap{max-width:1400px;margin:0 auto;padding:22px}.card{background:rgba(15,29,50,.9);border:1px solid var(--line);border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 10px 30px rgba(0,0,0,.2)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.metric h2{font-size:15px;color:var(--muted);margin:0 0 10px}.metric h1{margin:0;font-size:32px}.btn{display:inline-block;background:var(--blue);color:white!important;padding:9px 12px;border-radius:10px;border:0;cursor:pointer;margin:3px;font-weight:700}.btn.red{background:var(--red)}.btn.green{background:var(--green)}.btn.gray{background:#475569}.btn.orange{background:var(--orange)}.btn.cyan{background:var(--cyan)}input,select,textarea{padding:10px;border-radius:10px;border:1px solid #334155;background:#020617;color:#e5e7eb;width:100%;box-sizing:border-box;margin:4px 0}table{width:100%;border-collapse:separate;border-spacing:0 8px}th{color:#9fb1ce;font-size:13px;text-transform:uppercase;text-align:left;padding:8px}td{background:#0f1b2d;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:10px}td:first-child{border-left:1px solid var(--line);border-radius:12px 0 0 12px}td:last-child{border-right:1px solid var(--line);border-radius:0 12px 12px 0}.muted{color:var(--muted)}.status{font-weight:800}.status.pendente{color:#facc15}.status.em-processo{color:#fb923c}.status.finalizado{color:#22c55e}.status.cancelado{color:#f87171}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.search{display:flex;gap:8px;align-items:end;flex-wrap:wrap}.search>div{min-width:220px}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#17243b;color:#cbd5e1;font-size:12px}
+  @media(max-width:800px){.layout{display:block}.side{width:auto;height:auto;position:relative}.side a{display:inline-block}.topbar{position:relative}.wrap{padding:12px}table{font-size:12px}.btn{padding:8px 9px}}
+  </style></head><body><div class="layout"><aside class="side"><div class="brand">🏢 CentralUnlocker</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><a href="/admin/logout">🚪 Sair</a></aside><main class="main"><div class="topbar"><b>${title}</b><span class="muted">Admin</span></div><div class="wrap">${body}</div></main></div></body></html>`;
 }
 
 async function precoDaRevenda(revendaId, servicoId) {
@@ -187,21 +195,28 @@ async function precoDaRevenda(revendaId, servicoId) {
   return Number(s?.preco_padrao || 0);
 }
 
+async function getRevendaByJidOrNumber(jid) {
+  const numero = jidToNumber(jid);
+  let r = await get('SELECT * FROM revendas WHERE status="ATIVA" AND (jid=? OR whatsapp=?)', [jid, numero]);
+  if (!r) return null;
+  if (r.jid !== jid) await run('UPDATE revendas SET jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [jid, r.id]);
+  return await get('SELECT * FROM revendas WHERE id=?', [r.id]);
+}
+
+async function textoMenuRevenda(revenda) {
+  return `🏪 ${revenda.nome}\n\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nDigite uma opção:`;
+}
 async function listarServicosParaRevenda(revenda) {
   const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-  let texto = `✅ Bem-vindo ${revenda.nome}\n\n`;
+  let texto = `🛠 Serviços Disponíveis\n\n`;
   for (let i = 0; i < servicos.length; i++) {
     const preco = await precoDaRevenda(revenda.id, servicos[i].id);
     texto += `${i + 1} - ${servicos[i].nome} - ${brl(preco)}\n`;
   }
-  texto += '\nDigite o número do serviço.';
+  texto += '\nDigite o número do serviço:';
   return texto;
 }
-
-async function enviarTexto(to, text) {
-  if (!sock || !to) return;
-  await sock.sendMessage(to, { text });
-}
+async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
 
 async function iniciarWhatsApp() {
   await initDB();
@@ -219,129 +234,102 @@ async function iniciarWhatsApp() {
       if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsApp(), 5000);
     }
   });
-
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
-    const from = msg.key.remoteJid;
-    if (isGroup(from)) return;
+    if (!msg.message) return;
+    const remote = msg.key.remoteJid;
+    if (isGroup(remote)) return;
     const textoOriginal = getText(msg).trim();
     if (!textoOriginal) return;
     const texto = textoOriginal.toLowerCase();
-    console.log('📩', from, textoOriginal);
-    try { await tratarWhatsApp(from, textoOriginal, texto); }
-    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
+    console.log('📩', remote, 'fromMe=', msg.key.fromMe, textoOriginal);
+    try { await tratarWhatsApp(msg, remote, textoOriginal, texto); }
+    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(remote, '❌ Erro interno. Tente novamente.'); }
   });
 }
 
-async function tratarWhatsApp(from, textoOriginal, texto) {
+async function tratarWhatsApp(msg, from, textoOriginal, texto) {
   const numero = jidToNumber(from);
   const partes = textoOriginal.trim().split(/\s+/);
+  const fromMe = !!msg.key.fromMe;
+  const nomeContato = msg.pushName || 'Cliente';
 
-  if (isAdminJid(from) && texto === 'backup') {
-    const arq = await criarBackup();
-    await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`);
-    return;
-  }
-
-  // PIX livre para cliente final, revenda ou qualquer contato: pagar 50 / pagar 180
-  if (texto.startsWith('pagar') && partes[1]) {
-    const valor = Number(String(partes[1] || '0').replace(',', '.'));
-    if (!valor || valor < 10) { await enviarTexto(from, `❌ Informe um valor mínimo de R$10.
-
-Exemplo:
-pagar 180`); return; }
-    await enviarTexto(from, '⏳ Gerando PIX...');
-    const pix = await gerarPix(valor, from);
-    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
-    const paymentId = pix?.data?.payment_id || pix?.payment_id;
-    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.qr_code;
-    await enviarTexto(from, `✅ PIX GERADO
-
-💰 Valor: ${brl(valor)}
-
-Vou enviar o copia e cola na próxima mensagem.
-⏳ Expira em 20 minutos.`);
-    await enviarTexto(from, qrCode || 'PIX indisponível');
-    if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, valor, status) VALUES (?, NULL, ?, ?, "pending")', [paymentId, from, valor]);
-      verificarPagamentoLivre(paymentId, from, valor);
-    }
-    return;
-  }
-
-  if (texto === '/registrar' || texto === 'registrar') {
-    cadastroSessao.set(from, { etapa: 'login' });
-    await enviarTexto(from, 'Login:');
-    return;
-  }
-
-  const cad = cadastroSessao.get(from);
-  if (cad?.etapa === 'login') {
-    cad.login = textoOriginal.trim(); cad.etapa = 'senha'; cadastroSessao.set(from, cad);
-    await enviarTexto(from, 'Senha:');
-    return;
-  }
-  if (cad?.etapa === 'senha') {
-    const rev = await get('SELECT * FROM revendas WHERE login=? AND senha=? AND status="ATIVA"', [cad.login, textoOriginal.trim()]);
-    if (!rev) { cadastroSessao.delete(from); await enviarTexto(from, '❌ Login ou senha inválidos.'); return; }
-    await run('UPDATE revendas SET jid=?, whatsapp=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, numero, rev.id]);
-    cadastroSessao.delete(from);
-    const atual = await get('SELECT * FROM revendas WHERE id=?', [rev.id]);
-    await enviarTexto(from, await listarServicosParaRevenda(atual));
-    return;
-  }
-
-  let revenda = await get('SELECT * FROM revendas WHERE jid=? AND status="ATIVA"', [from]);
-  if (!revenda) {
-    if (texto === 'menu') await enviarTexto(from, 'Digite /registrar para acessar.');
-    return;
-  }
-
-  if (texto === 'servicos' || texto === '/servicos' || texto === 'menu') {
-    await enviarTexto(from, await listarServicosParaRevenda(revenda));
-    return;
-  }
-
-  if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') {
-    await enviarTexto(from, `🏪 ${revenda.nome}\n\n💳 Saldo em aberto:\n${brl(revenda.saldo)}\n\n🏢 CentralUnlocker`);
-    return;
-  }
-
+  // PIX LIVRE PARA QUALQUER PESSOA
   if (texto.startsWith('pagar')) {
-    const valor = Number(partes[1]?.replace(',', '.')) || Number(revenda.saldo || 0);
-    if (!valor || valor < 10) { await enviarTexto(from, '❌ Valor mínimo R$10.'); return; }
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo R$10.\n\nExemplo:\npagar 180'); return; }
     await enviarTexto(from, '⏳ Gerando PIX...');
     const pix = await gerarPix(valor, from);
     if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
-    const paymentId = pix?.data?.payment_id || pix?.payment_id;
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.qr_code;
     await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
     await enviarTexto(from, qrCode || 'PIX indisponível');
     if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, valor, status) VALUES (?, ?, ?, ?, "pending")', [paymentId, revenda.id, from, valor]);
-      verificarPagamento(paymentId, revenda.id, from, valor);
+      const rev = await getRevendaByJidOrNumber(from);
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, cliente_numero, valor, status) VALUES (?, ?, ?, ?, ?, ?, "pending")', [paymentId, rev ? rev.id : null, rev ? from : null, from, numero, valor]);
+      verificarPagamento(paymentId, rev ? rev.id : null, from, valor);
     }
     return;
   }
 
-  const sessPedido = pedidoSessao.get(from);
-  if (sessPedido?.etapa === 'imei') {
+  // ADMIN WHATSAPP
+  if ((isAdminJid(from) || fromMe) && texto === '/admin') { await enviarTexto(from, await adminMenuResumo()); return; }
+  if (isAdminJid(from) && texto === 'backup') { const arq = await criarBackup(); await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`); return; }
+
+  // CADASTRO RÁPIDO DE CLIENTE FINAL: servico nome do servico valor imei
+  if (fromMe && texto.startsWith('servico ')) {
+    const imei = onlyDigits(partes[partes.length - 1]);
+    const valor = Number(String(partes[partes.length - 2] || '0').replace(',', '.'));
+    const nomeServico = partes.slice(1, -2).join(' ').trim();
+    if (!nomeServico || !valor || !/^\d{14,17}$/.test(imei)) {
+      await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
+      return;
+    }
+    const serv = await acharOuCriarServico(nomeServico, valor);
+    const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
+    if (duplicado) { await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return; }
+    await run(`INSERT INTO pedidos (origem, cliente_nome, cliente_numero, cliente_jid, servico_id, servico_nome, imei, valor, status)
+      VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [nomeContato, numero, from, serv.id, serv.nome, imei, valor]);
+    await enviarTexto(from, `✅ Serviço cadastrado\n\n🛠 ${serv.nome}\n📱 ${imei}\n💰 ${brl(valor)}\n\n📍 Pendente`);
+    return;
+  }
+
+  const revenda = await getRevendaByJidOrNumber(from);
+  if (!revenda) {
+    if (texto === 'menu' || texto === 'servicos' || texto === '/servicos') await enviarTexto(from, '❌ Número não cadastrado como revenda.\n\nEntre em contato com a CentralUnlocker.');
+    return;
+  }
+
+  if (texto === 'menu' || texto === '/menu') { pedidoSessao.set(from, { etapa: 'menu' }); await enviarTexto(from, await textoMenuRevenda(revenda)); return; }
+
+  const sess = pedidoSessao.get(from);
+  if (sess?.etapa === 'menu') {
+    if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico' }); await enviarTexto(from, await listarServicosParaRevenda(revenda)); return; }
+    if (texto === '2') { pedidoSessao.delete(from); await enviarTexto(from, await textoHistoricoRevenda(revenda.id)); return; }
+    if (texto === '3') { pedidoSessao.delete(from); await enviarTexto(from, textoContaRevenda(revenda)); return; }
+  }
+
+  if (texto === 'servicos' || texto === '/servicos') { pedidoSessao.set(from, { etapa: 'servico' }); await enviarTexto(from, await listarServicosParaRevenda(revenda)); return; }
+  if (texto === 'historico' || texto === '/historico') { await enviarTexto(from, await textoHistoricoRevenda(revenda.id)); return; }
+  if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarTexto(from, textoContaRevenda(revenda)); return; }
+
+  if (sess?.etapa === 'imei') {
     const imei = onlyDigits(textoOriginal);
     if (!/^\d{14,17}$/.test(imei)) { await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.'); return; }
-    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sessPedido.servicoId]);
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
     if (duplicado) { pedidoSessao.delete(from); await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return; }
     const valor = await precoDaRevenda(revenda.id, servico.id);
-    await run(`INSERT INTO pedidos (revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, valor, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, numero, servico.id, servico.nome, imei, valor]);
+    await run(`INSERT INTO pedidos (origem, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, valor, status)
+      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, numero, servico.id, servico.nome, imei, valor]);
     pedidoSessao.delete(from);
     await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n📱 ${imei}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
     return;
   }
 
-  if (/^\d+$/.test(texto)) {
+  if ((sess?.etapa === 'servico') && /^\d+$/.test(texto)) {
     const pos = Number(texto);
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[pos - 1];
@@ -350,6 +338,33 @@ Vou enviar o copia e cola na próxima mensagem.
     await enviarTexto(from, '📱 Informe o IMEI:');
     return;
   }
+}
+
+async function acharOuCriarServico(nome, precoPadrao = 0) {
+  const normal = nome.trim().replace(/\s+/g, ' ');
+  let s = await get('SELECT * FROM servicos_catalogo WHERE lower(nome)=lower(?)', [normal]);
+  if (!s) {
+    const r = await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [normal, precoPadrao || 0]);
+    s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [r.lastID]);
+  }
+  return s;
+}
+function textoContaRevenda(revenda) {
+  return `💳 CONTA\n\n🏪 ${revenda.nome}\n\n💰 Saldo em aberto:\n${brl(revenda.saldo)}\n\nPara gerar PIX digite:\npagar valor\n\nExemplos:\npagar 100\npagar ${Number(revenda.saldo||0).toFixed(2)}`;
+}
+async function textoHistoricoRevenda(revendaId) {
+  const rows = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 20', [revendaId]);
+  if (!rows.length) return '📋 HISTÓRICO\n\nNenhum pedido encontrado.';
+  let t = '📋 HISTÓRICO\n\n';
+  for (const p of rows) t += `🛠 ${p.servico_nome}\n📱 ${p.imei}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  return t.trim();
+}
+async function adminMenuResumo() {
+  const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
+  const ep = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="EM PROCESSO"');
+  const f = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="FINALIZADO"');
+  const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas');
+  return `🏢 CENTRALUNLOCKER ADMIN\n\n📊 Dashboard\n🟡 Pendentes: ${p.qtd}\n🔄 Em Processo: ${ep.qtd}\n✅ Finalizados: ${f.qtd}\n💰 A receber: ${brl(saldo.total)}\n\nComandos rápidos:\nbackup\n\nPainel Web:\n/admin`;
 }
 
 async function gerarPix(valor, cliente) {
@@ -372,66 +387,51 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
     const status = await consultarStatus(paymentId);
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
-      const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
-      const novo = Math.max(0, Number(rev.saldo || 0) - Number(valorPix || 0));
-      await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
-      await run('INSERT INTO pagamentos (revenda_id, revenda_nome, valor, origem) VALUES (?, ?, ?, "pixgo")', [revendaId, rev.nome, valorPix]);
       await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
-      await enviarTexto(jid, `✅ Pagamento confirmado\n\n💳 Novo saldo:\n${brl(novo)}\n\n🏢 CentralUnlocker`);
+      let msg = `✅ Pagamento confirmado\n\n💰 Valor: ${brl(valorPix)}\n\n🏢 CentralUnlocker`;
+      if (revendaId) {
+        const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
+        if (rev) {
+          const novo = Math.max(0, Number(rev.saldo || 0) - Number(valorPix || 0));
+          await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
+          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, "pixgo")', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix]);
+          msg = `✅ Pagamento confirmado\n\n💰 Valor: ${brl(valorPix)}\n💳 Novo saldo:\n${brl(novo)}\n\n🏢 CentralUnlocker`;
+        }
+      } else {
+        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, "pixgo_cliente")', [jid, jidToNumber(jid), valorPix]);
+      }
+      await enviarTexto(jid, msg);
     }
     if (status?.success && status.data?.status === 'expired') {
-      clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar para gerar outro.');
-    }
-    if (tentativas >= 40) clearInterval(interval);
-  }, 30000);
-}
-
-async function verificarPagamentoLivre(paymentId, jid, valorPix) {
-  let tentativas = 0;
-  const interval = setInterval(async () => {
-    tentativas++;
-    const status = await consultarStatus(paymentId);
-    if (status?.success && status.data?.status === 'completed') {
-      clearInterval(interval);
-      await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
-      await enviarTexto(jid, `✅ Pagamento confirmado
-
-💰 Valor: ${brl(valorPix)}
-
-Obrigado pela preferência.
-
-🏢 CentralUnlocker`);
-    }
-    if (status?.success && status.data?.status === 'expired') {
-      clearInterval(interval);
-      await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]);
-      await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+      clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
     }
     if (tentativas >= 40) clearInterval(interval);
   }, 30000);
 }
 
 async function notificarPedido(pedido, tipo, motivo = '') {
-  if (!pedido.revenda_jid) return;
-  if (tipo === 'processo') {
-    await enviarTexto(pedido.revenda_jid, `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n💰 Valor: ${brl(pedido.valor)}`);
-  }
+  const jid = pedido.revenda_jid || pedido.cliente_jid;
+  if (!jid) return;
+  if (tipo === 'processo') await enviarTexto(jid, `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n💰 Valor: ${brl(pedido.valor)}`);
   if (tipo === 'finalizar') {
-    const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
-    await enviarTexto(pedido.revenda_jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Saldo:\n${brl(rev.saldo)}\n\n🏢 CentralUnlocker`);
+    if (pedido.origem === 'REVENDA') {
+      const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
+      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Saldo:\n${brl(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`);
+    } else {
+      await enviarTexto(jid, `✅ Seu serviço foi concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nDigite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`);
+    }
   }
-  if (tipo === 'cancelar') {
-    await enviarTexto(pedido.revenda_jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
-  }
+  if (tipo === 'cancelar') await enviarTexto(jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
 }
 
 // HOME/QR
 app.get('/', (req, res) => {
   if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 ESCANEIE O QR</h1><img src="${qrCodeBase64}" width="300"><p>WhatsApp > Aparelhos conectados</p></div>`));
-  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${conectado ? 'WhatsApp conectado ✅' : 'Aguardando QR...'}</p><p><a href="/admin">Acessar painel admin</a></p></div>`));
+  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${conectado ? 'WhatsApp conectado ✅' : 'Aguardando QR...'}</p><p><a class="btn" href="/admin">Acessar painel admin</a></p></div>`));
 });
 
 app.use('/admin', basicAuth);
+app.get('/admin/logout', (req, res) => res.status(401).send(page('Sair', '<h1>🚪 Sessão encerrada</h1><p>Feche o navegador para sair totalmente.</p>')));
 
 app.get('/admin', async (req, res) => {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
@@ -440,103 +440,111 @@ app.get('/admin', async (req, res) => {
   const c = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"');
   const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas');
   const rev = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
-  res.send(page('Dashboard', `<div class="top"><h1>📊 Dashboard</h1><a class="btn gray" href="/admin/pedidos">Ver pedidos</a></div><div class="grid">
-  <div class="card metric"><div class="icon i-orange">📄</div><div><h2>Pendentes</h2><h1>${p.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
-  <div class="card metric"><div class="icon i-blue">🔄</div><div><h2>Em Processo</h2><h1>${ep.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
-  <div class="card metric"><div class="icon i-green">✅</div><div><h2>Finalizados</h2><h1>${f.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
-  <div class="card metric"><div class="icon i-red">❌</div><div><h2>Cancelados</h2><h1>${c.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
-  <div class="card metric"><div class="icon i-purple">$</div><div><h2>Total a Receber</h2><h1>${brl(saldo.total)}</h1><span class="muted">Ver detalhes</span></div></div>
-  <div class="card metric"><div class="icon i-cyan">🏪</div><div><h2>Revendas Ativas</h2><h1>${rev.qtd}</h1><span class="muted">Ver detalhes</span></div></div>
+  const hoje = await get("SELECT COALESCE(SUM(valor),0) total FROM pedidos WHERE status='FINALIZADO' AND date(finalizado_em)=date('now','localtime')");
+  res.send(page('Dashboard', `<h1>📊 Dashboard</h1><div class="grid">
+  <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Total a receber</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>💵 Faturado hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
   </div>`));
 });
 
+function pedidoNome(o) { return o.origem === 'CLIENTE' ? (o.cliente_nome || 'Cliente') : (o.revenda_nome || 'Revenda'); }
+function pedidoNumero(o) { return o.origem === 'CLIENTE' ? (o.cliente_numero || '-') : (o.revenda_numero || '-'); }
+function pedidoRow(o, includeServico=true) {
+  return `<tr><td>#${o.id}</td><td>${escapeHtml(o.imei)}</td>${includeServico?`<td>${escapeHtml(o.servico_nome)}</td>`:''}<td>${escapeHtml(pedidoNome(o))}</td><td>${escapeHtml(pedidoNumero(o))}</td><td>${brl(o.valor)}</td><td class="status ${statusClass(o.status)}">${o.status}</td><td style="white-space:nowrap">
+  <form style="display:inline" method="post" action="/admin/pedido/${o.id}/editar-imei"><input name="imei" placeholder="Novo IMEI" style="width:135px"><button class="btn gray">✏️</button></form>
+  <form style="display:inline" method="post" action="/admin/pedido/${o.id}/processo"><button class="btn orange">🔄</button></form>
+  <form style="display:inline" method="post" action="/admin/pedido/${o.id}/finalizar"><button class="btn green">✅</button></form>
+  <form style="display:inline" method="post" action="/admin/pedido/${o.id}/cancelar"><input name="motivo" placeholder="Motivo" style="width:120px"><button class="btn red">❌</button></form>
+  </td></tr>`;
+}
+
 app.get('/admin/pedidos', async (req, res) => {
   const status = req.query.status || '';
-  const busca = onlyDigits(req.query.imei || '');
-  const where = [];
+  const q = (req.query.q || '').trim();
   const params = [];
+  let where = [];
   if (status) { where.push('status=?'); params.push(status); }
-  if (busca) { where.push('imei LIKE ?'); params.push(`%${busca}%`); }
-  const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 300`;
-  const rows = await all(sql, params);
+  if (q) { where.push('(imei LIKE ? OR cliente_numero LIKE ? OR cliente_nome LIKE ? OR revenda_numero LIKE ? OR revenda_nome LIKE ? OR servico_nome LIKE ?)'); for(let i=0;i<6;i++) params.push(`%${q}%`); }
+  const rows = await all(`SELECT * FROM pedidos ${where.length ? 'WHERE '+where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`, params);
   let html = `<div class="top"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
-  <div class="card"><form class="searchbar" method="get" action="/admin/pedidos"><input name="imei" placeholder="🔍 Buscar IMEI" value="${busca || ''}"><button class="btn green">Buscar</button></form></div>
-  <div class="tablewrap"><table><tr><th>IMEI</th><th>Serviço</th><th>Revenda</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>`;
-  for (const o of rows) {
-    html += `<tr><td><b>${o.imei}</b><br><span class="muted">#${o.id}</span></td><td>${o.servico_nome}</td><td>${o.revenda_nome}</td><td>${brl(o.valor)}</td><td>${statusBadge(o.status)}</td><td>${o.criado_em || '-'}</td><td>${pedidoActions(o, '/admin/pedidos' + (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : ''))}</td></tr>`;
-  }
-  html += '</table></div>';
+  <div class="card"><form class="search"><div><label>🔍 Buscar IMEI, WhatsApp, nome ou serviço</label><input name="q" value="${escapeHtml(q)}"></div><button class="btn">Buscar</button></form></div>
+  <table><tr><th>ID</th><th>IMEI</th><th>Serviço</th><th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  for (const o of rows) html += pedidoRow(o, true);
+  html += '</table>';
   res.send(page('Pedidos', html));
 });
 
 app.post('/admin/pedido/:id/editar-imei', async (req, res) => {
-  const novoImei = onlyDigits(req.body.imei || '');
-  const returnTo = req.body.returnTo || '/admin/pedidos';
-  if (/^\d{14,17}$/.test(novoImei)) {
-    await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novoImei, req.params.id]);
-  }
-  res.redirect(returnTo);
+  const imei = onlyDigits(req.body.imei || '');
+  if (/^\d{14,17}$/.test(imei)) await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [imei, req.params.id]);
+  res.redirect(req.headers.referer || '/admin/pedidos');
 });
-
 app.post('/admin/pedido/:id/processo', async (req, res) => {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (pedido) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]); await notificarPedido(pedido, 'processo'); }
-  res.redirect(req.body.returnTo || '/admin/pedidos');
+  res.redirect(req.headers.referer || '/admin/pedidos');
 });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (pedido) {
     await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]);
-    if (!pedido.cobrado) {
+    if (pedido.origem === 'REVENDA' && !pedido.cobrado) {
       await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.valor, pedido.revenda_id]);
       await run('UPDATE pedidos SET cobrado=1 WHERE id=?', [pedido.id]);
     }
     const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
     await notificarPedido(atualizado, 'finalizar');
   }
-  res.redirect(req.body.returnTo || '/admin/pedidos');
+  res.redirect(req.headers.referer || '/admin/pedidos');
 });
 app.post('/admin/pedido/:id/cancelar', async (req, res) => {
   const motivo = req.body.motivo || 'Não informado';
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (pedido) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, pedido.id]); await notificarPedido(pedido, 'cancelar', motivo); }
-  res.redirect(req.body.returnTo || '/admin/pedidos');
+  res.redirect(req.headers.referer || '/admin/pedidos');
 });
 
 app.get('/admin/revendas', async (req, res) => {
-  const rows = await all('SELECT * FROM revendas ORDER BY id DESC');
-  let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..."><input name="login" placeholder="Login" required><input name="senha" placeholder="Senha" required></div><button class="btn green">Adicionar Revenda</button></form></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Login</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>${r.id}</td><td>${r.nome}</td><td>${r.whatsapp || '-'}</td><td>${r.login}</td><td>${r.status}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`;
+  const rows = await all('SELECT * FROM revendas WHERE status!="REMOVIDA" ORDER BY id DESC');
+  let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required></div><button class="btn green">Adicionar Revenda</button></form></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
+  for (const r of rows) html += `<tr><td>${r.id}</td><td><form method="post" action="/admin/revenda/${r.id}/editar" class="search"><input name="nome" value="${escapeHtml(r.nome)}" style="width:180px"><input name="whatsapp" value="${escapeHtml(r.whatsapp||'')}" style="width:150px"><button class="btn gray">✏️</button></form></td><td>${r.whatsapp || '-'}</td><td>${r.status}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">Conta</a><form style="display:inline" method="post" action="/admin/revenda/${r.id}/toggle"><button class="btn orange">${r.status==='ATIVA'?'🔒 Bloquear':'🔓 Desbloquear'}</button></form><form style="display:inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️</button></form></td></tr>`;
   html += '</table>';
   res.send(page('Revendas', html));
 });
 app.post('/admin/revendas', async (req, res) => {
-  await run('INSERT INTO revendas (nome, whatsapp, login, senha) VALUES (?, ?, ?, ?)', [req.body.nome, onlyDigits(req.body.whatsapp), req.body.login, req.body.senha]);
+  const whatsapp = onlyDigits(req.body.whatsapp);
+  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status) VALUES (?, ?, ?, ?, ?, "ATIVA")', [req.body.nome, whatsapp, numberToJid(whatsapp), `rev_${whatsapp}`, `rev_${Date.now()}`]);
   res.redirect('/admin/revendas');
 });
+app.post('/admin/revenda/:id/editar', async (req, res) => {
+  const whatsapp = onlyDigits(req.body.whatsapp);
+  await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, whatsapp, numberToJid(whatsapp), req.params.id]);
+  res.redirect('/admin/revendas');
+});
+app.post('/admin/revenda/:id/toggle', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (r) await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [r.status === 'ATIVA' ? 'BLOQUEADA' : 'ATIVA', r.id]);
+  res.redirect('/admin/revendas');
+});
+app.post('/admin/revenda/:id/remover', async (req, res) => { await run('UPDATE revendas SET status="REMOVIDA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.params.id]); res.redirect('/admin/revendas'); });
 
 app.get('/admin/revenda/:id/precos', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
   const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-  let html = `<h1>💰 Preços - ${r.nome}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`;
-  for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${s.nome}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; }
+  let html = `<h1>💰 Preços - ${escapeHtml(r.nome)}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`;
+  for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${escapeHtml(s.nome)}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; }
   html += `</table><button class="btn green">Salvar preços</button></form>`;
   res.send(page('Preços', html));
 });
 app.post('/admin/revenda/:id/precos', async (req, res) => {
   const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1');
-  for (const s of servs) {
-    const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.'));
-    await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]);
-  }
+  for (const s of servs) await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.'))]);
   res.redirect('/admin/revendas');
 });
-
 app.get('/admin/revenda/:id/conta', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
-  const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]);
-  let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${r.nome}</h2><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><button class="btn green">Registrar Pagamento</button></form></div><h2>Pedidos</h2><table><tr><th>ID</th><th>Serviço</th><th>IMEI</th><th>Valor</th><th>Status</th></tr>`;
-  for (const p of pedidos) html += `<tr><td>#${p.id}</td><td>${p.servico_nome}</td><td>${p.imei}</td><td>${brl(p.valor)}</td><td>${p.status}</td></tr>`;
+  const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 100', [r.id]);
+  let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${escapeHtml(r.nome)}</h2><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2><table><tr><th>ID</th><th>Serviço</th><th>IMEI</th><th>Valor</th><th>Status</th></tr>`;
+  for (const p of pedidos) html += `<tr><td>#${p.id}</td><td>${escapeHtml(p.servico_nome)}</td><td>${p.imei}</td><td>${brl(p.valor)}</td><td>${p.status}</td></tr>`;
   html += '</table>';
   res.send(page('Conta', html));
 });
@@ -554,16 +562,9 @@ app.post('/admin/revenda/:id/pagamento', async (req, res) => {
 
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
-  let html = `<div class="top"><h1>🛠 Serviços</h1><a class="btn gray" href="/admin/pedidos">Ver pedidos</a></div>
-  <div class="card"><form method="post" action="/admin/servicos"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">➕ Adicionar Serviço</button></form></div>
-  <div class="tablewrap"><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`;
-  for (const sv of rows) html += `<tr><td>#${sv.id}</td><td><a href="/admin/servico/${sv.id}/imeis"><b>${sv.nome}</b></a></td><td>${brl(sv.preco_padrao)}</td><td>${sv.ativo ? '<span class="status st-finalizado">ATIVO</span>' : '<span class="status st-cancelado">INATIVO</span>'}</td><td><span class="pill">${sv.total}</span></td><td><div class="actions">
-    <form method="post" action="/admin/servico/${sv.id}/editar"><input class="inline" name="nome" value="${sv.nome}"><input class="inline" name="preco" value="${sv.preco_padrao}"><button class="btn iconbtn" title="Editar">✏️</button></form>
-    <form method="post" action="/admin/servico/${sv.id}/toggle"><button class="btn gray small">${sv.ativo ? 'Desativar' : 'Ativar'}</button></form>
-    <form method="post" action="/admin/servico/${sv.id}/excluir" onsubmit="return confirm('Excluir definitivamente este serviço e todos os pedidos vinculados?')"><button class="btn red small">🗑️ Excluir</button></form>
-    <a class="btn small" href="/admin/servico/${sv.id}/imeis">📱 IMEIs</a>
-  </div></td></tr>`;
-  html += '</table></div>';
+  let html = `<h1>🛠 Serviços</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">Adicionar Serviço</button></form></div><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`;
+  for (const s of rows) html += `<tr><td>${s.id}</td><td><a href="/admin/servico/${s.id}/imeis">${escapeHtml(s.nome)}</a></td><td>${brl(s.preco_padrao)}</td><td>${s.ativo ? 'Ativo' : 'Inativo'}</td><td>${s.total}</td><td><form style="display:inline" method="post" action="/admin/servico/${s.id}/editar"><input name="nome" value="${escapeHtml(s.nome)}" style="width:170px"><input name="preco" value="${s.preco_padrao}" style="width:90px"><button class="btn gray">✏️</button></form><form style="display:inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn orange">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form style="display:inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️</button></form></td></tr>`;
+  html += '</table>';
   res.send(page('Serviços', html));
 });
 app.post('/admin/servicos', async (req, res) => {
@@ -572,40 +573,39 @@ app.post('/admin/servicos', async (req, res) => {
   for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n\nDigite menu para ver sua tabela.`);
   res.redirect('/admin/servicos');
 });
-app.post('/admin/servico/:id/editar', async (req, res) => {
-  const nome = String(req.body.nome || '').trim();
-  const preco = Number(String(req.body.preco || '0').replace(',', '.'));
-  if (nome) await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=? WHERE id=?', [nome, preco, req.params.id]);
-  res.redirect('/admin/servicos');
-});
-app.post('/admin/servico/:id/toggle', async (req, res) => {
-  const sv = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
-  if (sv) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [sv.ativo ? 0 : 1, sv.id]);
-  res.redirect('/admin/servicos');
-});
-app.post('/admin/servico/:id/excluir', async (req, res) => {
-  await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]);
-  await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]);
-  await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]);
-  res.redirect('/admin/servicos');
-});
+app.post('/admin/servico/:id/editar', async (req, res) => { await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=? WHERE id=?', [req.body.nome, Number(String(req.body.preco||'0').replace(',', '.')), req.params.id]); res.redirect('/admin/servicos'); });
+app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
+app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
 app.get('/admin/servico/:id/imeis', async (req, res) => {
-  const sv = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
+  const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
   const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]);
-  let html = `<div class="top"><h1>📱 ${sv?.nome || 'Serviço'}</h1><a class="btn gray" href="/admin/servicos">Voltar</a></div>
-  <div class="tablewrap"><table><tr><th>IMEI</th><th>Revenda</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>`;
-  for (const p of rows) html += `<tr><td><b>${p.imei}</b><br><span class="muted">#${p.id}</span></td><td>${p.revenda_nome}</td><td>${brl(p.valor)}</td><td>${statusBadge(p.status)}</td><td>${p.criado_em || '-'}</td><td>${pedidoActions(p, `/admin/servico/${req.params.id}/imeis`)}</td></tr>`;
-  html += '</table></div>';
+  let html = `<h1>📱 IMEIs - ${escapeHtml(s.nome)}</h1><table><tr><th>ID</th><th>IMEI</th><th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  for (const p of rows) html += pedidoRow(p, false);
+  html += '</table>';
   res.send(page('IMEIs', html));
 });
 
 app.get('/admin/financeiro', async (req, res) => {
-  const revs = await all('SELECT * FROM revendas ORDER BY saldo DESC');
+  const revs = await all('SELECT * FROM revendas WHERE status!="REMOVIDA" ORDER BY saldo DESC');
   let total = 0;
-  let html = '<h1>💰 Financeiro</h1><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>';
-  for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${r.nome}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; }
+  let html = '<h1>💰 Financeiro</h1><table><tr><th>Revenda</th><th>WhatsApp</th><th>Saldo</th><th>Ação</th></tr>';
+  for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${escapeHtml(r.nome)}</td><td>${r.whatsapp||'-'}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; }
   html += `</table><div class="card"><h2>Total em aberto: ${brl(total)}</h2></div>`;
   res.send(page('Financeiro', html));
+});
+
+app.get('/admin/relatorios', async (req, res) => {
+  const tipo = req.query.tipo || 'mensal';
+  const di = req.query.di || today();
+  const df = req.query.df || today();
+  let where = "status='FINALIZADO'";
+  if (tipo === 'diario') where += " AND date(finalizado_em)=date('now','localtime')";
+  else if (tipo === 'mensal') where += " AND strftime('%Y-%m', finalizado_em)=strftime('%Y-%m','now','localtime')";
+  else if (tipo === 'anual') where += " AND strftime('%Y', finalizado_em)=strftime('%Y','now','localtime')";
+  else where += ` AND date(finalizado_em) BETWEEN date('${di}') AND date('${df}')`;
+  const fat = await get(`SELECT COUNT(*) qtd, COALESCE(SUM(valor),0) total FROM pedidos WHERE ${where}`);
+  const top = await get(`SELECT servico_nome, COUNT(*) qtd FROM pedidos WHERE ${where} GROUP BY servico_nome ORDER BY qtd DESC LIMIT 1`);
+  res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a><form class="search" style="margin-top:10px"><input type="hidden" name="tipo" value="personalizado"><div><label>Data inicial</label><input type="date" name="di" value="${di}"></div><div><label>Data final</label><input type="date" name="df" value="${df}"></div><button class="btn green">Gerar</button></form></div><div class="grid"><div class="card metric"><h2>Tipo</h2><h1>${tipo}</h1></div><div class="card metric"><h2>Faturamento</h2><h1>${brl(fat.total)}</h1></div><div class="card metric"><h2>Serviços Finalizados</h2><h1>${fat.qtd}</h1></div><div class="card metric"><h2>Serviço Mais Vendido</h2><h1>${escapeHtml(top?.servico_nome || '-')}</h1></div></div>`));
 });
 
 async function criarBackup() {
@@ -614,10 +614,7 @@ async function criarBackup() {
   console.log('✅ BACKUP CRIADO:', destino);
   return destino;
 }
-function listarBackups() {
-  if (!fs.existsSync(BACKUP_DIR)) return [];
-  return fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.db')).sort().reverse();
-}
+function listarBackups() { if (!fs.existsSync(BACKUP_DIR)) return []; return fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.db')).sort().reverse(); }
 app.get('/admin/backup', async (req, res) => {
   const backs = listarBackups();
   let html = `<h1>💾 Backup</h1><form method="post" action="/admin/backup/criar"><button class="btn green">📦 Criar Backup</button></form><table><tr><th>#</th><th>Arquivo</th><th>Ações</th></tr>`;
@@ -626,9 +623,7 @@ app.get('/admin/backup', async (req, res) => {
   res.send(page('Backup', html));
 });
 app.post('/admin/backup/criar', async (req, res) => { await criarBackup(); res.redirect('/admin/backup'); });
-app.get('/admin/backup/download/:file', (req, res) => {
-  const file = path.basename(req.params.file); res.download(path.join(BACKUP_DIR, file));
-});
+app.get('/admin/backup/download/:file', (req, res) => { res.download(path.join(BACKUP_DIR, path.basename(req.params.file))); });
 app.post('/admin/backup/restaurar', async (req, res) => {
   const file = path.basename(req.body.file || '');
   const origem = path.join(BACKUP_DIR, file);
