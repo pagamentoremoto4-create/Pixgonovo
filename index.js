@@ -393,11 +393,21 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
     await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
     await enviarTexto(from, qrCode || 'PIX indisponível');
-    const revendaPix = await getRevendaByMsg(msg, from);
-    if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, revendaPix?.id || null, revendaPix ? from : null, from, valor]);
-      verificarPagamento(paymentId, revendaPix?.id || null, from, valor);
+    try {
+      const revendaPix = await getRevendaByMsg(msg, from);
+
+      if (paymentId) {
+        await run(
+          'INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',
+          [paymentId, revendaPix?.id || null, revendaPix ? from : null, from, valor]
+        );
+
+        verificarPagamento(paymentId, revendaPix?.id || null, from, valor);
+      }
+    } catch (e) {
+      console.log('⚠️ ERRO PÓS-PIX:', e.message);
     }
+
     return;
   }
 
@@ -475,9 +485,9 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
       if (agora - ultima > 15000) {
         ultimoErroImei.set(from, agora);
         await enviarTexto(
-  from,
-  '❌ IMEI inválido.\n\n📱 O IMEI deve conter exatamente 15 dígitos.\n\nExemplo:\n356789123456789\n\nDigite cancelar para sair.'
-);
+          from,
+          '❌ IMEI inválido.\n\n📱 O IMEI deve conter exatamente 15 dígitos.\n\nExemplo:\n356789123456789\n\nDigite cancelar para sair.'
+        );
       }
       return;
     }
