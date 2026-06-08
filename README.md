@@ -27,8 +27,10 @@ Cadastrar serviço de cliente final, digitado pelo admin na conversa do cliente:
 `servico desbloqueio tim 180 356789123456789`
 
 ## WhatsApp - Revenda
-A revenda é identificada pelo número cadastrado no painel.
-Digite:
+Cadastro de revenda pelo WhatsApp do admin:
+`revenda NOME DA REVENDA | 5575988479931`
+
+Depois a revenda digita:
 `menu`
 
 Opções:
@@ -51,7 +53,7 @@ Comandos rápidos:
 - `cancelados`
 - `imei 356789123456789`
 - `cliente 5575999999999`
-- `revenda nome`
+- `revenda NOME DA REVENDA | 5575988479931`
 - `processar ID`
 - `finalizar ID`
 - `cancelar ID motivo`

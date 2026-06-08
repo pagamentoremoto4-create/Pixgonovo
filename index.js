@@ -59,8 +59,15 @@ function all(sql, params = []) {
   return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
+function normalizarNumeroWhatsApp(v) {
+  let d = onlyDigits(v);
+  d = d.replace(/^0+/, '');
+  // Se informar apenas DDD + número do Brasil, adiciona 55 automaticamente.
+  if ((d.length === 10 || d.length === 11) && !d.startsWith('55')) d = '55' + d;
+  return d;
+}
 function jidToNumber(jid) { return onlyDigits(String(jid || '').split('@')[0]); }
-function numberToJid(n) { const d = onlyDigits(n); return d ? `${d}@s.whatsapp.net` : ''; }
+function numberToJid(n) { const d = normalizarNumeroWhatsApp(n); return d ? `${d}@s.whatsapp.net` : ''; }
 function brl(v) { return Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
 function today() { return new Date().toISOString().slice(0, 10); }
 function dateBR(v) { if (!v) return '-'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
@@ -286,30 +293,90 @@ async function iniciarWhatsApp() {
   iniciandoWhatsApp = false;
 }
 
-async function cadastrarRevendaPelaConversa(from, nome) {
-  nome = String(nome || '').trim();
-  if (!nome) {
-    await enviarTexto(from, '❌ Use assim:\nrevenda NOME DA REVENDA');
-    return;
-  }
-  const numero = jidToNumber(from);
-  if (!numero || numero.length < 10) {
-    await enviarTexto(from, '❌ Não consegui identificar o número desta conversa.');
+async function cadastrarRevendaPelaConversa(from, dadosTexto) {
+  const dados = String(dadosTexto || '').replace(/^revenda\s+/i, '').split('|').map(s => s.trim());
+
+  if (dados.length < 2 || !dados[0] || !dados[1]) {
+    await enviarTexto(from, `❌ Use assim:
+
+revenda NOME DA REVENDA | WHATSAPP
+
+Exemplo:
+revenda LIFE DESBLOQUEIOS | 5575988479931`);
     return;
   }
 
-  const existente = await get('SELECT * FROM revendas WHERE (jid=? OR whatsapp=?) AND status != "REMOVIDA"', [from, numero]);
+  const nome = dados[0];
+  const whatsapp = normalizarNumeroWhatsApp(dados[1]);
+
+  if (!whatsapp || whatsapp.length < 12) {
+    await enviarTexto(from, `❌ WhatsApp inválido.
+
+Use com DDI + DDD + número.
+Exemplo:
+5575988479931`);
+    return;
+  }
+
+  const jidRevenda = numberToJid(whatsapp);
+  const existente = await get('SELECT * FROM revendas WHERE whatsapp=? AND status != "REMOVIDA"', [whatsapp]);
   let revenda;
+
   if (existente) {
-    await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numero, from, existente.id]);
+    await run(
+      'UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?',
+      [nome, whatsapp, jidRevenda, existente.id]
+    );
     revenda = await get('SELECT * FROM revendas WHERE id=?', [existente.id]);
   } else {
-    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, numero, from, `rev_${numero}`, `sem_senha_${Date.now()}`]);
+    const ins = await run(
+      'INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)',
+      [nome, whatsapp, jidRevenda, `rev_${whatsapp}`, `sem_senha_${Date.now()}`]
+    );
     revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
   }
 
-  await enviarTexto(from, `✅ Revenda cadastrada\n\n🏪 ${revenda.nome}\n📱 ${revenda.whatsapp}\n\nDigite:\nmenu`);
-  await enviarTexto(from, `📚 TUTORIAL RÁPIDO\n\nDigite:\nmenu\n\nVocê verá:\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nPara solicitar serviço:\nmenu → 1 → escolha o serviço → envie o IMEI\n\nPara pagar parcial ou total:\npagar valor\n\nExemplo:\npagar 100\n\n🏢 CentralUnlocker`);
+  await enviarTexto(from, `✅ Revenda cadastrada
+
+🏪 ${revenda.nome}
+📱 ${revenda.whatsapp}
+
+A mensagem de boas-vindas foi enviada para a revenda.`);
+
+  await enviarTexto(jidRevenda, `🎉 BEM-VINDO À CENTRALUNLOCKER
+
+Olá, ${revenda.nome}!
+
+Sua revenda foi cadastrada e ativada com sucesso.
+
+Para começar, digite:
+menu
+
+🏢 CentralUnlocker`);
+
+  await enviarTexto(jidRevenda, `📚 TUTORIAL RÁPIDO
+
+Digite:
+menu
+
+Você verá:
+1️⃣ Serviços
+2️⃣ Histórico
+3️⃣ Conta
+
+Para solicitar serviço:
+menu → 1 → escolha o serviço → envie o IMEI
+
+Para ver sua conta:
+menu → 3
+
+Para gerar PIX parcial ou total:
+pagar valor
+
+Exemplo:
+pagar 100
+
+🏢 CentralUnlocker`);
 }
 
 
@@ -325,11 +392,10 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
     return;
   }
 
-  // Cadastro de revenda direto na conversa da revenda
-  // Abra a conversa da revenda e envie: revenda NOME DA REVENDA
+  // Cadastro de revenda pelo WhatsApp do admin.
+  // Use: revenda NOME DA REVENDA | 5575988479931
   if (admin && texto.startsWith('revenda ')) {
-    const nome = textoOriginal.replace(/^revenda\s+/i, '').trim();
-    await cadastrarRevendaPelaConversa(from, nome);
+    await cadastrarRevendaPelaConversa(from, textoOriginal);
     return;
   }
 
