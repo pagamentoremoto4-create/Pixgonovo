@@ -41,6 +41,14 @@ let db = new sqlite3.Database(DB_PATH);
 const pedidoSessao = new Map();
 const adminSessao = new Map();
 
+// Proteções contra loop / mensagens duplicadas do Baileys
+const mensagensProcessadas = new Set();
+const mensagensRecentes = new Map();
+const ultimoErroImei = new Map();
+const BOT_START_TIME = Date.now();
+let iniciandoWhatsApp = false;
+let reconnectTimer = null;
+
 function run(sql, params = []) {
   return new Promise((resolve, reject) => db.run(sql, params, function (err) { err ? reject(err) : resolve(this); }));
 }
@@ -208,6 +216,8 @@ async function listarServicosTexto(revenda) {
 async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
 
 async function iniciarWhatsApp() {
+  if (iniciandoWhatsApp) return;
+  iniciandoWhatsApp = true;
   await initDB();
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
@@ -220,29 +230,108 @@ async function iniciarWhatsApp() {
       conectado = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log('❌ WHATSAPP DESCONECTOU:', statusCode);
-      if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsApp(), 5000);
+      if (statusCode !== DisconnectReason.loggedOut) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => iniciarWhatsApp(), 8000);
+      }
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
-    const from = msg.key.remoteJid;
-    if (isGroup(from)) return;
-    const textoOriginal = getText(msg).trim();
-    if (!textoOriginal) return;
-    const texto = textoOriginal.toLowerCase();
-    const admin = msg.key.fromMe || isAdminJid(from);
-    const nomeContato = msg.pushName || 'Cliente';
-    console.log('📩', from, msg.key.fromMe ? 'FROMME' : '', textoOriginal);
-    try { await tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato); }
-    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type && type !== 'notify') return;
+
+    for (const msg of messages || []) {
+      if (!msg || !msg.message) continue;
+      const from = msg.key.remoteJid;
+      if (!from || isGroup(from) || from === 'status@broadcast') continue;
+
+      const textoOriginal = getText(msg).trim();
+      if (!textoOriginal) continue;
+      const texto = textoOriginal.toLowerCase();
+
+      // Mensagens enviadas pelo próprio bot voltam como fromMe em alguns casos.
+      // Só aceitamos fromMe para comandos manuais do admin na conversa: servico, revenda e backup.
+      const fromMe = !!msg.key.fromMe;
+      const comandoManualAdmin = /^(servico\s+|revenda\s+|backup$)/i.test(textoOriginal.trim());
+      if (fromMe && !comandoManualAdmin) continue;
+
+      // Ignora histórico antigo após reiniciar no Render.
+      const tsRaw = Number(msg.messageTimestamp || 0);
+      const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
+      if (msgTime && msgTime < BOT_START_TIME - 60000) continue;
+
+      // Ignora a mesma mensagem pelo ID.
+      const msgId = `${from}:${msg.key?.id || ''}:${fromMe ? 'me' : 'in'}`;
+      if (msg.key?.id && mensagensProcessadas.has(msgId)) continue;
+      if (msg.key?.id) mensagensProcessadas.add(msgId);
+      if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
+
+      // Trava extra: se a mesma conversa mandar o mesmo texto em poucos segundos, ignora.
+      // Isso impede 100+ respostas quando o Baileys duplica eventos.
+      const recentKey = `${from}:${texto}`;
+      const agora = Date.now();
+      const ultima = mensagensRecentes.get(recentKey) || 0;
+      if (agora - ultima < 6000) continue;
+      mensagensRecentes.set(recentKey, agora);
+      if (mensagensRecentes.size > 1000) mensagensRecentes.clear();
+
+      const admin = isAdminJid(from) || (fromMe && comandoManualAdmin);
+      const nomeContato = msg.pushName || 'Cliente';
+      console.log('📩', from, fromMe ? 'FROMME' : '', textoOriginal);
+      try { await tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato); }
+      catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
+    }
   });
+
+  iniciandoWhatsApp = false;
 }
+
+async function cadastrarRevendaPelaConversa(from, nome) {
+  nome = String(nome || '').trim();
+  if (!nome) {
+    await enviarTexto(from, '❌ Use assim:\nrevenda NOME DA REVENDA');
+    return;
+  }
+  const numero = jidToNumber(from);
+  if (!numero || numero.length < 10) {
+    await enviarTexto(from, '❌ Não consegui identificar o número desta conversa.');
+    return;
+  }
+
+  const existente = await get('SELECT * FROM revendas WHERE (jid=? OR whatsapp=?) AND status != "REMOVIDA"', [from, numero]);
+  let revenda;
+  if (existente) {
+    await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numero, from, existente.id]);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [existente.id]);
+  } else {
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, numero, from, `rev_${numero}`, `sem_senha_${Date.now()}`]);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+  }
+
+  await enviarTexto(from, `✅ Revenda cadastrada\n\n🏪 ${revenda.nome}\n📱 ${revenda.whatsapp}\n\nDigite:\nmenu`);
+  await enviarTexto(from, `📚 TUTORIAL RÁPIDO\n\nDigite:\nmenu\n\nVocê verá:\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nPara solicitar serviço:\nmenu → 1 → escolha o serviço → envie o IMEI\n\nPara pagar parcial ou total:\npagar valor\n\nExemplo:\npagar 100\n\n🏢 CentralUnlocker`);
+}
+
 
 async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   const numero = jidToNumber(from);
   const partes = textoOriginal.trim().split(/\s+/);
+
+  // cancela qualquer fluxo preso
+  if (['cancelar', 'sair', 'voltar'].includes(texto)) {
+    pedidoSessao.delete(from);
+    adminSessao.delete(from);
+    await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    return;
+  }
+
+  // Cadastro de revenda direto na conversa da revenda
+  // Abra a conversa da revenda e envie: revenda NOME DA REVENDA
+  if (admin && texto.startsWith('revenda ')) {
+    const nome = textoOriginal.replace(/^revenda\s+/i, '').trim();
+    await cadastrarRevendaPelaConversa(from, nome);
+    return;
+  }
 
   // PIX livre para qualquer pessoa
   if (texto.startsWith('pagar')) {
@@ -264,7 +353,13 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   }
 
   if (admin) {
-    if (await tratarAdminWhatsApp(from, textoOriginal, texto, nomeContato)) return;
+    // Admin WhatsApp completo removido para evitar loops.
+    // Mantidos apenas: backup, servico ... e revenda ...
+    if (texto === 'backup') {
+      const arq = await criarBackup();
+      await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`);
+      return;
+    }
     if (await tratarServicoClienteFinal(from, textoOriginal, texto, nomeContato)) return;
   }
 
@@ -280,12 +375,14 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   if (revenda.jid !== from) await run('UPDATE revendas SET jid=?, whatsapp=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, numero, revenda.id]);
 
   if (texto === 'menu') {
+    pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarTexto(from, `🏪 *${revenda.nome}*\n\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nDigite uma opção:`);
     return;
   }
 
   if (texto === 'servicos' || texto === '/servicos') {
+    pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'servico_escolha' });
     await enviarTexto(from, await listarServicosTexto(revenda));
     return;
@@ -313,7 +410,15 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
 
   if (sess?.etapa === 'imei') {
     const imei = onlyDigits(textoOriginal);
-    if (!/^\d{14,17}$/.test(imei)) { await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.'); return; }
+    if (!/^\d{14,17}$/.test(imei)) {
+      const agoraErro = Date.now();
+      const ultimo = ultimoErroImei.get(from) || 0;
+      if (agoraErro - ultimo > 15000) {
+        ultimoErroImei.set(from, agoraErro);
+        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.\n\nDigite cancelar para sair.');
+      }
+      return;
+    }
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
