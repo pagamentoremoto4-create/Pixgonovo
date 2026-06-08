@@ -474,7 +474,10 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
       const ultima = ultimoErroImei.get(from) || 0;
       if (agora - ultima > 15000) {
         ultimoErroImei.set(from, agora);
-        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.\n\nDigite cancelar para sair.');
+        await enviarTexto(
+  from,
+  '❌ IMEI inválido.\n\n📱 O IMEI deve conter exatamente 15 dígitos.\n\nExemplo:\n356789123456789\n\nDigite cancelar para sair.'
+);
       }
       return;
     }
