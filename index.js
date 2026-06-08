@@ -41,13 +41,10 @@ let db = new sqlite3.Database(DB_PATH);
 const pedidoSessao = new Map();
 const adminSessao = new Map();
 
-// Proteções contra loop / mensagens duplicadas do Baileys
+// Travas anti-loop/anti-mensagens antigas do Baileys
 const mensagensProcessadas = new Set();
-const mensagensRecentes = new Map();
 const ultimoErroImei = new Map();
 const BOT_START_TIME = Date.now();
-let iniciandoWhatsApp = false;
-let reconnectTimer = null;
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => db.run(sql, params, function (err) { err ? reject(err) : resolve(this); }));
@@ -61,13 +58,57 @@ function all(sql, params = []) {
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
 function normalizarNumeroWhatsApp(v) {
   let d = onlyDigits(v);
+  // remove zeros na frente
   d = d.replace(/^0+/, '');
-  // Se informar apenas DDD + número do Brasil, adiciona 55 automaticamente.
+  // Se vier só DDD + número, adiciona Brasil 55
   if ((d.length === 10 || d.length === 11) && !d.startsWith('55')) d = '55' + d;
   return d;
 }
-function jidToNumber(jid) { return onlyDigits(String(jid || '').split('@')[0]); }
+function variantesNumero(v) {
+  const base = normalizarNumeroWhatsApp(v);
+  const set = new Set();
+  if (!base) return [];
+  set.add(base);
+  // sem DDI 55
+  if (base.startsWith('55')) set.add(base.slice(2));
+  // Brasil móvel: tenta com e sem o nono dígito depois do DDD
+  if (base.startsWith('55') && base.length === 13) {
+    // 55 + DD + 9 + 8 dígitos => remove o 9
+    set.add(base.slice(0, 4) + base.slice(5));
+    set.add((base.slice(0, 4) + base.slice(5)).slice(2));
+  }
+  if (base.startsWith('55') && base.length === 12) {
+    // 55 + DD + 8 dígitos => adiciona o 9
+    set.add(base.slice(0, 4) + '9' + base.slice(4));
+    set.add((base.slice(0, 4) + '9' + base.slice(4)).slice(2));
+  }
+  return Array.from(set).filter(Boolean);
+}
+function jidToNumber(jid) {
+  const raw = String(jid || '').split('@')[0].split(':')[0];
+  return normalizarNumeroWhatsApp(raw);
+}
 function numberToJid(n) { const d = normalizarNumeroWhatsApp(n); return d ? `${d}@s.whatsapp.net` : ''; }
+function numerosPossiveisDaMensagem(msg, fallbackJid) {
+  const valores = [
+    msg?.key?.remoteJid,
+    msg?.key?.remoteJidAlt,
+    msg?.key?.participant,
+    msg?.key?.participantAlt,
+    msg?.participant,
+    msg?.participantAlt,
+    msg?.senderPn,
+    msg?.key?.senderPn,
+    msg?.message?.extendedTextMessage?.contextInfo?.participant,
+    fallbackJid
+  ].filter(Boolean);
+  const set = new Set();
+  for (const v of valores) {
+    const n = jidToNumber(v);
+    for (const alt of variantesNumero(n)) set.add(alt);
+  }
+  return Array.from(set).filter(Boolean);
+}
 function brl(v) { return Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
 function today() { return new Date().toISOString().slice(0, 10); }
 function dateBR(v) { if (!v) return '-'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
@@ -75,6 +116,29 @@ function monthStart() { const d = new Date(); return `${d.getFullYear()}-${Strin
 function yearStart() { return `${new Date().getFullYear()}-01-01`; }
 function isGroup(jid) { return String(jid || '').endsWith('@g.us'); }
 function isAdminJid(jid) { return ADMIN_NUMBER && jidToNumber(jid) === ADMIN_NUMBER; }
+function isPhoneJid(jid) { return String(jid || '').endsWith('@s.whatsapp.net'); }
+function isLidJid(jid) { return String(jid || '').endsWith('@lid'); }
+function melhorJidCliente(msg, fallback) {
+  const candidates = [
+    msg?.key?.remoteJidAlt,
+    msg?.key?.remoteJid,
+    msg?.key?.participantAlt,
+    msg?.key?.participant,
+    msg?.participantAlt,
+    msg?.participant,
+    msg?.senderPn,
+    msg?.key?.senderPn,
+    msg?.message?.extendedTextMessage?.contextInfo?.participant,
+    fallback
+  ].filter(Boolean);
+  const phone = candidates.find(isPhoneJid);
+  if (phone) return phone;
+  return candidates[0] || fallback;
+}
+function nomeContatoSeguro(msg, fallback = 'Cliente') {
+  if (msg?.key?.fromMe) return fallback;
+  return msg?.pushName || msg?.notifyName || msg?.verifiedBizName || fallback;
+}
 function safeHtml(s) { return String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m])); }
 function getText(msg) { return msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || ''; }
 
@@ -207,8 +271,27 @@ async function precoDaRevenda(revendaId, servicoId) {
   return Number(s?.preco_padrao || 0);
 }
 async function getRevendaByJidOrNumber(jid) {
-  const numero = jidToNumber(jid);
-  return await get('SELECT * FROM revendas WHERE status="ATIVA" AND (jid=? OR whatsapp=?)', [jid, numero]);
+  const numeros = variantesNumero(jidToNumber(jid));
+  const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
+  for (const r of rows) {
+    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
+    if (r.jid === jid || numeros.some(n => rvNums.has(n))) return r;
+  }
+  return null;
+}
+async function getRevendaByMsg(msg, fallbackJid) {
+  const numeros = numerosPossiveisDaMensagem(msg, fallbackJid);
+  const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
+  console.log('🔎 BUSCA REVENDA numeros=', numeros.join(','));
+  for (const r of rows) {
+    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
+    if (r.jid === fallbackJid || numeros.some(n => rvNums.has(n))) {
+      console.log('✅ REVENDA ENCONTRADA:', r.id, r.nome, r.whatsapp);
+      return r;
+    }
+  }
+  console.log('❌ REVENDA NÃO ENCONTRADA para:', numeros.join(','));
+  return null;
 }
 async function listarServicosTexto(revenda) {
   const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
@@ -223,8 +306,6 @@ async function listarServicosTexto(revenda) {
 async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
 
 async function iniciarWhatsApp() {
-  if (iniciandoWhatsApp) return;
-  iniciandoWhatsApp = true;
   await initDB();
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
@@ -237,165 +318,55 @@ async function iniciarWhatsApp() {
       conectado = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log('❌ WHATSAPP DESCONECTOU:', statusCode);
-      if (statusCode !== DisconnectReason.loggedOut) {
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => iniciarWhatsApp(), 8000);
-      }
+      if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsApp(), 5000);
     }
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    const msg = messages[0];
+    if (!msg || !msg.message) return;
+
+    // TRAVA CRÍTICA: nunca processa mensagens enviadas pelo próprio WhatsApp/bot.
+    // Isso evita loop infinito quando o bot envia "Informe o IMEI" ou "IMEI inválido"
+    // e o Baileys devolve essa mensagem como fromMe.
+    if (msg.key?.fromMe) return;
+
     if (type && type !== 'notify') return;
+    if (msg.key?.remoteJid === 'status@broadcast') return;
 
-    for (const msg of messages || []) {
-      if (!msg || !msg.message) continue;
-      const from = msg.key.remoteJid;
-      if (!from || isGroup(from) || from === 'status@broadcast') continue;
+    // Evita processar histórico antigo quando reconecta/reinicia no Render
+    const tsRaw = Number(msg.messageTimestamp || 0);
+    const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
+    if (msgTime && msgTime < BOT_START_TIME - 60000) return;
 
-      const textoOriginal = getText(msg).trim();
-      if (!textoOriginal) continue;
-      const texto = textoOriginal.toLowerCase();
+    // Evita processar a mesma mensagem várias vezes
+    const msgId = `${msg.key?.remoteJid || ''}:${msg.key?.id || ''}:${msg.key?.fromMe ? 'me' : 'in'}`;
+    if (msg.key?.id && mensagensProcessadas.has(msgId)) return;
+    if (msg.key?.id) mensagensProcessadas.add(msgId);
+    if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
 
-      // Mensagens enviadas pelo próprio bot voltam como fromMe em alguns casos.
-      // Só aceitamos fromMe para comandos manuais do admin na conversa: servico, revenda e backup.
-      const fromMe = !!msg.key.fromMe;
-      const comandoManualAdmin = /^(servico\s+|revenda\s+|backup$)/i.test(textoOriginal.trim());
-      if (fromMe && !comandoManualAdmin) continue;
-
-      // Ignora histórico antigo após reiniciar no Render.
-      const tsRaw = Number(msg.messageTimestamp || 0);
-      const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
-      if (msgTime && msgTime < BOT_START_TIME - 60000) continue;
-
-      // Ignora a mesma mensagem pelo ID.
-      const msgId = `${from}:${msg.key?.id || ''}:${fromMe ? 'me' : 'in'}`;
-      if (msg.key?.id && mensagensProcessadas.has(msgId)) continue;
-      if (msg.key?.id) mensagensProcessadas.add(msgId);
-      if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
-
-      // Trava extra: se a mesma conversa mandar o mesmo texto em poucos segundos, ignora.
-      // Isso impede 100+ respostas quando o Baileys duplica eventos.
-      const recentKey = `${from}:${texto}`;
-      const agora = Date.now();
-      const ultima = mensagensRecentes.get(recentKey) || 0;
-      if (agora - ultima < 6000) continue;
-      mensagensRecentes.set(recentKey, agora);
-      if (mensagensRecentes.size > 1000) mensagensRecentes.clear();
-
-      const admin = isAdminJid(from) || (fromMe && comandoManualAdmin);
-      const nomeContato = msg.pushName || 'Cliente';
-      console.log('📩', from, fromMe ? 'FROMME' : '', textoOriginal);
-      try { await tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato); }
-      catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
-    }
+    const from = msg.key.remoteJid;
+    if (isGroup(from)) return;
+    const textoOriginal = getText(msg).trim();
+    if (!textoOriginal) return;
+    const texto = textoOriginal.toLowerCase();
+    const admin = msg.key.fromMe || isAdminJid(from);
+    const nomeContato = nomeContatoSeguro(msg);
+    console.log('📩', from, msg.key.fromMe ? 'FROMME' : '', textoOriginal);
+    try { await tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato); }
+    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
   });
-
-  iniciandoWhatsApp = false;
 }
 
-async function cadastrarRevendaPelaConversa(from, dadosTexto) {
-  const dados = String(dadosTexto || '').replace(/^revenda\s+/i, '').split('|').map(s => s.trim());
-
-  if (dados.length < 2 || !dados[0] || !dados[1]) {
-    await enviarTexto(from, `❌ Use assim:
-
-revenda NOME DA REVENDA | WHATSAPP
-
-Exemplo:
-revenda LIFE DESBLOQUEIOS | 5575988479931`);
-    return;
-  }
-
-  const nome = dados[0];
-  const whatsapp = normalizarNumeroWhatsApp(dados[1]);
-
-  if (!whatsapp || whatsapp.length < 12) {
-    await enviarTexto(from, `❌ WhatsApp inválido.
-
-Use com DDI + DDD + número.
-Exemplo:
-5575988479931`);
-    return;
-  }
-
-  const jidRevenda = numberToJid(whatsapp);
-  const existente = await get('SELECT * FROM revendas WHERE whatsapp=? AND status != "REMOVIDA"', [whatsapp]);
-  let revenda;
-
-  if (existente) {
-    await run(
-      'UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?',
-      [nome, whatsapp, jidRevenda, existente.id]
-    );
-    revenda = await get('SELECT * FROM revendas WHERE id=?', [existente.id]);
-  } else {
-    const ins = await run(
-      'INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)',
-      [nome, whatsapp, jidRevenda, `rev_${whatsapp}`, `sem_senha_${Date.now()}`]
-    );
-    revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
-  }
-
-  await enviarTexto(from, `✅ Revenda cadastrada
-
-🏪 ${revenda.nome}
-📱 ${revenda.whatsapp}
-
-A mensagem de boas-vindas foi enviada para a revenda.`);
-
-  await enviarTexto(jidRevenda, `🎉 BEM-VINDO À CENTRALUNLOCKER
-
-Olá, ${revenda.nome}!
-
-Sua revenda foi cadastrada e ativada com sucesso.
-
-Para começar, digite:
-menu
-
-🏢 CentralUnlocker`);
-
-  await enviarTexto(jidRevenda, `📚 TUTORIAL RÁPIDO
-
-Digite:
-menu
-
-Você verá:
-1️⃣ Serviços
-2️⃣ Histórico
-3️⃣ Conta
-
-Para solicitar serviço:
-menu → 1 → escolha o serviço → envie o IMEI
-
-Para ver sua conta:
-menu → 3
-
-Para gerar PIX parcial ou total:
-pagar valor
-
-Exemplo:
-pagar 100
-
-🏢 CentralUnlocker`);
-}
-
-
-async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
+async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato) {
   const numero = jidToNumber(from);
   const partes = textoOriginal.trim().split(/\s+/);
 
-  // cancela qualquer fluxo preso
+  // Comandos que limpam qualquer fluxo preso, principalmente aguardando IMEI
   if (['cancelar', 'sair', 'voltar'].includes(texto)) {
     pedidoSessao.delete(from);
     adminSessao.delete(from);
     await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
-    return;
-  }
-
-  // Cadastro de revenda pelo WhatsApp do admin.
-  // Use: revenda NOME DA REVENDA | 5575988479931
-  if (admin && texto.startsWith('revenda ')) {
-    await cadastrarRevendaPelaConversa(from, textoOriginal);
     return;
   }
 
@@ -410,7 +381,7 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
     await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
     await enviarTexto(from, qrCode || 'PIX indisponível');
-    const revendaPix = await getRevendaByJidOrNumber(from);
+    const revendaPix = await getRevendaByMsg(msg, from);
     if (paymentId) {
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, revendaPix?.id || null, revendaPix ? from : null, from, valor]);
       verificarPagamento(paymentId, revendaPix?.id || null, from, valor);
@@ -419,17 +390,25 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   }
 
   if (admin) {
-    // Admin WhatsApp completo removido para evitar loops.
-    // Mantidos apenas: backup, servico ... e revenda ...
+    // Painel admin pelo WhatsApp removido. Mantém apenas backup manual e cadastro rápido de serviço em conversas de clientes.
     if (texto === 'backup') {
       const arq = await criarBackup();
-      await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`);
+      await enviarTexto(from, `✅ BACKUP GERADO
+
+📁 ${path.basename(arq)}
+
+🏢 CentralUnlocker`);
       return;
     }
-    if (await tratarServicoClienteFinal(from, textoOriginal, texto, nomeContato)) return;
+    if (await tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato)) return;
   }
 
-  const revenda = await getRevendaByJidOrNumber(from);
+  // menu/servicos/historico/conta sempre limpam fluxo anterior antes de validar revenda
+  if (['menu', 'servicos', '/servicos', 'historico', '/historico', 'conta', '/conta', 'saldo', '/saldo'].includes(texto)) {
+    pedidoSessao.delete(from);
+  }
+
+  const revenda = await getRevendaByMsg(msg, from);
   if (!revenda) {
     if (texto === 'menu' || texto === 'servicos' || texto === 'historico' || texto === 'conta') {
       await enviarTexto(from, '❌ Número não cadastrado como revenda.');
@@ -438,7 +417,7 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   }
 
   // atualiza jid se mudou
-  if (revenda.jid !== from) await run('UPDATE revendas SET jid=?, whatsapp=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, numero, revenda.id]);
+  if (revenda.jid !== from) await run('UPDATE revendas SET jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, revenda.id]);
 
   if (texto === 'menu') {
     pedidoSessao.delete(from);
@@ -448,7 +427,6 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   }
 
   if (texto === 'servicos' || texto === '/servicos') {
-    pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'servico_escolha' });
     await enviarTexto(from, await listarServicosTexto(revenda));
     return;
@@ -477,11 +455,13 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
   if (sess?.etapa === 'imei') {
     const imei = onlyDigits(textoOriginal);
     if (!/^\d{14,17}$/.test(imei)) {
-      const agoraErro = Date.now();
-      const ultimo = ultimoErroImei.get(from) || 0;
-      if (agoraErro - ultimo > 15000) {
-        ultimoErroImei.set(from, agoraErro);
-        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.\n\nDigite cancelar para sair.');
+      const agora = Date.now();
+      const ultima = ultimoErroImei.get(from) || 0;
+      if (agora - ultima > 15000) {
+        ultimoErroImei.set(from, agora);
+        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.
+
+Digite cancelar para sair.');
       }
       return;
     }
@@ -491,14 +471,14 @@ async function tratarWhatsApp(from, textoOriginal, texto, admin, nomeContato) {
     if (duplicado) { pedidoSessao.delete(from); await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return; }
     const valor = await precoDaRevenda(revenda.id, servico.id);
     await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, valor, status)
-      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, numero, servico.id, servico.nome, imei, valor]);
+      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imei, valor]);
     pedidoSessao.delete(from);
     await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n📱 ${imei}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
     return;
   }
 }
 
-async function tratarServicoClienteFinal(from, textoOriginal, texto, nomeContato) {
+async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato) {
   if (!texto.startsWith('servico ')) return false;
   const partes = textoOriginal.trim().split(/\s+/);
   const imei = onlyDigits(partes[partes.length - 1]);
@@ -515,9 +495,23 @@ async function tratarServicoClienteFinal(from, textoOriginal, texto, nomeContato
     const ins = await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [nomeServico, valor]);
     servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [ins.lastID]);
   }
+  const clienteJid = melhorJidCliente(msg, from);
+  const clienteNumero = jidToNumber(clienteJid);
+  const clienteNome = nomeContatoSeguro(msg, nomeContato || 'Cliente');
+
   await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_id, servico_nome, imei, valor, status)
-    VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [nomeContato || 'Cliente', jidToNumber(from), from, servico.id, servico.nome, imei, valor]);
-  await enviarTexto(from, `✅ Serviço cadastrado\n\n🛠 ${servico.nome}\n📱 ${imei}\n💰 ${brl(valor)}\n\n📍 Pendente`);
+    VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [clienteNome || 'Cliente', clienteNumero, clienteJid, servico.id, servico.nome, imei, valor]);
+
+  await enviarTexto(from, `✅ Serviço cadastrado
+
+🛠 ${servico.nome}
+📱 ${imei}
+💰 ${brl(valor)}
+
+👤 Cliente: ${clienteNome || 'Cliente'}
+📞 WhatsApp: ${clienteNumero || '-'}
+
+📍 Pendente`);
   return true;
 }
 
@@ -530,6 +524,66 @@ async function enviarHistoricoRevenda(from, revenda) {
 }
 async function enviarContaRevenda(from, revenda) {
   await enviarTexto(from, `💳 *CONTA*\n\n🏪 ${revenda.nome}\n\n💰 Saldo em aberto:\n${brl(revenda.saldo)}\n\nPara gerar PIX digite:\n*pagar valor*\n\nExemplos:\npagar 100\npagar 420`);
+}
+
+
+async function mensagemBoasVindasRevenda(revenda) {
+  return `🎉 *BEM-VINDO À CENTRALUNLOCKER*
+
+Olá, *${revenda.nome}*!
+
+Sua revenda foi cadastrada e ativada com sucesso.
+
+Para começar, digite:
+
+*menu*
+
+🏢 CentralUnlocker`;
+}
+async function mensagemTutorialRevenda() {
+  return `📚 *TUTORIAL RÁPIDO*
+
+Digite:
+
+*menu*
+
+Você verá:
+
+1️⃣ Serviços
+2️⃣ Histórico
+3️⃣ Conta
+
+🔹 *Solicitar serviço*
+menu → 1 Serviços → escolha o serviço → envie o IMEI
+
+🔹 *Ver histórico*
+menu → 2 Histórico
+
+🔹 *Ver conta*
+menu → 3 Conta
+
+🔹 *Gerar PIX*
+Digite:
+
+*pagar valor*
+
+Exemplo:
+*pagar 100*
+
+🏢 CentralUnlocker`;
+}
+async function enviarBoasVindasTutorialRevenda(revenda) {
+  const w = normalizarNumeroWhatsApp(revenda.whatsapp);
+  const jid = revenda.jid || numberToJid(w);
+  if (!jid) return false;
+  try {
+    await enviarTexto(jid, await mensagemBoasVindasRevenda(revenda));
+    await enviarTexto(jid, await mensagemTutorialRevenda());
+    return true;
+  } catch (e) {
+    console.log('❌ ERRO BOAS-VINDAS:', e.message);
+    return false;
+  }
 }
 
 async function tratarAdminWhatsApp(from, textoOriginal, texto, nomeContato) {
@@ -836,14 +890,40 @@ app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.
 app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
   let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required></div><button class="btn green">Adicionar Revenda</button></form></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.whatsapp || '-')}</td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
+  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.whatsapp || '-')}</td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Boas-vindas</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
   html += '</table>';
   res.send(page('Revendas', html));
 });
-app.post('/admin/revendas', async (req, res) => { const w = onlyDigits(req.body.whatsapp); await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [req.body.nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha']); res.redirect('/admin/revendas'); });
-app.post('/admin/revenda/:id/status', async (req, res) => { await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]); res.redirect('/admin/revendas'); });
+app.post('/admin/revendas', async (req, res) => {
+  const w = normalizarNumeroWhatsApp(req.body.whatsapp);
+  const nome = String(req.body.nome || '').trim();
+  const existe = await get('SELECT * FROM revendas WHERE whatsapp=? AND status != "REMOVIDA"', [w]);
+  if (existe) {
+    await run('UPDATE revendas SET nome=?, status="ATIVA", jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numberToJid(w), existe.id]);
+    await enviarBoasVindasTutorialRevenda({ ...existe, nome, whatsapp: w, jid: numberToJid(w) });
+  } else {
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha']);
+    await enviarBoasVindasTutorialRevenda({ id: ins.lastID, nome, whatsapp: w, jid: numberToJid(w) });
+  }
+  res.redirect('/admin/revendas');
+});
+app.post('/admin/revenda/:id/boasvindas', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (r) await enviarBoasVindasTutorialRevenda(r);
+  res.redirect('/admin/revendas');
+});
+app.post('/admin/revenda/:id/status', async (req, res) => {
+  await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]);
+  const rStatus = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (rStatus?.jid || rStatus?.whatsapp) {
+    const jidAviso = rStatus.jid || numberToJid(rStatus.whatsapp);
+    if (req.body.status === 'BLOQUEADA') await enviarTexto(jidAviso, '🔒 Sua revenda foi bloqueada. Entre em contato com a CentralUnlocker.');
+    if (req.body.status === 'ATIVA') await enviarTexto(jidAviso, '🔓 Sua revenda foi reativada. Digite menu para continuar.');
+  }
+  res.redirect('/admin/revendas');
+});
 app.get('/admin/revenda/:id/editar', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post"><input name="nome" value="${safeHtml(r.nome)}" required><br><br><input name="whatsapp" value="${safeHtml(r.whatsapp)}" required><br><br><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br><button class="btn green">Salvar</button></form></div>`)); });
-app.post('/admin/revenda/:id/editar', async (req, res) => { const w = onlyDigits(req.body.whatsapp); await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w, numberToJid(w), req.body.status, req.params.id]); res.redirect('/admin/revendas'); });
+app.post('/admin/revenda/:id/editar', async (req, res) => { const w = normalizarNumeroWhatsApp(req.body.whatsapp); await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w, numberToJid(w), req.body.status, req.params.id]); res.redirect('/admin/revendas'); });
 app.get('/admin/revenda/:id/precos', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC'); let html = `<h1>💰 Preços - ${safeHtml(r.nome)}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`; for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${safeHtml(s.nome)}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; } html += `</table><br><button class="btn green">Salvar preços</button></form>`; res.send(page('Preços', html)); });
 app.post('/admin/revenda/:id/precos', async (req, res) => { const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1'); for (const s of servs) { const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.')); await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]); } res.redirect('/admin/revendas'); });
 app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
