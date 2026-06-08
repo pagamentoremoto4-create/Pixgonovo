@@ -43,6 +43,7 @@ const adminSessao = new Map();
 
 // Travas anti-loop/anti-mensagens antigas do Baileys
 const mensagensProcessadas = new Set();
+const ultimoErroImei = new Map();
 const BOT_START_TIME = Date.now();
 
 function run(sql, params = []) {
@@ -324,6 +325,13 @@ async function iniciarWhatsApp() {
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     const msg = messages[0];
     if (!msg || !msg.message) return;
+
+    // TRAVA CRÍTICA: nunca processa mensagens enviadas pelo próprio WhatsApp/bot.
+    // Isso evita loop infinito quando o bot envia "Informe o IMEI" ou "IMEI inválido"
+    // e o Baileys devolve essa mensagem como fromMe.
+    if (msg.key?.fromMe) return;
+
+    if (type && type !== 'notify') return;
     if (msg.key?.remoteJid === 'status@broadcast') return;
 
     // Evita processar histórico antigo quando reconecta/reinicia no Render
@@ -446,7 +454,17 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
 
   if (sess?.etapa === 'imei') {
     const imei = onlyDigits(textoOriginal);
-    if (!/^\d{14,17}$/.test(imei)) { await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.'); return; }
+    if (!/^\d{14,17}$/.test(imei)) {
+      const agora = Date.now();
+      const ultima = ultimoErroImei.get(from) || 0;
+      if (agora - ultima > 15000) {
+        ultimoErroImei.set(from, agora);
+        await enviarTexto(from, '❌ IMEI inválido. Envie apenas os números.
+
+Digite cancelar para sair.');
+      }
+      return;
+    }
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
