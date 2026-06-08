@@ -41,6 +41,10 @@ let db = new sqlite3.Database(DB_PATH);
 const pedidoSessao = new Map();
 const adminSessao = new Map();
 
+// Travas anti-loop/anti-mensagens antigas do Baileys
+const mensagensProcessadas = new Set();
+const BOT_START_TIME = Date.now();
+
 function run(sql, params = []) {
   return new Promise((resolve, reject) => db.run(sql, params, function (err) { err ? reject(err) : resolve(this); }));
 }
@@ -317,9 +321,22 @@ async function iniciarWhatsApp() {
     }
   });
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
     const msg = messages[0];
-    if (!msg.message) return;
+    if (!msg || !msg.message) return;
+    if (msg.key?.remoteJid === 'status@broadcast') return;
+
+    // Evita processar histórico antigo quando reconecta/reinicia no Render
+    const tsRaw = Number(msg.messageTimestamp || 0);
+    const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
+    if (msgTime && msgTime < BOT_START_TIME - 60000) return;
+
+    // Evita processar a mesma mensagem várias vezes
+    const msgId = `${msg.key?.remoteJid || ''}:${msg.key?.id || ''}:${msg.key?.fromMe ? 'me' : 'in'}`;
+    if (msg.key?.id && mensagensProcessadas.has(msgId)) return;
+    if (msg.key?.id) mensagensProcessadas.add(msgId);
+    if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
+
     const from = msg.key.remoteJid;
     if (isGroup(from)) return;
     const textoOriginal = getText(msg).trim();
@@ -336,6 +353,14 @@ async function iniciarWhatsApp() {
 async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato) {
   const numero = jidToNumber(from);
   const partes = textoOriginal.trim().split(/\s+/);
+
+  // Comandos que limpam qualquer fluxo preso, principalmente aguardando IMEI
+  if (['cancelar', 'sair', 'voltar'].includes(texto)) {
+    pedidoSessao.delete(from);
+    adminSessao.delete(from);
+    await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    return;
+  }
 
   // PIX livre para qualquer pessoa
   if (texto.startsWith('pagar')) {
@@ -370,6 +395,11 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
     if (await tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato)) return;
   }
 
+  // menu/servicos/historico/conta sempre limpam fluxo anterior antes de validar revenda
+  if (['menu', 'servicos', '/servicos', 'historico', '/historico', 'conta', '/conta', 'saldo', '/saldo'].includes(texto)) {
+    pedidoSessao.delete(from);
+  }
+
   const revenda = await getRevendaByMsg(msg, from);
   if (!revenda) {
     if (texto === 'menu' || texto === 'servicos' || texto === 'historico' || texto === 'conta') {
@@ -382,6 +412,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   if (revenda.jid !== from) await run('UPDATE revendas SET jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, revenda.id]);
 
   if (texto === 'menu') {
+    pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarTexto(from, `🏪 *${revenda.nome}*\n\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nDigite uma opção:`);
     return;
