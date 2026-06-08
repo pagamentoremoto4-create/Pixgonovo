@@ -4,58 +4,72 @@
 Build Command: `npm install`
 Start Command: `npm start`
 
-## Environment Variables
-- `PIXGO_API_KEY=sua chave PixGo`
-- `ADMIN_NUMBER=5575999999999`
-- `DB_PATH=/data/database.db`
-- `ADMIN_PANEL_USER=admin`
-- `ADMIN_PANEL_PASS=sua senha`
+## Variáveis de ambiente
+- `PIXGO_API_KEY`: sua chave PixGo
+- `ADMIN_NUMBER`: seu número com DDI e DDD, apenas números. Exemplo: `5575999999999`
+- `DB_PATH`: recomendado `/data/database.db`
+- `ADMIN_PANEL_USER`: usuário do painel
+- `ADMIN_PANEL_PASS`: senha do painel
+- `BASE_URL`: URL do Render. Exemplo: `https://seu-app.onrender.com`
 
 Crie um Persistent Disk no Render:
 - Mount Path: `/data`
 - Size: `1 GB`
 
-## Painel Admin
-Abra:
-`https://SEU-APP.onrender.com/admin`
+## Painel
+Abra: `https://SEU-APP.onrender.com/admin`
 
-Abas:
-- Dashboard
-- Pedidos
-- Revendas
-- Serviços
-- Financeiro
-- Relatórios
-- Backup
-- Sair
-
-## WhatsApp Cliente Final
-Qualquer pessoa pode gerar PIX:
-
+## WhatsApp - Cliente final
+Gerar Pix livre para qualquer pessoa:
 `pagar 180`
 
-Cadastro rápido de serviço pelo admin na conversa do cliente:
-
+Cadastrar serviço de cliente final, digitado pelo admin na conversa do cliente:
 `servico desbloqueio tim 180 356789123456789`
 
-## WhatsApp Revenda
-A revenda é cadastrada pelo número do WhatsApp no painel. Não precisa login e senha.
-
-A revenda digita:
-
+## WhatsApp - Revenda
+A revenda é identificada pelo número cadastrado no painel.
+Digite:
 `menu`
 
-O bot mostra:
-
+Opções:
 1. Serviços
 2. Histórico
 3. Conta
 
-Na conta, a revenda vê o saldo e pode pagar parcial:
+## WhatsApp - Admin
+Digite:
+`/admin`
 
-`pagar 100`
+Comandos rápidos:
+- `backup`
+- `backups`
+- `hoje`
+- `financeiro`
+- `pendentes`
+- `processo`
+- `finalizados`
+- `cancelados`
+- `imei 356789123456789`
+- `cliente 5575999999999`
+- `revenda nome`
+- `processar ID`
+- `finalizar ID`
+- `cancelar ID motivo`
+- `editarimei ID novoimei`
+- `addrevenda Nome | 5575999999999`
+- `bloquearrevenda ID`
+- `desbloquearrevenda ID`
+- `removerrevenda ID`
+- `servicos`
+- `addservico Nome | 100`
+- `editarservico ID | Novo Nome | 100`
+- `desativarservico ID`
+- `ativarservico ID`
+- `excluirservico ID`
+- `relatorio diario`
+- `relatorio mensal`
+- `relatorio anual`
 
 ## Backup
-- Automático todo dia às 02:00
-- No painel: Backup > Criar/Listar/Baixar/Restaurar
-- Pelo WhatsApp Admin: `backup`
+Backup automático todos os dias às 02:00.
+No painel: Backup > Criar/Listar/Baixar/Restaurar.
