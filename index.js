@@ -326,10 +326,22 @@ async function iniciarWhatsApp() {
     const msg = messages[0];
     if (!msg || !msg.message) return;
 
-    // TRAVA CRÍTICA: nunca processa mensagens enviadas pelo próprio WhatsApp/bot.
-    // Isso evita loop infinito quando o bot envia "Informe o IMEI" ou "IMEI inválido"
-    // e o Baileys devolve essa mensagem como fromMe.
-    if (msg.key?.fromMe) return;
+    // TRAVA CRÍTICA: por padrão não processa mensagens enviadas pelo próprio WhatsApp/bot.
+    // Exceção segura: quando o administrador digita na conversa da revenda:
+    // cadastrar revenda Nome da Revenda
+    // Assim o bot usa o número daquela conversa como WhatsApp da revenda.
+    if (msg.key?.fromMe) {
+      if (type && type !== 'notify') return;
+      if (msg.key?.remoteJid === 'status@broadcast') return;
+      if (isGroup(msg.key?.remoteJid)) return;
+
+      const textoFromMe = getText(msg).trim();
+      if (/^(cadastrar|ativar)\s+revenda(\s+.+)?$/i.test(textoFromMe)) {
+        try { await cadastrarRevendaPelaConversaAdmin(msg.key.remoteJid, textoFromMe); }
+        catch (e) { console.log('❌ ERRO CADASTRO FROMME:', e); await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar revenda.'); }
+      }
+      return;
+    }
 
     if (type && type !== 'notify') return;
     if (msg.key?.remoteJid === 'status@broadcast') return;
@@ -585,6 +597,22 @@ async function enviarBoasVindasTutorialRevenda(revenda) {
     console.log('❌ ERRO BOAS-VINDAS:', e.message);
     return false;
   }
+}
+
+
+async function cadastrarRevendaPelaConversaAdmin(conversaJid, textoOriginal) {
+  const numeroRevenda = jidToNumber(conversaJid);
+  let nome = String(textoOriginal || '').replace(/^(cadastrar|ativar)\s+revenda\s*/i, '').trim();
+
+  if (!numeroRevenda || !/^55\d{10,11}$/.test(numeroRevenda)) {
+    await enviarTexto(conversaJid, '❌ Não consegui identificar o número desta conversa. Abra a conversa privada da revenda e envie:\n\ncadastrar revenda Nome da Revenda');
+    return null;
+  }
+
+  if (!nome) nome = `Revenda ${numeroRevenda.slice(-4)}`;
+
+  // Cadastra usando o próprio número/JID da conversa onde o admin digitou o comando.
+  return await cadastrarRevendaDireto(conversaJid, nome, numeroRevenda);
 }
 
 async function cadastrarRevendaDireto(from, nome, whatsapp) {

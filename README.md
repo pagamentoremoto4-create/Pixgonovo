@@ -1,41 +1,27 @@
-# CentralUnlocker - Cadastro de Revenda pelo WhatsApp
+# CentralUnlocker - Cadastro de revenda pela conversa
 
-## Novo fluxo
+## Como usar
 
-O admin pode cadastrar revenda direto na conversa do WhatsApp com o bot.
-
-### Opção 1: cadastro guiado
-Envie para o bot:
+Abra a conversa privada da revenda no WhatsApp conectado ao bot e envie:
 
 ```txt
-cadastrar revenda
+cadastrar revenda Nome da Revenda
 ```
 
-O bot vai perguntar:
-1. Nome da revenda
-2. WhatsApp da revenda com DDD
-
-Depois ele salva no banco, ativa a revenda e envia boas-vindas/tutorial para ela.
-
-### Opção 2: cadastro rápido em uma linha
-Envie:
+Exemplo:
 
 ```txt
-addrevenda Nome da Revenda | 5575999999999
+cadastrar revenda Central Bahia
 ```
 
-Ou:
+O bot vai usar automaticamente o número daquela conversa como WhatsApp da revenda.
+
+Depois a revenda pode enviar:
 
 ```txt
-cadastrar revenda Nome da Revenda | 5575999999999
+menu
 ```
-
-### Exemplo
-```txt
-addrevenda João Unlock | 75999999999
-```
-
-O sistema normaliza automaticamente para Brasil `55 + DDD + número`.
 
 ## Observação
-Apenas o número configurado na variável `ADMIN_NUMBER` consegue cadastrar revendas pelo WhatsApp.
+
+O bot continua ignorando mensagens enviadas pelo próprio WhatsApp, exceto comandos seguros de cadastro/ativação de revenda.
