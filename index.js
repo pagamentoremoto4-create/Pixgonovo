@@ -974,6 +974,20 @@ app.get('/', (req, res) => {
   res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${conectado ? 'WhatsApp conectado ✅' : 'Aguardando QR...'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
 });
 
+
+// Webhook PixGo - responde HTTP 200 para evitar alerta de falha.
+// O sistema já confirma pagamento por consulta automática, então este endpoint
+// serve para receber notificações da PixGo sem quebrar o fluxo atual.
+app.all('/webhook/pixgo', async (req, res) => {
+  try {
+    console.log('📩 WEBHOOK PIXGO:', req.method, req.body || {});
+    return res.status(200).json({ success: true, received: true });
+  } catch (e) {
+    console.log('❌ ERRO WEBHOOK PIXGO:', e.message);
+    return res.status(200).json({ success: true, received: false });
+  }
+});
+
 app.use('/admin', basicAuth);
 
 app.get('/admin', async (req, res) => {
