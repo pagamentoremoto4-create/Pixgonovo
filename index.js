@@ -1090,7 +1090,33 @@ app.get('/admin/revenda/:id/precos', async (req, res) => { const r = await get('
 app.post('/admin/revenda/:id/precos', async (req, res) => { const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1'); for (const s of servs) { const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.')); await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]); } res.redirect('/admin/revendas'); });
 app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
 app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
-app.post('/admin/revenda/:id/pagamento', async (req, res) => { const valor = Number(String(req.body.valor || '0').replace(',', '.')); const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); if (valor > 0 && r) { const novo = Math.max(0, Number(r.saldo || 0) - valor); await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, r.id]); await run('INSERT INTO pagamentos (revenda_id, revenda_nome, valor, origem) VALUES (?, ?, ?, "manual")', [r.id, r.nome, valor]); if (r.jid) await enviarTexto(r.jid, `✅ Pagamento registrado\n\n💰 Valor: ${brl(valor)}\n💳 Saldo: ${brl(novo)}\n\n🏢 CentralUnlocker`); } res.redirect(`/admin/revenda/${req.params.id}/conta`); });
+app.post('/admin/revenda/:id/pagamento', async (req, res) => {
+  const valor = Number(String(req.body.valor || '0').replace(',', '.'));
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+
+  if (valor > 0 && r) {
+    const novo = Number(r.saldo || 0) + valor;
+
+    await run(
+      'UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',
+      [novo, r.id]
+    );
+
+    await run(
+      'INSERT INTO pagamentos (revenda_id, revenda_nome, valor, origem) VALUES (?, ?, ?, "manual")',
+      [r.id, r.nome, valor]
+    );
+
+    if (r.jid) {
+      await enviarTexto(
+        r.jid,
+        `✅ Pagamento registrado\n\n💰 Valor pago: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(novo)}\n\n🏢 CentralUnlocker`
+      );
+    }
+  }
+
+  res.redirect(`/admin/revenda/${req.params.id}/conta`);
+});
 
 app.get('/admin/servicos', async (req, res) => { const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC'); let html = `<h1>🛠 Serviços</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">Adicionar Serviço</button></form></div><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`; for (const s of rows) html += `<tr><td>#${s.id}</td><td><a href="/admin/servico/${s.id}/imeis">${safeHtml(s.nome)}</a></td><td>${brl(s.preco_padrao)}</td><td><span class="pill">${s.ativo ? 'Ativo' : 'Inativo'}</span></td><td>${s.total}</td><td class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📱 IMEIs</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️ Excluir</button></form></td></tr>`; html += '</table>'; res.send(page('Serviços', html)); });
 app.post('/admin/servicos', async (req, res) => { await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.'))]); const revs = await all('SELECT * FROM revendas WHERE status="ATIVA" AND jid IS NOT NULL'); for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n\nDigite menu para ver sua tabela.`); res.redirect('/admin/servicos'); });
