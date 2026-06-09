@@ -110,6 +110,18 @@ function numerosPossiveisDaMensagem(msg, fallbackJid) {
   return Array.from(set).filter(Boolean);
 }
 function brl(v) { return Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
+function textoSituacaoSaldo(saldo) {
+  const v = Number(saldo || 0);
+  if (v < 0) return `⚠️ Débito em aberto:\n${brl(Math.abs(v))}`;
+  if (v > 0) return `💰 Crédito disponível:\n${brl(v)}`;
+  return '✅ Conta quitada';
+}
+function textoSaldoCurto(saldo) {
+  const v = Number(saldo || 0);
+  if (v < 0) return `Débito: ${brl(Math.abs(v))}`;
+  if (v > 0) return `Crédito: ${brl(v)}`;
+  return 'Quitado';
+}
 function today() { return new Date().toISOString().slice(0, 10); }
 function dateBR(v) { if (!v) return '-'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function monthStart() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; }
@@ -574,7 +586,7 @@ async function enviarHistoricoRevenda(from, revenda) {
   await enviarTexto(from, txt.trim());
 }
 async function enviarContaRevenda(from, revenda) {
-  await enviarTexto(from, `💳 *CONTA*\n\n🏪 ${revenda.nome}\n\n💰 Saldo em aberto:\n${brl(revenda.saldo)}\n\nPara gerar PIX digite:\n*pagar valor*\n\nExemplos:\npagar 100\npagar 420`);
+  await enviarTexto(from, `💳 *CONTA*\n\n🏪 ${revenda.nome}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revenda.saldo)}\n\nPara gerar PIX digite:\n*pagar valor*\n\nExemplos:\npagar 100\npagar 420`);
 }
 
 
@@ -781,7 +793,7 @@ async function textoDashboardAdmin() {
   const c = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"');
   const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"');
   const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
-  return `📊 *DASHBOARD*\n\n🟡 Pendentes: ${p.qtd}\n🔄 Em Processo: ${ep.qtd}\n✅ Finalizados: ${f.qtd}\n❌ Cancelados: ${c.qtd}\n\n💰 Recebido hoje: ${brl(hoje.total)}\n💳 A receber: ${brl(saldo.total)}`;
+  return `📊 *DASHBOARD*\n\n🟡 Pendentes: ${p.qtd}\n🔄 Em Processo: ${ep.qtd}\n✅ Finalizados: ${f.qtd}\n❌ Cancelados: ${c.qtd}\n\n💰 Recebido hoje: ${brl(hoje.total)}\n💳 Balanço revendas: ${brl(saldo.total)}`;
 }
 async function enviarListaStatus(from, cmd) {
   const mapa = { pendentes:'PENDENTE', processo:'EM PROCESSO', finalizados:'FINALIZADO', cancelados:'CANCELADO' };
@@ -815,7 +827,7 @@ async function enviarBuscaRevenda(from, termo) {
   const rows = await all('SELECT * FROM revendas WHERE nome LIKE ? OR whatsapp LIKE ? ORDER BY id DESC LIMIT 10', [`%${termo}%`, `%${onlyDigits(termo)}%`]);
   if (!rows.length) { await enviarTexto(from, '❌ Revenda não encontrada.'); return; }
   let txt = '🏪 *REVENDAS*\n\n';
-  for (const r of rows) txt += `#${r.id}\n${r.nome}\n📞 ${r.whatsapp || '-'}\n📍 ${r.status}\n💰 ${brl(r.saldo)}\n\n`;
+  for (const r of rows) txt += `#${r.id}\n${r.nome}\n📞 ${r.whatsapp || '-'}\n📍 ${r.status}\n💰 ${textoSaldoCurto(r.saldo)}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function adminMudarStatus(from, id, status) {
@@ -886,7 +898,7 @@ async function resumoFinanceiro() {
   const aberto = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"');
   const recebido = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos');
   const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
-  return `💰 *FINANCEIRO*\n\n💳 A receber: ${brl(aberto.total)}\n✅ Recebido total: ${brl(recebido.total)}\n📅 Recebido hoje: ${brl(hoje.total)}`;
+  return `💰 *FINANCEIRO*\n\n💳 Balanço revendas: ${brl(aberto.total)}\n✅ Recebido total: ${brl(recebido.total)}\n📅 Recebido hoje: ${brl(hoje.total)}`;
 }
 async function resumoPeriodo(tipo) {
   let label = 'DIÁRIO', where = 'date(criado_em)=date("now")';
@@ -926,7 +938,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
-          novo = Math.max(0, Number(rev.saldo || 0) - Number(valorPix || 0));
+          novo = Number(rev.saldo || 0) + Number(valorPix || 0);
           await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
           await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, "pixgo")', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix]);
         }
@@ -934,7 +946,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, "pixgo")', [jid, jidToNumber(jid), valorPix]);
       }
       await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
-      await enviarTexto(jid, `✅ Pagamento confirmado\n\n💰 Valor: ${brl(valorPix)}${novo !== null ? `\n\n💳 Novo saldo:\n${brl(novo)}` : ''}\n\n🏢 CentralUnlocker`);
+      await enviarTexto(jid, `✅ Pagamento confirmado\n\n💰 Valor pago: ${brl(valorPix)}${novo !== null ? `\n\n💳 Situação da conta:\n${textoSituacaoSaldo(novo)}` : ''}\n\n🏢 CentralUnlocker`);
     }
     if (status?.success && status.data?.status === 'expired') {
       clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
@@ -946,7 +958,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
 async function finalizarPedido(pedido) {
   await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]);
   if (pedido.tipo === 'REVENDA' && !pedido.cobrado && pedido.revenda_id) {
-    await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.valor, pedido.revenda_id]);
+    await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.valor, pedido.revenda_id]);
     await run('UPDATE pedidos SET cobrado=1 WHERE id=?', [pedido.id]);
   }
   const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
@@ -961,7 +973,7 @@ async function notificarPedido(pedido, tipo, motivo = '') {
   if (tipo === 'finalizar') {
     if (pedido.tipo === 'REVENDA') {
       const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
-      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Saldo:\n${brl(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`);
+      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`);
     } else {
       await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nPara pagar digite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`);
     }
@@ -1003,7 +1015,7 @@ app.get('/admin', async (req, res) => {
   for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.imei)}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
   table += '</table>';
   res.send(page('Dashboard', `<div class="topbar"><h1>📊 Dashboard</h1><span class="muted">${dateBR(new Date())}</span></div><div class="grid">
-  <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 A receber</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
+  <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
   </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
 
