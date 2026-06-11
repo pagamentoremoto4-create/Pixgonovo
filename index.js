@@ -851,14 +851,11 @@ Pode enviar 1 IMEI ou vários em lote, um por linha.`);
 
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
-      const pedidoAviso = await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]);
-      if (pedidoAviso) await avisarNovoPedidoAdmins(pedidoAviso);
       await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
       return;
     }
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
-    await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
     await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
     return;
   }
