@@ -32,7 +32,6 @@ const DB_DIR = path.dirname(DB_PATH);
 const BACKUP_DIR = path.join(DB_DIR, 'backups');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
-const ESIM_IMG_DIR = path.join(PUBLIC_DIR, 'esim');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
 const ADMIN_NUMBER = onlyDigits(process.env.ADMIN_NUMBER || '');
 const ADMIN_PANEL_USER = process.env.ADMIN_PANEL_USER || 'admin';
@@ -42,7 +41,6 @@ const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-if (!fs.existsSync(ESIM_IMG_DIR)) fs.mkdirSync(ESIM_IMG_DIR, { recursive: true });
 
 let sock = null;
 let qrCodeBase64 = null;
@@ -144,94 +142,39 @@ function textoSaldoCurto(saldo) {
 
 function normalizarTipoEntrada(v) {
   const t = String(v || 'IMEI').toUpperCase().replace(/[^A-Z_]/g, '');
-  return ['IMEI', 'LOCK_CODE', 'OUTRO', 'ESIM'].includes(t) ? t : 'IMEI';
+  return ['IMEI', 'LOCK_CODE', 'OUTRO'].includes(t) ? t : 'IMEI';
 }
 function labelEntradaServico(servico) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   if (String(servico?.entrada_label || '').trim()) return String(servico.entrada_label).trim();
   if (tipo === 'LOCK_CODE') return 'Lock Code';
   if (tipo === 'OUTRO') return 'Informação';
-  if (tipo === 'ESIM') return 'eSIM';
   return 'IMEI';
 }
 function tituloTipoEntrada(tipo) {
   tipo = normalizarTipoEntrada(tipo);
   if (tipo === 'LOCK_CODE') return 'Lock Code';
   if (tipo === 'OUTRO') return 'Outro';
-  if (tipo === 'ESIM') return 'eSIM';
   return 'IMEI';
 }
 function iconeEntradaServico(servico) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   if (tipo === 'LOCK_CODE') return '🔐';
   if (tipo === 'OUTRO') return '📝';
-  if (tipo === 'ESIM') return '📲';
   return '📱';
 }
-function imeiPassaLuhn(imei) {
-  imei = onlyDigits(imei);
-  if (!/^\d{15}$/.test(imei)) return false;
-
-  let soma = 0;
-  for (let i = 0; i < 15; i++) {
-    let numero = Number(imei[i]);
-
-    // IMEI usa Luhn: dobra as posições pares considerando contagem humana,
-    // que são índices 1, 3, 5... no JavaScript.
-    if (i % 2 === 1) {
-      numero *= 2;
-      if (numero > 9) numero -= 9;
-    }
-
-    soma += numero;
-  }
-
-  return soma % 10 === 0;
-}
-
-function imeiSequenciaFalsa(imei) {
-  imei = onlyDigits(imei);
-  if (/^(\d)\1{14}$/.test(imei)) return true; // 000..., 111..., 999...
-  const bloqueados = new Set([
-    '123456789012345',
-    '012345678901234',
-    '987654321098765'
-  ]);
-  return bloqueados.has(imei);
-}
-
-function validarIMEI(imei) {
-  imei = onlyDigits(imei);
-  return /^\d{15}$/.test(imei) && !imeiSequenciaFalsa(imei) && imeiPassaLuhn(imei);
-}
-
 function extrairImeisEmLote(texto) {
-  const numeros = String(texto || '').match(/\d+/g) || [];
-  return [...new Set(numeros.filter(n => n.length === 15))];
+  const matches = String(texto || '').match(/\d{15}/g) || [];
+  return [...new Set(matches)];
 }
-
 function validarEntradaServico(servico, textoOriginal) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   const bruto = String(textoOriginal || '').trim();
   if (tipo === 'IMEI') {
-    const numeros = bruto.match(/\d+/g) || [];
-    const sobras = bruto.replace(/[\d\s,;.\-_/()]+/g, '');
-
-    if (!numeros.length) {
-      return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos válidos ou vários IMEIs, um por linha.\n\nDica: digite *#06# no aparelho e copie o IMEI da tela.\n\nDigite cancelar para sair.` };
-    }
-
-    const formatoErrado = numeros.filter(n => n.length !== 15);
-    if (formatoErrado.length || sobras) {
-      return { ok: false, erro: `❌ Formato inválido.\n\nO IMEI precisa ter exatamente 15 números.\n\n📦 Em lote, envie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
-    }
-
-    const imeis = [...new Set(numeros)];
-    const invalidos = imeis.filter(imei => !validarIMEI(imei));
-    if (invalidos.length) {
-      return { ok: false, erro: `❌ IMEI inválido pelo verificador.\n\nEstes IMEIs têm 15 dígitos, mas não passaram na validação:\n${invalidos.join('\n')}\n\n📱 Peça ao cliente para digitar *#06# no aparelho e enviar o IMEI exibido na tela.\n\nDigite cancelar para sair.` };
-    }
-
+    const imeis = extrairImeisEmLote(bruto);
+    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos ou vários IMEIs, um por linha.\n\nExemplo:\n356789123456789\n356789123456780\n\nDigite cancelar para sair.` };
+    const sobras = bruto.replace(/\d{15}/g, '').replace(/[\s,;.\-_/]+/g, '');
+    if (sobras) return { ok: false, erro: `❌ Envio em lote aceito somente com IMEIs de 15 dígitos.\n\nEnvie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
     return { ok: true, entradas: imeis };
   }
   if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
@@ -397,30 +340,6 @@ async function initDB() {
     valor TEXT,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
-
-  await run(`CREATE TABLE IF NOT EXISTS esim_qrcodes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plano_nome TEXT NOT NULL,
-    validade TEXT,
-    preco_revenda REAL DEFAULT 0,
-    preco_cliente REAL DEFAULT 0,
-    arquivo_qr TEXT NOT NULL,
-    status TEXT DEFAULT 'DISPONIVEL',
-    revenda_id INTEGER,
-    revenda_nome TEXT,
-    comprador_jid TEXT,
-    pedido_id INTEGER,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    vendido_em TEXT
-  )`);
-  await addColumnIfMissing('esim_qrcodes', 'validade', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'preco_revenda', 'REAL DEFAULT 0');
-  await addColumnIfMissing('esim_qrcodes', 'preco_cliente', 'REAL DEFAULT 0');
-  await addColumnIfMissing('esim_qrcodes', 'revenda_id', 'INTEGER');
-  await addColumnIfMissing('esim_qrcodes', 'revenda_nome', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'comprador_jid', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'pedido_id', 'INTEGER');
-  await addColumnIfMissing('esim_qrcodes', 'vendido_em', 'TEXT');
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
@@ -450,7 +369,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:20px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:31px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:12px 14px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:32px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:9px 13px;border-radius:12px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{padding:12px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:12px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:18px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:42px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:18px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:24px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:30px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -520,69 +439,6 @@ async function listarServicosTexto(revenda) {
   return texto;
 }
 async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
-
-function parseMoney(v) { return Number(String(v || '0').replace(',', '.')) || 0; }
-function limparNomePlano(v) { return String(v || '').trim().replace(/\s+/g, ' '); }
-function keyPlanoEsim(row) { return `${row.plano_nome}|||${row.validade || ''}|||${Number(row.preco_revenda || 0)}|||${Number(row.preco_cliente || 0)}`; }
-function textoInstrucoesEsim(plano) {
-  return `📋 *COMO INSTALAR O eSIM*\n\n📱 Plano: *${plano}*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie o QR Code enviado\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet / Conexões\n3️⃣ SIM Cards / Gerenciador de SIM\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie o QR Code enviado\n\n⚠️ *Importante*\n• QR Code de uso único\n• Ative com internet conectada\n• Não compartilhe o QR Code\n• Depois de usado, ele não pode ser reutilizado\n\n🏢 CentralUnlocker`;
-}
-async function enviarImagemEsim(to, qr, caption) {
-  const rel = String(qr.arquivo_qr || '').replace(/^\/+/, '');
-  const file = path.join(PUBLIC_DIR, rel.replace(/^public\//, ''));
-  if (!fs.existsSync(file)) {
-    await enviarTexto(to, `⚠️ QR Code não encontrado no servidor. Pedido #${qr.pedido_id || '-'}. Chame o suporte.`);
-    return false;
-  }
-  await sock.sendMessage(to, { image: fs.readFileSync(file), caption });
-  return true;
-}
-async function gruposEsimDisponiveis() {
-  return await all(`SELECT plano_nome, validade, preco_revenda, preco_cliente, COUNT(*) qtd
-    FROM esim_qrcodes
-    WHERE status='DISPONIVEL'
-    GROUP BY plano_nome, validade, preco_revenda, preco_cliente
-    ORDER BY plano_nome ASC, preco_revenda ASC`);
-}
-async function iniciarCompraEsim(from, revenda) {
-  const grupos = await gruposEsimDisponiveis();
-  if (!grupos.length) {
-    await enviarTexto(from, '📱 *eSIM*\n\n❌ Nenhum eSIM disponível no momento.');
-    return;
-  }
-  pedidoSessao.set(from, { etapa: 'esim_escolha', grupos: grupos.map(g => ({ plano_nome: g.plano_nome, validade: g.validade || '', preco_revenda: Number(g.preco_revenda || 0), preco_cliente: Number(g.preco_cliente || 0), qtd: g.qtd })) });
-  let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
-  grupos.forEach((g, i) => {
-    txt += `${i + 1}️⃣ ${g.plano_nome}${g.validade ? ` - ${g.validade}` : ''}\n💰 ${brl(g.preco_revenda)}\n📦 Disponível: ${g.qtd}\n\n`;
-  });
-  txt += 'Digite o número do plano.\n\nDigite cancelar para sair.';
-  await enviarTexto(from, txt.trim());
-}
-async function confirmarCompraEsim(from, revenda, escolha) {
-  const sess = pedidoSessao.get(from);
-  const g = sess?.grupos?.[Number(escolha) - 1];
-  if (!g) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
-  pedidoSessao.set(from, { etapa: 'esim_confirmar', plano: g });
-  await enviarTexto(from, `📱 *${g.plano_nome}*${g.validade ? `\n⏱️ Validade: ${g.validade}` : ''}\n\n💰 Valor: ${brl(g.preco_revenda)}\n💳 Seu saldo atual: ${brl(revenda.saldo)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
-}
-async function concluirCompraEsim(from, revenda) {
-  const sess = pedidoSessao.get(from);
-  const g = sess?.plano;
-  if (!g) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Sessão expirada. Digite menu.'); return; }
-  const qr = await get(`SELECT * FROM esim_qrcodes WHERE status='DISPONIVEL' AND plano_nome=? AND IFNULL(validade,'')=? AND preco_revenda=? AND preco_cliente=? ORDER BY id ASC LIMIT 1`, [g.plano_nome, g.validade || '', g.preco_revenda, g.preco_cliente]);
-  if (!qr) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Esse plano acabou no estoque. Digite menu para escolher outro.'); return; }
-  const novoSaldo = Number(revenda.saldo || 0) - Number(g.preco_revenda || 0);
-  const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
-    VALUES ('ESIM', ?, ?, ?, ?, ?, ?, 'ESIM', 'QR Code', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`, [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${g.plano_nome}`, `QR #${qr.id}`, g.preco_revenda]);
-  await run(`UPDATE esim_qrcodes SET status='VENDIDO', revenda_id=?, revenda_nome=?, comprador_jid=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, from, ins.lastID, qr.id]);
-  await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novoSaldo, revenda.id]);
-  pedidoSessao.delete(from);
-  notificarPainel('esim', '📱 Venda eSIM', `${revenda.nome} - ${g.plano_nome}`);
-  await enviarTexto(from, `✅ *Compra aprovada*\n\n📱 ${g.plano_nome}${g.validade ? `\n⏱️ ${g.validade}` : ''}\n💰 ${brl(g.preco_revenda)} descontado do saldo\n💳 Novo saldo: ${brl(novoSaldo)}\n🆔 Pedido #${ins.lastID}\n\nVou enviar o QR Code agora.`);
-  const qrAtualizado = { ...qr, pedido_id: ins.lastID };
-  await enviarImagemEsim(from, qrAtualizado, `📱 ${g.plano_nome}\n🆔 Pedido #${ins.lastID}\n\n⚠️ QR Code de uso único.`);
-  await enviarTexto(from, textoInstrucoesEsim(g.plano_nome));
-}
 
 async function iniciarWhatsApp() {
   await initDB();
@@ -763,26 +619,12 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
 
   if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
   if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
-  if (texto === 'esim' || texto === '/esim') { await iniciarCompraEsim(from, revenda); return; }
 
   const sess = pedidoSessao.get(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
-    if (texto === '2') { await iniciarCompraEsim(from, revenda); return; }
-    if (texto === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, revenda); return; }
-    if (texto === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, revenda); return; }
-  }
-
-  if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(texto)) {
-    await confirmarCompraEsim(from, revenda, texto);
-    return;
-  }
-
-  if (sess?.etapa === 'esim_confirmar') {
-    if (texto === '1' || texto === 'confirmar' || texto === 'sim') { await concluirCompraEsim(from, revenda); return; }
-    if (texto === '2' || texto === 'cancelar' || texto === 'nao' || texto === 'não') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra eSIM cancelada.'); return; }
-    await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.');
-    return;
+    if (texto === '2') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, revenda); return; }
+    if (texto === '3') { pedidoSessao.delete(from); await enviarContaRevenda(from, revenda); return; }
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(texto)) {
@@ -861,8 +703,8 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   const imei = onlyDigits(partes[partes.length - 1]);
   const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
   const nomeServico = partes.slice(1, -2).join(' ').trim();
-  if (!nomeServico || !valor || !validarIMEI(imei)) {
-    await enviarTexto(from, '❌ Formato inválido ou IMEI inválido pelo verificador.\n\nUse:\nservico desbloqueio tim 180 356938035643809\n\nDica: peça ao cliente para digitar *#06# no aparelho.');
+  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
+    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
     return true;
   }
   const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
@@ -897,7 +739,7 @@ async function enviarHistoricoRevenda(from, revenda) {
   const rows = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 10', [revenda.id]);
   if (!rows.length) { await enviarTexto(from, '📋 Nenhum pedido encontrado.'); return; }
   let txt = `📋 *HISTÓRICO*\n\n`;
-  for (const p of rows) txt += `${p.tipo === 'ESIM' ? '📱' : '🛠'} ${p.servico_nome}\n${textoEntradaPedido(p)}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  for (const p of rows) txt += `🛠 ${p.servico_nome}\n📱 ${p.imei}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function enviarContaRevenda(from, revenda) {
@@ -928,9 +770,8 @@ Digite:
 Você verá:
 
 1️⃣ Serviços
-2️⃣ Comprar eSIM
-3️⃣ Histórico
-4️⃣ Conta
+2️⃣ Histórico
+3️⃣ Conta
 
 🔹 *Solicitar serviço*
 menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a informação solicitada
@@ -938,10 +779,10 @@ menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a inf
 📦 Para serviço tipo IMEI, pode enviar vários IMEIs de uma vez, um por linha
 
 🔹 *Ver histórico*
-menu → 3 Histórico
+menu → 2 Histórico
 
 🔹 *Ver conta*
-menu → 4 Conta
+menu → 3 Conta
 
 🔹 *Gerar PIX*
 Digite:
@@ -1503,64 +1344,6 @@ app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get(
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
 app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
 
-
-app.get('/admin/esim', async (req, res) => {
-  const grupos = await all(`SELECT plano_nome, validade, preco_revenda, preco_cliente,
-    SUM(CASE WHEN status='DISPONIVEL' THEN 1 ELSE 0 END) disponiveis,
-    SUM(CASE WHEN status='VENDIDO' THEN 1 ELSE 0 END) vendidos,
-    COUNT(*) total
-    FROM esim_qrcodes GROUP BY plano_nome, validade, preco_revenda, preco_cliente ORDER BY plano_nome ASC`);
-  const rows = await all('SELECT * FROM esim_qrcodes ORDER BY id DESC LIMIT 200');
-  let html = `<div class="hero"><h1>📱 eSIM</h1><p>Adicione QR Codes digitando o nome do plano. A revenda compra pelo WhatsApp e o sistema entrega automaticamente com instruções.</p></div>`;
-  html += `<div class="card"><h2>➕ Adicionar QR Code</h2><form method="post" action="/admin/esim/upload"><div class="form-grid"><div><label>Nome do plano</label><input name="plano_nome" placeholder="Ex: TIM 70GB" required></div><div><label>Validade</label><input name="validade" placeholder="Ex: 30 dias"></div><div><label>Preço revenda</label><input name="preco_revenda" placeholder="Ex: 55" required></div><div><label>Preço cliente</label><input name="preco_cliente" placeholder="Opcional"></div></div><br><label>Imagem do QR Code</label><input id="esimFile" type="file" accept="image/png,image/jpeg,image/webp" required><input id="esimData" type="hidden" name="imageData"><br><br><button class="btn green" id="esimBtn" disabled>Salvar QR Code</button></form><p class="mini-help">Você só envia a imagem do QR Code. Não precisa código manual.</p><script>const ef=document.getElementById('esimFile'),ed=document.getElementById('esimData'),eb=document.getElementById('esimBtn');ef&&ef.addEventListener('change',()=>{const file=ef.files&&ef.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{ed.value=r.result;eb.disabled=false;eb.textContent='Salvar QR Code';};eb.disabled=true;eb.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div>`;
-  html += `<div class="card"><h2>📦 Resumo do estoque</h2><table><tr><th>Plano</th><th>Validade</th><th>Preço revenda</th><th>Disponível</th><th>Vendido</th><th>Total</th></tr>`;
-  if (!grupos.length) html += `<tr><td colspan="6" class="empty">Nenhum QR cadastrado ainda.</td></tr>`;
-  for (const g of grupos) html += `<tr><td>${safeHtml(g.plano_nome)}</td><td>${safeHtml(g.validade || '-')}</td><td>${brl(g.preco_revenda)}</td><td><span class="pill">${g.disponiveis || 0}</span></td><td>${g.vendidos || 0}</td><td>${g.total}</td></tr>`;
-  html += `</table></div>`;
-  html += `<div class="card"><h2>🖼️ QR Codes cadastrados</h2><table><tr><th>ID</th><th>QR</th><th>Plano</th><th>Preço</th><th>Status</th><th>Pedido</th><th>Ações</th></tr>`;
-  for (const q of rows) {
-    html += `<tr><td>#${q.id}</td><td><img src="/${safeHtml(q.arquivo_qr)}" style="width:70px;height:70px;object-fit:cover;border-radius:10px"></td><td>${safeHtml(q.plano_nome)}<br><span class="muted">${safeHtml(q.validade || '')}</span></td><td>${brl(q.preco_revenda)}</td><td>${q.status === 'DISPONIVEL' ? '✅ Disponível' : '✅ Vendido'}</td><td>${q.pedido_id ? `#${q.pedido_id}` : '-'}</td><td><a class="btn" href="/${safeHtml(q.arquivo_qr)}" target="_blank">Ver</a>${q.status === 'DISPONIVEL' ? `<form class="forms-inline" method="post" action="/admin/esim/${q.id}/excluir"><button class="btn red" onclick="return confirm('Excluir este QR?')">Excluir</button></form>` : `<form class="forms-inline" method="post" action="/admin/esim/${q.id}/reenviar"><button class="btn green">Reenviar</button></form>`}</td></tr>`;
-  }
-  html += `</table></div>`;
-  res.send(page('eSIM', html));
-});
-
-app.post('/admin/esim/upload', async (req, res) => {
-  const plano = limparNomePlano(req.body.plano_nome);
-  const validade = String(req.body.validade || '').trim();
-  const precoRevenda = parseMoney(req.body.preco_revenda);
-  const precoCliente = parseMoney(req.body.preco_cliente);
-  const data = String(req.body.imageData || '');
-  const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
-  if (!plano || !precoRevenda || !m) return res.status(400).send(page('Erro', '<h1>❌ Dados inválidos</h1><p>Volte e confira plano, preço e imagem.</p>'));
-  const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
-  const filename = `esim_${Date.now()}_${Math.random().toString(16).slice(2)}.${ext}`;
-  const filepath = path.join(ESIM_IMG_DIR, filename);
-  fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'));
-  const rel = `esim/${filename}`;
-  await run(`INSERT INTO esim_qrcodes (plano_nome, validade, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, ?, 'DISPONIVEL')`, [plano, validade, precoRevenda, precoCliente, rel]);
-  notificarPainel('esim', '📱 QR eSIM adicionado', plano);
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/:id/excluir', async (req, res) => {
-  const q = await get('SELECT * FROM esim_qrcodes WHERE id=? AND status="DISPONIVEL"', [req.params.id]);
-  if (q) {
-    try { fs.unlinkSync(path.join(PUBLIC_DIR, String(q.arquivo_qr || '').replace(/^\/+/, ''))); } catch(e) {}
-    await run('DELETE FROM esim_qrcodes WHERE id=?', [q.id]);
-  }
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/:id/reenviar', async (req, res) => {
-  const q = await get('SELECT * FROM esim_qrcodes WHERE id=?', [req.params.id]);
-  if (q && q.comprador_jid) {
-    await enviarImagemEsim(q.comprador_jid, q, `📱 ${q.plano_nome}\n${q.pedido_id ? `🆔 Pedido #${q.pedido_id}\n` : ''}\n⚠️ QR Code de uso único.`);
-    await enviarTexto(q.comprador_jid, textoInstrucoesEsim(q.plano_nome));
-  }
-  res.redirect('/admin/esim');
-});
-
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 app.get('/admin/config', (req, res) => {
@@ -1574,7 +1357,6 @@ app.post('/admin/config/hacker-image', async (req, res) => {
     const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
     if (!m) return res.send(page('Erro', '<h1>❌ Imagem inválida</h1><p>Envie uma imagem PNG, JPG ou WEBP.</p><a class="btn" href="/admin/config">Voltar</a>'));
     if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-if (!fs.existsSync(ESIM_IMG_DIR)) fs.mkdirSync(ESIM_IMG_DIR, { recursive: true });
     fs.writeFileSync(HACKER_IMAGE_PATH, Buffer.from(m[2], 'base64'));
     notificarPainel('banner', '🖼️ Banner atualizado', 'Foto do hacker alterada manualmente');
     res.redirect('/admin/config?ok=1');
