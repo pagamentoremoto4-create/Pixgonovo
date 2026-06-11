@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const sqlite3 = require('sqlite3').verbose();
+const multer = require('multer');
 
 const {
   default: makeWASocket,
@@ -32,8 +33,8 @@ const DB_DIR = path.dirname(DB_PATH);
 const BACKUP_DIR = path.join(DB_DIR, 'backups');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
-const ESIM_IMG_DIR = path.join(PUBLIC_DIR, 'esim');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
+const ESIM_DIR = path.join(PUBLIC_DIR, 'esim');
 const ADMIN_NUMBER = onlyDigits(process.env.ADMIN_NUMBER || '');
 const ADMIN_PANEL_USER = process.env.ADMIN_PANEL_USER || 'admin';
 const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
@@ -42,7 +43,7 @@ const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-if (!fs.existsSync(ESIM_IMG_DIR)) fs.mkdirSync(ESIM_IMG_DIR, { recursive: true });
+if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
 
 let sock = null;
 let qrCodeBase64 = null;
@@ -59,6 +60,18 @@ const TEMAS_PAINEL = {
 
 const pedidoSessao = new Map();
 const adminSessao = new Map();
+
+const uploadEsim = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, ESIM_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '.png') || '.png';
+      cb(null, `esim_${Date.now()}_${Math.random().toString(16).slice(2)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype || ''))
+});
 
 // Travas anti-loop/anti-mensagens antigas do Baileys
 const mensagensProcessadas = new Set();
@@ -142,96 +155,69 @@ function textoSaldoCurto(saldo) {
   return 'Quitado';
 }
 
+function normalizarTipoRevenda(v) {
+  const t = String(v || 'POS_PAGO').toUpperCase().replace(/[ÁÀÃÂ]/g, 'A').replace(/[ÉÊ]/g, 'E').replace(/[^A-Z_]/g, '_');
+  return t.includes('PRE') ? 'PRE_PAGO' : 'POS_PAGO';
+}
+function labelTipoRevenda(v) { return normalizarTipoRevenda(v) === 'PRE_PAGO' ? 'Pré-pago' : 'Pós-pago'; }
+function isRevendaPrePaga(revenda) { return normalizarTipoRevenda(revenda?.tipo_revenda) === 'PRE_PAGO'; }
+function textoSaldoInsuficiente(revenda, valor, item='serviço') {
+  const saldo = Number(revenda?.saldo || 0);
+  const falta = Math.max(0, Number(valor || 0) - saldo);
+  return `❌ Saldo insuficiente.
+
+${item ? `🛠 ${item}
+` : ''}💰 Valor: ${brl(valor)}
+💳 Seu saldo atual: ${brl(saldo)}
+
+Faltam: ${brl(falta)}
+
+Para adicionar saldo, digite:
+
+*pagar ${falta.toFixed(2).replace('.', ',')}*
+
+Ou digite outro valor, exemplo:
+*pagar 100*
+*pagar 200*
+
+Após a confirmação do PIX, seu saldo será liberado automaticamente.`;
+}
+
 function normalizarTipoEntrada(v) {
   const t = String(v || 'IMEI').toUpperCase().replace(/[^A-Z_]/g, '');
-  return ['IMEI', 'LOCK_CODE', 'OUTRO', 'ESIM'].includes(t) ? t : 'IMEI';
+  return ['IMEI', 'LOCK_CODE', 'OUTRO'].includes(t) ? t : 'IMEI';
 }
 function labelEntradaServico(servico) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   if (String(servico?.entrada_label || '').trim()) return String(servico.entrada_label).trim();
   if (tipo === 'LOCK_CODE') return 'Lock Code';
   if (tipo === 'OUTRO') return 'Informação';
-  if (tipo === 'ESIM') return 'eSIM';
   return 'IMEI';
 }
 function tituloTipoEntrada(tipo) {
   tipo = normalizarTipoEntrada(tipo);
   if (tipo === 'LOCK_CODE') return 'Lock Code';
   if (tipo === 'OUTRO') return 'Outro';
-  if (tipo === 'ESIM') return 'eSIM';
   return 'IMEI';
 }
 function iconeEntradaServico(servico) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   if (tipo === 'LOCK_CODE') return '🔐';
   if (tipo === 'OUTRO') return '📝';
-  if (tipo === 'ESIM') return '📲';
   return '📱';
 }
-function imeiPassaLuhn(imei) {
-  imei = onlyDigits(imei);
-  if (!/^\d{15}$/.test(imei)) return false;
-
-  let soma = 0;
-  for (let i = 0; i < 15; i++) {
-    let numero = Number(imei[i]);
-
-    // IMEI usa Luhn: dobra as posições pares considerando contagem humana,
-    // que são índices 1, 3, 5... no JavaScript.
-    if (i % 2 === 1) {
-      numero *= 2;
-      if (numero > 9) numero -= 9;
-    }
-
-    soma += numero;
-  }
-
-  return soma % 10 === 0;
-}
-
-function imeiSequenciaFalsa(imei) {
-  imei = onlyDigits(imei);
-  if (/^(\d)\1{14}$/.test(imei)) return true; // 000..., 111..., 999...
-  const bloqueados = new Set([
-    '123456789012345',
-    '012345678901234',
-    '987654321098765'
-  ]);
-  return bloqueados.has(imei);
-}
-
-function validarIMEI(imei) {
-  imei = onlyDigits(imei);
-  return /^\d{15}$/.test(imei) && !imeiSequenciaFalsa(imei) && imeiPassaLuhn(imei);
-}
-
 function extrairImeisEmLote(texto) {
-  const numeros = String(texto || '').match(/\d+/g) || [];
-  return [...new Set(numeros.filter(n => n.length === 15))];
+  const matches = String(texto || '').match(/\d{15}/g) || [];
+  return [...new Set(matches)];
 }
-
 function validarEntradaServico(servico, textoOriginal) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   const bruto = String(textoOriginal || '').trim();
   if (tipo === 'IMEI') {
-    const numeros = bruto.match(/\d+/g) || [];
-    const sobras = bruto.replace(/[\d\s,;.\-_/()]+/g, '');
-
-    if (!numeros.length) {
-      return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos válidos ou vários IMEIs, um por linha.\n\nDica: digite *#06# no aparelho e copie o IMEI da tela.\n\nDigite cancelar para sair.` };
-    }
-
-    const formatoErrado = numeros.filter(n => n.length !== 15);
-    if (formatoErrado.length || sobras) {
-      return { ok: false, erro: `❌ Formato inválido.\n\nO IMEI precisa ter exatamente 15 números.\n\n📦 Em lote, envie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
-    }
-
-    const imeis = [...new Set(numeros)];
-    const invalidos = imeis.filter(imei => !validarIMEI(imei));
-    if (invalidos.length) {
-      return { ok: false, erro: `❌ IMEI inválido pelo verificador.\n\nEstes IMEIs têm 15 dígitos, mas não passaram na validação:\n${invalidos.join('\n')}\n\n📱 Peça ao cliente para digitar *#06# no aparelho e enviar o IMEI exibido na tela.\n\nDigite cancelar para sair.` };
-    }
-
+    const imeis = extrairImeisEmLote(bruto);
+    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos ou vários IMEIs, um por linha.\n\nExemplo:\n356789123456789\n356789123456780\n\nDigite cancelar para sair.` };
+    const sobras = bruto.replace(/\d{15}/g, '').replace(/[\s,;.\-_/]+/g, '');
+    if (sobras) return { ok: false, erro: `❌ Envio em lote aceito somente com IMEIs de 15 dígitos.\n\nEnvie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
     return { ok: true, entradas: imeis };
   }
   if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
@@ -311,6 +297,7 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'senha', 'TEXT');
   await addColumnIfMissing('revendas', 'status', "TEXT DEFAULT 'ATIVA'");
   await addColumnIfMissing('revendas', 'saldo', 'REAL DEFAULT 0');
+  await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'POS_PAGO'");
 
   await run(`CREATE TABLE IF NOT EXISTS servicos_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -392,35 +379,30 @@ async function initDB() {
   )`);
   await addColumnIfMissing('pix_pedidos', 'cliente_jid', 'TEXT');
 
+  await run(`CREATE TABLE IF NOT EXISTS esim_estoque (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome_plano TEXT NOT NULL,
+    preco_revenda REAL DEFAULT 0,
+    preco_cliente REAL DEFAULT 0,
+    arquivo_qr TEXT,
+    status TEXT DEFAULT 'DISPONIVEL',
+    revenda_id INTEGER,
+    revenda_nome TEXT,
+    pedido_id INTEGER,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    vendido_em TEXT
+  )`);
+  await addColumnIfMissing('esim_estoque', 'preco_revenda', 'REAL DEFAULT 0');
+  await addColumnIfMissing('esim_estoque', 'preco_cliente', 'REAL DEFAULT 0');
+  await addColumnIfMissing('esim_estoque', 'revenda_id', 'INTEGER');
+  await addColumnIfMissing('esim_estoque', 'revenda_nome', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'pedido_id', 'INTEGER');
+
   await run(`CREATE TABLE IF NOT EXISTS configs (
     chave TEXT PRIMARY KEY,
     valor TEXT,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
-
-  await run(`CREATE TABLE IF NOT EXISTS esim_qrcodes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plano_nome TEXT NOT NULL,
-    validade TEXT,
-    preco_revenda REAL DEFAULT 0,
-    preco_cliente REAL DEFAULT 0,
-    arquivo_qr TEXT NOT NULL,
-    status TEXT DEFAULT 'DISPONIVEL',
-    revenda_id INTEGER,
-    revenda_nome TEXT,
-    comprador_jid TEXT,
-    pedido_id INTEGER,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    vendido_em TEXT
-  )`);
-  await addColumnIfMissing('esim_qrcodes', 'validade', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'preco_revenda', 'REAL DEFAULT 0');
-  await addColumnIfMissing('esim_qrcodes', 'preco_cliente', 'REAL DEFAULT 0');
-  await addColumnIfMissing('esim_qrcodes', 'revenda_id', 'INTEGER');
-  await addColumnIfMissing('esim_qrcodes', 'revenda_nome', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'comprador_jid', 'TEXT');
-  await addColumnIfMissing('esim_qrcodes', 'pedido_id', 'INTEGER');
-  await addColumnIfMissing('esim_qrcodes', 'vendido_em', 'TEXT');
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
@@ -520,69 +502,6 @@ async function listarServicosTexto(revenda) {
   return texto;
 }
 async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
-
-function parseMoney(v) { return Number(String(v || '0').replace(',', '.')) || 0; }
-function limparNomePlano(v) { return String(v || '').trim().replace(/\s+/g, ' '); }
-function keyPlanoEsim(row) { return `${row.plano_nome}|||${row.validade || ''}|||${Number(row.preco_revenda || 0)}|||${Number(row.preco_cliente || 0)}`; }
-function textoInstrucoesEsim(plano) {
-  return `📋 *COMO INSTALAR O eSIM*\n\n📱 Plano: *${plano}*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie o QR Code enviado\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet / Conexões\n3️⃣ SIM Cards / Gerenciador de SIM\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie o QR Code enviado\n\n⚠️ *Importante*\n• QR Code de uso único\n• Ative com internet conectada\n• Não compartilhe o QR Code\n• Depois de usado, ele não pode ser reutilizado\n\n🏢 CentralUnlocker`;
-}
-async function enviarImagemEsim(to, qr, caption) {
-  const rel = String(qr.arquivo_qr || '').replace(/^\/+/, '');
-  const file = path.join(PUBLIC_DIR, rel.replace(/^public\//, ''));
-  if (!fs.existsSync(file)) {
-    await enviarTexto(to, `⚠️ QR Code não encontrado no servidor. Pedido #${qr.pedido_id || '-'}. Chame o suporte.`);
-    return false;
-  }
-  await sock.sendMessage(to, { image: fs.readFileSync(file), caption });
-  return true;
-}
-async function gruposEsimDisponiveis() {
-  return await all(`SELECT plano_nome, validade, preco_revenda, preco_cliente, COUNT(*) qtd
-    FROM esim_qrcodes
-    WHERE status='DISPONIVEL'
-    GROUP BY plano_nome, validade, preco_revenda, preco_cliente
-    ORDER BY plano_nome ASC, preco_revenda ASC`);
-}
-async function iniciarCompraEsim(from, revenda) {
-  const grupos = await gruposEsimDisponiveis();
-  if (!grupos.length) {
-    await enviarTexto(from, '📱 *eSIM*\n\n❌ Nenhum eSIM disponível no momento.');
-    return;
-  }
-  pedidoSessao.set(from, { etapa: 'esim_escolha', grupos: grupos.map(g => ({ plano_nome: g.plano_nome, validade: g.validade || '', preco_revenda: Number(g.preco_revenda || 0), preco_cliente: Number(g.preco_cliente || 0), qtd: g.qtd })) });
-  let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
-  grupos.forEach((g, i) => {
-    txt += `${i + 1}️⃣ ${g.plano_nome}${g.validade ? ` - ${g.validade}` : ''}\n💰 ${brl(g.preco_revenda)}\n📦 Disponível: ${g.qtd}\n\n`;
-  });
-  txt += 'Digite o número do plano.\n\nDigite cancelar para sair.';
-  await enviarTexto(from, txt.trim());
-}
-async function confirmarCompraEsim(from, revenda, escolha) {
-  const sess = pedidoSessao.get(from);
-  const g = sess?.grupos?.[Number(escolha) - 1];
-  if (!g) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
-  pedidoSessao.set(from, { etapa: 'esim_confirmar', plano: g });
-  await enviarTexto(from, `📱 *${g.plano_nome}*${g.validade ? `\n⏱️ Validade: ${g.validade}` : ''}\n\n💰 Valor: ${brl(g.preco_revenda)}\n💳 Seu saldo atual: ${brl(revenda.saldo)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
-}
-async function concluirCompraEsim(from, revenda) {
-  const sess = pedidoSessao.get(from);
-  const g = sess?.plano;
-  if (!g) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Sessão expirada. Digite menu.'); return; }
-  const qr = await get(`SELECT * FROM esim_qrcodes WHERE status='DISPONIVEL' AND plano_nome=? AND IFNULL(validade,'')=? AND preco_revenda=? AND preco_cliente=? ORDER BY id ASC LIMIT 1`, [g.plano_nome, g.validade || '', g.preco_revenda, g.preco_cliente]);
-  if (!qr) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Esse plano acabou no estoque. Digite menu para escolher outro.'); return; }
-  const novoSaldo = Number(revenda.saldo || 0) - Number(g.preco_revenda || 0);
-  const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
-    VALUES ('ESIM', ?, ?, ?, ?, ?, ?, 'ESIM', 'QR Code', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`, [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${g.plano_nome}`, `QR #${qr.id}`, g.preco_revenda]);
-  await run(`UPDATE esim_qrcodes SET status='VENDIDO', revenda_id=?, revenda_nome=?, comprador_jid=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, from, ins.lastID, qr.id]);
-  await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novoSaldo, revenda.id]);
-  pedidoSessao.delete(from);
-  notificarPainel('esim', '📱 Venda eSIM', `${revenda.nome} - ${g.plano_nome}`);
-  await enviarTexto(from, `✅ *Compra aprovada*\n\n📱 ${g.plano_nome}${g.validade ? `\n⏱️ ${g.validade}` : ''}\n💰 ${brl(g.preco_revenda)} descontado do saldo\n💳 Novo saldo: ${brl(novoSaldo)}\n🆔 Pedido #${ins.lastID}\n\nVou enviar o QR Code agora.`);
-  const qrAtualizado = { ...qr, pedido_id: ins.lastID };
-  await enviarImagemEsim(from, qrAtualizado, `📱 ${g.plano_nome}\n🆔 Pedido #${ins.lastID}\n\n⚠️ QR Code de uso único.`);
-  await enviarTexto(from, textoInstrucoesEsim(g.plano_nome));
-}
 
 async function iniciarWhatsApp() {
   await initDB();
@@ -763,25 +682,37 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
 
   if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
   if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
-  if (texto === 'esim' || texto === '/esim') { await iniciarCompraEsim(from, revenda); return; }
 
   const sess = pedidoSessao.get(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
-    if (texto === '2') { await iniciarCompraEsim(from, revenda); return; }
+    if (texto === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
     if (texto === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, revenda); return; }
     if (texto === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, revenda); return; }
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(texto)) {
-    await confirmarCompraEsim(from, revenda, texto);
+    const planos = await planosEsimDisponiveis();
+    const plano = planos[Number(texto) - 1];
+    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await enviarTexto(from, `📱 *${plano.nome_plano}*
+
+💰 Valor: ${brl(plano.preco_revenda)}
+💳 Seu saldo: ${brl(revenda.saldo)}
+🏷 Tipo: ${labelTipoRevenda(revenda.tipo_revenda)}
+
+1️⃣ Confirmar compra
+2️⃣ Cancelar`);
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (texto === '1' || texto === 'confirmar' || texto === 'sim') { await concluirCompraEsim(from, revenda); return; }
-    if (texto === '2' || texto === 'cancelar' || texto === 'nao' || texto === 'não') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra eSIM cancelada.'); return; }
-    await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.');
+    if (texto === '2' || texto === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
+    const plano = sess.plano;
+    pedidoSessao.delete(from);
+    await entregarEsimRevenda(from, revenda, plano);
     return;
   }
 
@@ -818,6 +749,11 @@ Pode enviar 1 IMEI ou vários em lote, um por linha.`);
     }
 
     const valor = await precoDaRevenda(revenda.id, servico.id);
+    const totalPedido = valor * validacao.entradas.length;
+    if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < totalPedido) {
+      await enviarTexto(from, textoSaldoInsuficiente(revenda, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      return;
+    }
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     const entradaLabel = labelEntradaServico(servico);
     const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
@@ -861,8 +797,8 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   const imei = onlyDigits(partes[partes.length - 1]);
   const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
   const nomeServico = partes.slice(1, -2).join(' ').trim();
-  if (!nomeServico || !valor || !validarIMEI(imei)) {
-    await enviarTexto(from, '❌ Formato inválido ou IMEI inválido pelo verificador.\n\nUse:\nservico desbloqueio tim 180 356938035643809\n\nDica: peça ao cliente para digitar *#06# no aparelho.');
+  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
+    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
     return true;
   }
   const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
@@ -893,11 +829,51 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   return true;
 }
 
+
+async function planosEsimDisponiveis() {
+  return await all(`SELECT nome_plano, preco_revenda, preco_cliente, COUNT(*) qtd
+    FROM esim_estoque
+    WHERE status='DISPONIVEL'
+    GROUP BY nome_plano, preco_revenda, preco_cliente
+    ORDER BY nome_plano ASC`);
+}
+async function enviarListaEsim(from) {
+  const planos = await planosEsimDisponiveis();
+  if (!planos.length) { await enviarTexto(from, '❌ Nenhum eSIM disponível no momento.'); return; }
+  let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
+  planos.forEach((p, i) => { txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n📦 ${p.qtd} disponível${p.qtd > 1 ? 's' : ''}\n\n`; });
+  txt += 'Digite o número do plano.';
+  await enviarTexto(from, txt.trim());
+}
+async function entregarEsimRevenda(from, revenda, plano) {
+  const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND preco_revenda=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, plano.preco_revenda]);
+  if (!item) { await enviarTexto(from, '❌ Esse eSIM acabou no estoque. Escolha outro plano.'); return; }
+  const valor = Number(item.preco_revenda || 0);
+  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
+    return;
+  }
+  const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor]);
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
+  await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
+  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
+  const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
+  await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
+  if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
+  await enviarTexto(from, mensagemInstrucaoEsim());
+}
+function mensagemInstrucaoEsim() {
+  return `📋 *COMO INSTALAR O eSIM*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie a imagem enviada\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet\n3️⃣ SIM Cards\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie a imagem enviada\n\n⚠️ *IMPORTANTE*\n• QR Code de uso único\n• Necessário internet para ativação\n• Não compartilhe o QR Code\n\n🏢 CentralUnlocker`;
+}
+
 async function enviarHistoricoRevenda(from, revenda) {
   const rows = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 10', [revenda.id]);
   if (!rows.length) { await enviarTexto(from, '📋 Nenhum pedido encontrado.'); return; }
   let txt = `📋 *HISTÓRICO*\n\n`;
-  for (const p of rows) txt += `${p.tipo === 'ESIM' ? '📱' : '🛠'} ${p.servico_nome}\n${textoEntradaPedido(p)}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  for (const p of rows) txt += `🛠 ${p.servico_nome}\n📱 ${p.imei}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function enviarContaRevenda(from, revenda) {
@@ -938,10 +914,10 @@ menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a inf
 📦 Para serviço tipo IMEI, pode enviar vários IMEIs de uma vez, um por linha
 
 🔹 *Ver histórico*
-menu → 3 Histórico
+menu → 2 Histórico
 
 🔹 *Ver conta*
-menu → 4 Conta
+menu → 3 Conta
 
 🔹 *Gerar PIX*
 Digite:
@@ -1002,7 +978,7 @@ async function cadastrarRevendaDireto(from, nome, whatsapp) {
     await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, w, jid, revenda.id]);
     revenda = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   } else {
-    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha']);
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
     revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
   }
 
@@ -1175,7 +1151,7 @@ async function adminAddRevenda(from, texto) {
   const [nome, whats] = texto.split('|').map(s => s?.trim());
   if (!nome || !whats) { await enviarTexto(from, 'Use: addrevenda Nome | 5575999999999'); return; }
   const w = onlyDigits(whats);
-  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha']);
+  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
   await enviarTexto(from, `✅ Revenda adicionada:\n${nome}\n${w}`);
 }
 async function adminListRevendas(from) { await enviarBuscaRevenda(from, ''); }
@@ -1348,6 +1324,9 @@ function pedidoActions(o, back = '/admin/pedidos') {
     </select>
     <input name="motivo" placeholder="Motivo do cancelamento" style="display:none;margin-top:6px" oninput="this.dataset.changed='1'">
     <button class="btn green">Aplicar</button>
+  </form>
+  <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/apagar" onsubmit="return confirm('Apagar definitivamente o pedido #${o.id}?')">
+    <button class="btn red">🗑️ Apagar</button>
   </form>`;
 }
 function pedidoTable(rows, showServico = true) {
@@ -1393,26 +1372,82 @@ app.post('/admin/pedido/:id/acao', async (req, res) => {
 
   res.redirect(req.get('referer') || '/admin/pedidos');
 });
+app.post('/admin/pedido/:id/apagar', async (req, res) => {
+  const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
+  if (p) {
+    await run('DELETE FROM pedidos WHERE id=?', [p.id]);
+    notificarPainel('pedido', '🗑️ Pedido apagado', `Pedido #${p.id} removido do painel`);
+  }
+  res.redirect(req.get('referer') || '/admin/pedidos');
+});
 app.post('/admin/pedido/:id/processo', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'processo'); } res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) await finalizarPedido(p); res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'cancelar', motivo); } res.redirect(req.get('referer') || '/admin/pedidos'); });
 
+
+app.get('/admin/esim', async (req, res) => {
+  const resumo = await all(`SELECT nome_plano, preco_revenda, COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' GROUP BY nome_plano, preco_revenda ORDER BY nome_plano ASC`);
+  const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
+  let cards = '<div class="grid">';
+  for (const r of resumo) cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${r.qtd}</h1><p class="muted">${brl(r.preco_revenda)}</p></div>`;
+  cards += '</div>';
+  let table = '<table><tr><th>ID</th><th>Plano</th><th>Preço Revenda</th><th>Status</th><th>Revenda/Pedido</th><th>QR</th><th>Ações</th></tr>';
+  for (const i of itens) {
+    const img = i.arquivo_qr ? `<a href="/${safeHtml(i.arquivo_qr)}" target="_blank">Visualizar</a>` : '-';
+    table += `<tr><td>#${i.id}</td><td>${safeHtml(i.nome_plano)}</td><td>${brl(i.preco_revenda)}</td><td><span class="pill">${safeHtml(i.status)}</span></td><td>${safeHtml(i.revenda_nome || '-')}${i.pedido_id ? `<br><span class="muted">Pedido #${i.pedido_id}</span>` : ''}</td><td>${img}</td><td><form class="forms-inline" method="post" action="/admin/esim/${i.id}/apagar"><button class="btn red" onclick="return confirm('Apagar este QR do estoque?')">🗑️ Apagar</button></form></td></tr>`;
+  }
+  table += '</table>';
+  const form = `<div class="card"><h2>➕ Adicionar QR Code eSIM</h2><form method="post" enctype="multipart/form-data"><div class="grid"><input name="nome_plano" placeholder="Nome do plano. Ex: TIM 70GB" required><input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required><input type="file" name="qr" accept="image/*" required></div><br><button class="btn green">Salvar QR Code</button></form><p class="muted">Digite o plano manualmente e envie apenas a imagem do QR Code.</p></div>`;
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${form}${cards}<div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+});
+app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
+  const nome = String(req.body.nome_plano || '').trim();
+  const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
+  if (nome && preco > 0 && req.file) {
+    await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`, [nome, preco, preco, `esim/${req.file.filename}`]);
+    notificarPainel('esim', '📱 QR eSIM adicionado', nome);
+  }
+  res.redirect('/admin/esim');
+});
+app.post('/admin/esim/:id/apagar', async (req, res) => {
+  const item = await get('SELECT * FROM esim_estoque WHERE id=?', [req.params.id]);
+  if (item) {
+    try { if (item.arquivo_qr) fs.unlinkSync(path.join(PUBLIC_DIR, item.arquivo_qr)); } catch(e) {}
+    await run('DELETE FROM esim_estoque WHERE id=?', [item.id]);
+  }
+  res.redirect('/admin/esim');
+});
+app.post('/admin/esim/:id/reenviar', async (req, res) => {
+  const item = await get('SELECT * FROM esim_estoque WHERE id=?', [req.params.id]);
+  if (item?.revenda_id) {
+    const r = await get('SELECT * FROM revendas WHERE id=?', [item.revenda_id]);
+    const jid = r?.jid || numberToJid(r?.whatsapp);
+    const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
+    if (jid && fs.existsSync(qrPath)) {
+      await sock.sendMessage(jid, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ Reenvio do QR Code.` });
+      await enviarTexto(jid, mensagemInstrucaoEsim());
+    }
+  }
+  res.redirect('/admin/esim');
+});
+
 app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
-  let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required></div><button class="btn green">Adicionar Revenda</button></form></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.whatsapp || '-')}</td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Boas-vindas</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
+  let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div><button class="btn green">Adicionar Revenda</button></form><p class="muted">Pré-pago bloqueia compra sem saldo. Pós-pago permite comprar e fica negativo.</p></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
+  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.whatsapp || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Boas-vindas</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
   html += '</table>';
   res.send(page('Revendas', html));
 });
 app.post('/admin/revendas', async (req, res) => {
   const w = normalizarNumeroWhatsApp(req.body.whatsapp);
   const nome = String(req.body.nome || '').trim();
+  const tipoRevenda = normalizarTipoRevenda(req.body.tipo_revenda);
   const existe = await get('SELECT * FROM revendas WHERE whatsapp=? AND status != "REMOVIDA"', [w]);
   if (existe) {
-    await run('UPDATE revendas SET nome=?, status="ATIVA", jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numberToJid(w), existe.id]);
+    await run('UPDATE revendas SET nome=?, status="ATIVA", jid=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numberToJid(w), tipoRevenda, existe.id]);
     await enviarBoasVindasTutorialRevenda({ ...existe, nome, whatsapp: w, jid: numberToJid(w) });
   } else {
-    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha']);
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', tipoRevenda]);
     await enviarBoasVindasTutorialRevenda({ id: ins.lastID, nome, whatsapp: w, jid: numberToJid(w) });
   }
   res.redirect('/admin/revendas');
@@ -1432,11 +1467,11 @@ app.post('/admin/revenda/:id/status', async (req, res) => {
   }
   res.redirect('/admin/revendas');
 });
-app.get('/admin/revenda/:id/editar', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post"><input name="nome" value="${safeHtml(r.nome)}" required><br><br><input name="whatsapp" value="${safeHtml(r.whatsapp)}" required><br><br><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br><button class="btn green">Salvar</button></form></div>`)); });
-app.post('/admin/revenda/:id/editar', async (req, res) => { const w = normalizarNumeroWhatsApp(req.body.whatsapp); await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w, numberToJid(w), req.body.status, req.params.id]); res.redirect('/admin/revendas'); });
+app.get('/admin/revenda/:id/editar', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post"><label>Nome</label><input name="nome" value="${safeHtml(r.nome)}" required><br><br><label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp)}" required><br><br><label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br><label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br><button class="btn green">Salvar</button></form></div>`)); });
+app.post('/admin/revenda/:id/editar', async (req, res) => { const w = normalizarNumeroWhatsApp(req.body.whatsapp); await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w, numberToJid(w), req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]); res.redirect('/admin/revendas'); });
 app.get('/admin/revenda/:id/precos', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC'); let html = `<h1>💰 Preços - ${safeHtml(r.nome)}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`; for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${safeHtml(s.nome)}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; } html += `</table><br><button class="btn green">Salvar preços</button></form>`; res.send(page('Preços', html)); });
 app.post('/admin/revenda/:id/precos', async (req, res) => { const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1'); for (const s of servs) { const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.')); await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]); } res.redirect('/admin/revendas'); });
-app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
+app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
 app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
 app.post('/admin/revenda/:id/pagamento', async (req, res) => {
   const valor = Number(String(req.body.valor || '0').replace(',', '.'));
@@ -1503,64 +1538,6 @@ app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get(
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
 app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
 
-
-app.get('/admin/esim', async (req, res) => {
-  const grupos = await all(`SELECT plano_nome, validade, preco_revenda, preco_cliente,
-    SUM(CASE WHEN status='DISPONIVEL' THEN 1 ELSE 0 END) disponiveis,
-    SUM(CASE WHEN status='VENDIDO' THEN 1 ELSE 0 END) vendidos,
-    COUNT(*) total
-    FROM esim_qrcodes GROUP BY plano_nome, validade, preco_revenda, preco_cliente ORDER BY plano_nome ASC`);
-  const rows = await all('SELECT * FROM esim_qrcodes ORDER BY id DESC LIMIT 200');
-  let html = `<div class="hero"><h1>📱 eSIM</h1><p>Adicione QR Codes digitando o nome do plano. A revenda compra pelo WhatsApp e o sistema entrega automaticamente com instruções.</p></div>`;
-  html += `<div class="card"><h2>➕ Adicionar QR Code</h2><form method="post" action="/admin/esim/upload"><div class="form-grid"><div><label>Nome do plano</label><input name="plano_nome" placeholder="Ex: TIM 70GB" required></div><div><label>Validade</label><input name="validade" placeholder="Ex: 30 dias"></div><div><label>Preço revenda</label><input name="preco_revenda" placeholder="Ex: 55" required></div><div><label>Preço cliente</label><input name="preco_cliente" placeholder="Opcional"></div></div><br><label>Imagem do QR Code</label><input id="esimFile" type="file" accept="image/png,image/jpeg,image/webp" required><input id="esimData" type="hidden" name="imageData"><br><br><button class="btn green" id="esimBtn" disabled>Salvar QR Code</button></form><p class="mini-help">Você só envia a imagem do QR Code. Não precisa código manual.</p><script>const ef=document.getElementById('esimFile'),ed=document.getElementById('esimData'),eb=document.getElementById('esimBtn');ef&&ef.addEventListener('change',()=>{const file=ef.files&&ef.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{ed.value=r.result;eb.disabled=false;eb.textContent='Salvar QR Code';};eb.disabled=true;eb.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div>`;
-  html += `<div class="card"><h2>📦 Resumo do estoque</h2><table><tr><th>Plano</th><th>Validade</th><th>Preço revenda</th><th>Disponível</th><th>Vendido</th><th>Total</th></tr>`;
-  if (!grupos.length) html += `<tr><td colspan="6" class="empty">Nenhum QR cadastrado ainda.</td></tr>`;
-  for (const g of grupos) html += `<tr><td>${safeHtml(g.plano_nome)}</td><td>${safeHtml(g.validade || '-')}</td><td>${brl(g.preco_revenda)}</td><td><span class="pill">${g.disponiveis || 0}</span></td><td>${g.vendidos || 0}</td><td>${g.total}</td></tr>`;
-  html += `</table></div>`;
-  html += `<div class="card"><h2>🖼️ QR Codes cadastrados</h2><table><tr><th>ID</th><th>QR</th><th>Plano</th><th>Preço</th><th>Status</th><th>Pedido</th><th>Ações</th></tr>`;
-  for (const q of rows) {
-    html += `<tr><td>#${q.id}</td><td><img src="/${safeHtml(q.arquivo_qr)}" style="width:70px;height:70px;object-fit:cover;border-radius:10px"></td><td>${safeHtml(q.plano_nome)}<br><span class="muted">${safeHtml(q.validade || '')}</span></td><td>${brl(q.preco_revenda)}</td><td>${q.status === 'DISPONIVEL' ? '✅ Disponível' : '✅ Vendido'}</td><td>${q.pedido_id ? `#${q.pedido_id}` : '-'}</td><td><a class="btn" href="/${safeHtml(q.arquivo_qr)}" target="_blank">Ver</a>${q.status === 'DISPONIVEL' ? `<form class="forms-inline" method="post" action="/admin/esim/${q.id}/excluir"><button class="btn red" onclick="return confirm('Excluir este QR?')">Excluir</button></form>` : `<form class="forms-inline" method="post" action="/admin/esim/${q.id}/reenviar"><button class="btn green">Reenviar</button></form>`}</td></tr>`;
-  }
-  html += `</table></div>`;
-  res.send(page('eSIM', html));
-});
-
-app.post('/admin/esim/upload', async (req, res) => {
-  const plano = limparNomePlano(req.body.plano_nome);
-  const validade = String(req.body.validade || '').trim();
-  const precoRevenda = parseMoney(req.body.preco_revenda);
-  const precoCliente = parseMoney(req.body.preco_cliente);
-  const data = String(req.body.imageData || '');
-  const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
-  if (!plano || !precoRevenda || !m) return res.status(400).send(page('Erro', '<h1>❌ Dados inválidos</h1><p>Volte e confira plano, preço e imagem.</p>'));
-  const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
-  const filename = `esim_${Date.now()}_${Math.random().toString(16).slice(2)}.${ext}`;
-  const filepath = path.join(ESIM_IMG_DIR, filename);
-  fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'));
-  const rel = `esim/${filename}`;
-  await run(`INSERT INTO esim_qrcodes (plano_nome, validade, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, ?, 'DISPONIVEL')`, [plano, validade, precoRevenda, precoCliente, rel]);
-  notificarPainel('esim', '📱 QR eSIM adicionado', plano);
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/:id/excluir', async (req, res) => {
-  const q = await get('SELECT * FROM esim_qrcodes WHERE id=? AND status="DISPONIVEL"', [req.params.id]);
-  if (q) {
-    try { fs.unlinkSync(path.join(PUBLIC_DIR, String(q.arquivo_qr || '').replace(/^\/+/, ''))); } catch(e) {}
-    await run('DELETE FROM esim_qrcodes WHERE id=?', [q.id]);
-  }
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/:id/reenviar', async (req, res) => {
-  const q = await get('SELECT * FROM esim_qrcodes WHERE id=?', [req.params.id]);
-  if (q && q.comprador_jid) {
-    await enviarImagemEsim(q.comprador_jid, q, `📱 ${q.plano_nome}\n${q.pedido_id ? `🆔 Pedido #${q.pedido_id}\n` : ''}\n⚠️ QR Code de uso único.`);
-    await enviarTexto(q.comprador_jid, textoInstrucoesEsim(q.plano_nome));
-  }
-  res.redirect('/admin/esim');
-});
-
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 app.get('/admin/config', (req, res) => {
@@ -1574,7 +1551,7 @@ app.post('/admin/config/hacker-image', async (req, res) => {
     const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
     if (!m) return res.send(page('Erro', '<h1>❌ Imagem inválida</h1><p>Envie uma imagem PNG, JPG ou WEBP.</p><a class="btn" href="/admin/config">Voltar</a>'));
     if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-if (!fs.existsSync(ESIM_IMG_DIR)) fs.mkdirSync(ESIM_IMG_DIR, { recursive: true });
+if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
     fs.writeFileSync(HACKER_IMAGE_PATH, Buffer.from(m[2], 'base64'));
     notificarPainel('banner', '🖼️ Banner atualizado', 'Foto do hacker alterada manualmente');
     res.redirect('/admin/config?ok=1');
