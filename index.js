@@ -751,7 +751,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   if (texto === 'menu') {
     pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarTexto(from, `🏪 *${revenda.nome}*\n\n1️⃣ Serviços\n2️⃣ Histórico\n3️⃣ Conta\n\nDigite uma opção:`);
+    await enviarTexto(from, `🏪 *${revenda.nome}*\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Conta\n\nDigite uma opção:`);
     return;
   }
 
