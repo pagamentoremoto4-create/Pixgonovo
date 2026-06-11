@@ -163,18 +163,70 @@ function iconeEntradaServico(servico) {
   if (tipo === 'OUTRO') return '📝';
   return '📱';
 }
-function extrairImeisEmLote(texto) {
-  const matches = String(texto || '').match(/\d{15}/g) || [];
-  return [...new Set(matches)];
+function imeiPassaLuhn(imei) {
+  imei = onlyDigits(imei);
+  if (!/^\d{15}$/.test(imei)) return false;
+
+  let soma = 0;
+  for (let i = 0; i < 15; i++) {
+    let numero = Number(imei[i]);
+
+    // IMEI usa Luhn: dobra as posições pares considerando contagem humana,
+    // que são índices 1, 3, 5... no JavaScript.
+    if (i % 2 === 1) {
+      numero *= 2;
+      if (numero > 9) numero -= 9;
+    }
+
+    soma += numero;
+  }
+
+  return soma % 10 === 0;
 }
+
+function imeiSequenciaFalsa(imei) {
+  imei = onlyDigits(imei);
+  if (/^(\d)\1{14}$/.test(imei)) return true; // 000..., 111..., 999...
+  const bloqueados = new Set([
+    '123456789012345',
+    '012345678901234',
+    '987654321098765'
+  ]);
+  return bloqueados.has(imei);
+}
+
+function validarIMEI(imei) {
+  imei = onlyDigits(imei);
+  return /^\d{15}$/.test(imei) && !imeiSequenciaFalsa(imei) && imeiPassaLuhn(imei);
+}
+
+function extrairImeisEmLote(texto) {
+  const numeros = String(texto || '').match(/\d+/g) || [];
+  return [...new Set(numeros.filter(n => n.length === 15))];
+}
+
 function validarEntradaServico(servico, textoOriginal) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   const bruto = String(textoOriginal || '').trim();
   if (tipo === 'IMEI') {
-    const imeis = extrairImeisEmLote(bruto);
-    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos ou vários IMEIs, um por linha.\n\nExemplo:\n356789123456789\n356789123456780\n\nDigite cancelar para sair.` };
-    const sobras = bruto.replace(/\d{15}/g, '').replace(/[\s,;.\-_/]+/g, '');
-    if (sobras) return { ok: false, erro: `❌ Envio em lote aceito somente com IMEIs de 15 dígitos.\n\nEnvie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
+    const numeros = bruto.match(/\d+/g) || [];
+    const sobras = bruto.replace(/[\d\s,;.\-_/()]+/g, '');
+
+    if (!numeros.length) {
+      return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos válidos ou vários IMEIs, um por linha.\n\nDica: digite *#06# no aparelho e copie o IMEI da tela.\n\nDigite cancelar para sair.` };
+    }
+
+    const formatoErrado = numeros.filter(n => n.length !== 15);
+    if (formatoErrado.length || sobras) {
+      return { ok: false, erro: `❌ Formato inválido.\n\nO IMEI precisa ter exatamente 15 números.\n\n📦 Em lote, envie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
+    }
+
+    const imeis = [...new Set(numeros)];
+    const invalidos = imeis.filter(imei => !validarIMEI(imei));
+    if (invalidos.length) {
+      return { ok: false, erro: `❌ IMEI inválido pelo verificador.\n\nEstes IMEIs têm 15 dígitos, mas não passaram na validação:\n${invalidos.join('\n')}\n\n📱 Peça ao cliente para digitar *#06# no aparelho e enviar o IMEI exibido na tela.\n\nDigite cancelar para sair.` };
+    }
+
     return { ok: true, entradas: imeis };
   }
   if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
@@ -703,8 +755,8 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   const imei = onlyDigits(partes[partes.length - 1]);
   const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
   const nomeServico = partes.slice(1, -2).join(' ').trim();
-  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
-    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
+  if (!nomeServico || !valor || !validarIMEI(imei)) {
+    await enviarTexto(from, '❌ Formato inválido ou IMEI inválido pelo verificador.\n\nUse:\nservico desbloqueio tim 180 356938035643809\n\nDica: peça ao cliente para digitar *#06# no aparelho.');
     return true;
   }
   const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
