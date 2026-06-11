@@ -122,6 +122,52 @@ function textoSaldoCurto(saldo) {
   if (v > 0) return `Crédito: ${brl(v)}`;
   return 'Quitado';
 }
+
+function normalizarTipoEntrada(v) {
+  const t = String(v || 'IMEI').toUpperCase().replace(/[^A-Z_]/g, '');
+  return ['IMEI', 'LOCK_CODE', 'OUTRO'].includes(t) ? t : 'IMEI';
+}
+function labelEntradaServico(servico) {
+  const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
+  if (String(servico?.entrada_label || '').trim()) return String(servico.entrada_label).trim();
+  if (tipo === 'LOCK_CODE') return 'Lock Code';
+  if (tipo === 'OUTRO') return 'Informação';
+  return 'IMEI';
+}
+function tituloTipoEntrada(tipo) {
+  tipo = normalizarTipoEntrada(tipo);
+  if (tipo === 'LOCK_CODE') return 'Lock Code';
+  if (tipo === 'OUTRO') return 'Outro';
+  return 'IMEI';
+}
+function iconeEntradaServico(servico) {
+  const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
+  if (tipo === 'LOCK_CODE') return '🔐';
+  if (tipo === 'OUTRO') return '📝';
+  return '📱';
+}
+function extrairImeisEmLote(texto) {
+  const matches = String(texto || '').match(/\d{15}/g) || [];
+  return [...new Set(matches)];
+}
+function validarEntradaServico(servico, textoOriginal) {
+  const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
+  const bruto = String(textoOriginal || '').trim();
+  if (tipo === 'IMEI') {
+    const imeis = extrairImeisEmLote(bruto);
+    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos ou vários IMEIs, um por linha.\n\nExemplo:\n356789123456789\n356789123456780\n\nDigite cancelar para sair.` };
+    const sobras = bruto.replace(/\d{15}/g, '').replace(/[\s,;.\-_/]+/g, '');
+    if (sobras) return { ok: false, erro: `❌ Envio em lote aceito somente com IMEIs de 15 dígitos.\n\nEnvie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
+    return { ok: true, entradas: imeis };
+  }
+  if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
+  return { ok: true, entradas: [bruto] };
+}
+function textoEntradaPedido(pedido) {
+  const label = pedido.entrada_label || (normalizarTipoEntrada(pedido.tipo_entrada) === 'LOCK_CODE' ? 'Lock Code' : normalizarTipoEntrada(pedido.tipo_entrada) === 'OUTRO' ? 'Informação' : 'IMEI');
+  const valor = pedido.entrada_valor || pedido.imei || '-';
+  return `${iconeEntradaServico(pedido)} ${label}: ${valor}`;
+}
 function today() { return new Date().toISOString().slice(0, 10); }
 function dateBR(v) { if (!v) return '-'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
 function monthStart() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; }
@@ -185,9 +231,13 @@ async function initDB() {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
     preco_padrao REAL DEFAULT 0,
+    tipo_entrada TEXT DEFAULT 'IMEI',
+    entrada_label TEXT DEFAULT 'IMEI',
     ativo INTEGER DEFAULT 1,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await addColumnIfMissing('servicos_catalogo', 'tipo_entrada', "TEXT DEFAULT 'IMEI'");
+  await addColumnIfMissing('servicos_catalogo', 'entrada_label', "TEXT DEFAULT 'IMEI'");
 
   await run(`CREATE TABLE IF NOT EXISTS precos_revenda (
     revenda_id INTEGER,
@@ -209,6 +259,10 @@ async function initDB() {
     servico_id INTEGER,
     servico_nome TEXT,
     imei TEXT,
+    entrada_valor TEXT,
+    tipo_entrada TEXT DEFAULT 'IMEI',
+    entrada_label TEXT DEFAULT 'IMEI',
+    lote_id TEXT,
     valor REAL DEFAULT 0,
     status TEXT DEFAULT 'PENDENTE',
     motivo_cancelamento TEXT,
@@ -224,6 +278,10 @@ async function initDB() {
   await addColumnIfMissing('pedidos', 'motivo_cancelamento', 'TEXT');
   await addColumnIfMissing('pedidos', 'cobrado', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('pedidos', 'finalizado_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'entrada_valor', 'TEXT');
+  await addColumnIfMissing('pedidos', 'tipo_entrada', "TEXT DEFAULT 'IMEI'");
+  await addColumnIfMissing('pedidos', 'entrada_label', "TEXT DEFAULT 'IMEI'");
+  await addColumnIfMissing('pedidos', 'lote_id', 'TEXT');
 
   await run(`CREATE TABLE IF NOT EXISTS pagamentos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -509,36 +567,67 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[pos - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    pedidoSessao.set(from, { etapa: 'imei', servicoId: servico.id });
-    await enviarTexto(from, '📱 Informe o IMEI:');
+    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    if (tipoEntrada === 'IMEI') {
+      await enviarTexto(from, `📱 Informe o IMEI:
+
+Pode enviar 1 IMEI ou vários em lote, um por linha.`);
+    } else {
+      await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+    }
     return;
   }
 
-  if (sess?.etapa === 'imei') {
-    const imei = onlyDigits(textoOriginal);
-    if (!/^\d{15}$/.test(imei)) {
+  if (sess?.etapa === 'entrada' || sess?.etapa === 'imei') {
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
+    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+
+    const validacao = validarEntradaServico(servico, textoOriginal);
+    if (!validacao.ok) {
       const agora = Date.now();
       const ultima = ultimoErroImei.get(from) || 0;
       if (agora - ultima > 15000) {
         ultimoErroImei.set(from, agora);
-        await enviarTexto(
-          from,
-          '❌ IMEI inválido.\n\n📱 O IMEI deve conter exatamente 15 dígitos.\n\nExemplo:\n356789123456789\n\nDigite cancelar para sair.'
-        );
+        await enviarTexto(from, validacao.erro);
       }
       return;
     }
-    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
-    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
-    const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
-    if (duplicado) { pedidoSessao.delete(from); await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return; }
+
     const valor = await precoDaRevenda(revenda.id, servico.id);
-    await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, valor, status)
-      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imei, valor]);
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    const entradaLabel = labelEntradaServico(servico);
+    const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+    let criados = [];
+    let duplicados = [];
+
+    for (const entrada of validacao.entradas) {
+      const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
+      if (tipoEntrada === 'IMEI') {
+        const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada]);
+        if (duplicado) { duplicados.push(entrada); continue; }
+      }
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status)
+        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor]);
+      criados.push({ id: ins.lastID, entrada });
+    }
+
     pedidoSessao.delete(from);
-    await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n📱 ${imei}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+
+    if (!criados.length) {
+      await enviarTexto(from, `⚠️ Nenhum pedido novo foi criado.${duplicados.length ? `\n\nJá estavam em andamento:\n${duplicados.join('\n')}` : ''}`);
+      return;
+    }
+
+    if (criados.length === 1) {
+      await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+      return;
+    }
+
+    await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
     return;
   }
+
 }
 
 async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato) {
@@ -555,15 +644,15 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   if (duplicado) { await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return true; }
   let servico = await get('SELECT * FROM servicos_catalogo WHERE lower(nome)=lower(?)', [nomeServico]);
   if (!servico) {
-    const ins = await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [nomeServico, valor]);
+    const ins = await run("INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, 'IMEI', 'IMEI', 1)", [nomeServico, valor]);
     servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [ins.lastID]);
   }
   const clienteJid = melhorJidCliente(msg, from);
   const clienteNumero = jidToNumber(clienteJid);
   const clienteNome = nomeContatoSeguro(msg, nomeContato || 'Cliente');
 
-  await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_id, servico_nome, imei, valor, status)
-    VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [clienteNome || 'Cliente', clienteNumero, clienteJid, servico.id, servico.nome, imei, valor]);
+  await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status)
+    VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'IMEI', 'IMEI', ?, 'PENDENTE')`, [clienteNome || 'Cliente', clienteNumero, clienteJid, servico.id, servico.nome, imei, imei, valor]);
 
   await enviarTexto(from, `✅ Serviço cadastrado
 
@@ -617,7 +706,9 @@ Você verá:
 3️⃣ Conta
 
 🔹 *Solicitar serviço*
-menu → 1 Serviços → escolha o serviço → envie o IMEI
+menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a informação solicitada
+
+📦 Para serviço tipo IMEI, pode enviar vários IMEIs de uma vez, um por linha
 
 🔹 *Ver histórico*
 menu → 2 Histórico
@@ -874,21 +965,25 @@ async function adminSetRevendaStatus(from, id, status) {
 async function adminListServicos(from) {
   const rows = await all('SELECT * FROM servicos_catalogo ORDER BY id ASC');
   let txt = '🛠 *SERVIÇOS*\n\n';
-  for (const s of rows) txt += `#${s.id} ${s.nome}\nPreço: ${brl(s.preco_padrao)} | ${s.ativo ? 'Ativo' : 'Inativo'}\n\n`;
+  for (const s of rows) txt += `#${s.id} ${s.nome}\nEntrada: ${tituloTipoEntrada(s.tipo_entrada)} (${labelEntradaServico(s)})\nPreço: ${brl(s.preco_padrao)} | ${s.ativo ? 'Ativo' : 'Inativo'}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function adminAddServico(from, texto) {
-  const [nome, precoTxt] = texto.split('|').map(s => s?.trim());
+  const [nome, precoTxt, tipoTxt, labelTxt] = texto.split('|').map(s => s?.trim());
   const preco = Number(String(precoTxt || '0').replace(',', '.'));
-  if (!nome) { await enviarTexto(from, 'Use: addservico Nome | 100'); return; }
-  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [nome, preco]);
-  await enviarTexto(from, `✅ Serviço adicionado:\n${nome}\n${brl(preco)}`);
+  const tipoEntrada = normalizarTipoEntrada(tipoTxt || 'IMEI');
+  const label = labelTxt || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  if (!nome) { await enviarTexto(from, 'Use: addservico Nome | 100 | IMEI\nOu: addservico Nome | 100 | LOCK_CODE | Lock Code'); return; }
+  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, ?, ?, 1)', [nome, preco, tipoEntrada, label]);
+  await enviarTexto(from, `✅ Serviço adicionado:\n${nome}\nEntrada: ${tituloTipoEntrada(tipoEntrada)} (${label})\n${brl(preco)}`);
 }
 async function adminEditarServico(from, texto) {
-  const [id, nome, precoTxt] = texto.split('|').map(s => s?.trim());
+  const [id, nome, precoTxt, tipoTxt, labelTxt] = texto.split('|').map(s => s?.trim());
   const preco = Number(String(precoTxt || '0').replace(',', '.'));
-  if (!id || !nome) { await enviarTexto(from, 'Use: editarservico ID | Novo Nome | 100'); return; }
-  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=? WHERE id=?', [nome, preco, id]);
+  const tipoEntrada = normalizarTipoEntrada(tipoTxt || 'IMEI');
+  const label = labelTxt || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  if (!id || !nome) { await enviarTexto(from, 'Use: editarservico ID | Novo Nome | 100 | IMEI'); return; }
+  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=?, tipo_entrada=?, entrada_label=? WHERE id=?', [nome, preco, tipoEntrada, label, id]);
   await enviarTexto(from, `✅ Serviço #${id} editado.`);
 }
 async function adminToggleServico(from, id, ativo) { await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [ativo, id]); await enviarTexto(from, `✅ Serviço #${id}: ${ativo ? 'ATIVO' : 'INATIVO'}`); }
@@ -1011,8 +1106,8 @@ app.get('/admin', async (req, res) => {
   const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
   const rev = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
   const ult = await all('SELECT * FROM pedidos ORDER BY id DESC LIMIT 8');
-  let table = '<table><tr><th>ID</th><th>IMEI</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
-  for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.imei)}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
+  let table = '<table><tr><th>ID</th><th>Entrada</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
+  for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
   table += '</table>';
   res.send(page('Dashboard', `<div class="topbar"><h1>📊 Dashboard</h1><span class="muted">${dateBR(new Date())}</span></div><div class="grid">
   <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
@@ -1020,14 +1115,14 @@ app.get('/admin', async (req, res) => {
 });
 
 function pedidoActions(o, back = '/admin/pedidos') {
-  return `<div class="actions"><form class="forms-inline" method="post" action="/admin/pedido/${o.id}/editarimei"><input name="imei" placeholder="Novo IMEI" style="width:145px"><button class="btn purple">✏️</button></form>
+  return `<div class="actions"><form class="forms-inline" method="post" action="/admin/pedido/${o.id}/editarimei"><input name="imei" placeholder="Nova entrada" style="width:145px"><button class="btn purple">✏️</button></form>
   <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/processo"><button class="btn orange">🔄</button></form>
   <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/finalizar"><button class="btn green">✅</button></form>
   <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/cancelar"><input name="motivo" placeholder="Motivo" style="width:120px"><button class="btn red">❌</button></form></div>`;
 }
 function pedidoTable(rows, showServico = true) {
-  let html = `<table><tr><th>ID</th><th>IMEI</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
-  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.imei)}</td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
+  let html = `<table><tr><th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
   html += '</table>';
   return html;
 }
@@ -1037,14 +1132,24 @@ app.get('/admin/pedidos', async (req, res) => {
   const params = [];
   let where = [];
   if (status) { where.push('status=?'); params.push(status); }
-  if (q) { where.push('(imei LIKE ? OR cliente_whatsapp LIKE ? OR cliente_nome LIKE ? OR revenda_numero LIKE ? OR revenda_nome LIKE ?)'); params.push(`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`); }
+  if (q) { where.push('(imei LIKE ? OR entrada_valor LIKE ? OR cliente_whatsapp LIKE ? OR cliente_nome LIKE ? OR revenda_numero LIKE ? OR revenda_nome LIKE ?)'); params.push(`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`); }
   const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`;
   const rows = await all(sql, params);
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
-  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar IMEI, WhatsApp ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
+  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, WhatsApp ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
   res.send(page('Pedidos', html));
 });
-app.post('/admin/pedido/:id/editarimei', async (req, res) => { const imei = onlyDigits(req.body.imei); if (/^\d{15}$/.test(imei)) await run('UPDATE pedidos SET imei=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [imei, req.params.id]); res.redirect(req.get('referer') || '/admin/pedidos'); });
+app.post('/admin/pedido/:id/editarimei', async (req, res) => {
+  const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
+  if (p) {
+    const tipo = normalizarTipoEntrada(p.tipo_entrada);
+    const entrada = tipo === 'IMEI' ? onlyDigits(req.body.imei) : String(req.body.imei || '').trim();
+    if ((tipo === 'IMEI' && /^\d{15}$/.test(entrada)) || (tipo !== 'IMEI' && entrada.length >= 2)) {
+      await run('UPDATE pedidos SET imei=?, entrada_valor=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [tipo === 'IMEI' ? entrada : null, entrada, req.params.id]);
+    }
+  }
+  res.redirect(req.get('referer') || '/admin/pedidos');
+});
 app.post('/admin/pedido/:id/processo', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'processo'); } res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) await finalizarPedido(p); res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'cancelar', motivo); } res.redirect(req.get('referer') || '/admin/pedidos'); });
@@ -1118,13 +1223,33 @@ app.post('/admin/revenda/:id/pagamento', async (req, res) => {
   res.redirect(`/admin/revenda/${req.params.id}/conta`);
 });
 
-app.get('/admin/servicos', async (req, res) => { const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC'); let html = `<h1>🛠 Serviços</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"></div><button class="btn green">Adicionar Serviço</button></form></div><table><tr><th>ID</th><th>Serviço</th><th>Preço padrão</th><th>Status</th><th>IMEIs</th><th>Ações</th></tr>`; for (const s of rows) html += `<tr><td>#${s.id}</td><td><a href="/admin/servico/${s.id}/imeis">${safeHtml(s.nome)}</a></td><td>${brl(s.preco_padrao)}</td><td><span class="pill">${s.ativo ? 'Ativo' : 'Inativo'}</span></td><td>${s.total}</td><td class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📱 IMEIs</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️ Excluir</button></form></td></tr>`; html += '</table>'; res.send(page('Serviços', html)); });
-app.post('/admin/servicos', async (req, res) => { await run('INSERT INTO servicos_catalogo (nome, preco_padrao, ativo) VALUES (?, ?, 1)', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.'))]); const revs = await all('SELECT * FROM revendas WHERE status="ATIVA" AND jid IS NOT NULL'); for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n\nDigite menu para ver sua tabela.`); res.redirect('/admin/servicos'); });
-app.get('/admin/servico/:id/editar', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); res.send(page('Editar Serviço', `<h1>✏️ Editar Serviço</h1><div class="card"><form method="post"><input name="nome" value="${safeHtml(s.nome)}" required><br><br><input name="preco" value="${s.preco_padrao}"><br><br><button class="btn green">Salvar</button></form></div>`)); });
-app.post('/admin/servico/:id/editar', async (req, res) => { await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=? WHERE id=?', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), req.params.id]); res.redirect('/admin/servicos'); });
+app.get('/admin/servicos', async (req, res) => {
+  const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
+  let html = `<h1>🛠 Serviços</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome do serviço" required><input name="preco" placeholder="Preço padrão"><select name="tipo_entrada"><option value="IMEI">IMEI</option><option value="LOCK_CODE">Lock Code</option><option value="OUTRO">Outro</option></select><input name="entrada_label" placeholder="Nome da entrada. Ex: Serial, CPF, Login"></div><p class="muted">Para IMEI o cliente pode enviar vários de uma vez. Para Lock Code/Outro, o bot pede apenas uma informação.</p><button class="btn green">Adicionar Serviço</button></form></div><table><tr><th>ID</th><th>Serviço</th><th>Entrada</th><th>Preço padrão</th><th>Status</th><th>Pedidos</th><th>Ações</th></tr>`;
+  for (const s of rows) html += `<tr><td>#${s.id}</td><td><a href="/admin/servico/${s.id}/imeis">${safeHtml(s.nome)}</a></td><td>${safeHtml(tituloTipoEntrada(s.tipo_entrada))}<br><span class="muted">${safeHtml(labelEntradaServico(s))}</span></td><td>${brl(s.preco_padrao)}</td><td><span class="pill">${s.ativo ? 'Ativo' : 'Inativo'}</span></td><td>${s.total}</td><td class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📋 Pedidos</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️ Excluir</button></form></td></tr>`;
+  html += '</table>'; res.send(page('Serviços', html));
+});
+app.post('/admin/servicos', async (req, res) => {
+  const tipoEntrada = normalizarTipoEntrada(req.body.tipo_entrada);
+  const label = String(req.body.entrada_label || '').trim() || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, ?, ?, 1)', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label]);
+  const revs = await all('SELECT * FROM revendas WHERE status="ATIVA" AND jid IS NOT NULL');
+  for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n🔎 Entrada: ${tituloTipoEntrada(tipoEntrada)}\n\nDigite menu para ver sua tabela.`);
+  res.redirect('/admin/servicos');
+});
+app.get('/admin/servico/:id/editar', async (req, res) => {
+  const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
+  res.send(page('Editar Serviço', `<h1>✏️ Editar Serviço</h1><div class="card"><form method="post"><label>Nome</label><input name="nome" value="${safeHtml(s.nome)}" required><br><br><label>Preço padrão</label><input name="preco" value="${s.preco_padrao}"><br><br><label>Tipo de entrada</label><select name="tipo_entrada"><option value="IMEI" ${normalizarTipoEntrada(s.tipo_entrada)==='IMEI'?'selected':''}>IMEI</option><option value="LOCK_CODE" ${normalizarTipoEntrada(s.tipo_entrada)==='LOCK_CODE'?'selected':''}>Lock Code</option><option value="OUTRO" ${normalizarTipoEntrada(s.tipo_entrada)==='OUTRO'?'selected':''}>Outro</option></select><br><br><label>Nome da entrada</label><input name="entrada_label" value="${safeHtml(labelEntradaServico(s))}" placeholder="Ex: Serial, CPF, Login"><br><br><button class="btn green">Salvar</button></form></div>`));
+});
+app.post('/admin/servico/:id/editar', async (req, res) => {
+  const tipoEntrada = normalizarTipoEntrada(req.body.tipo_entrada);
+  const label = String(req.body.entrada_label || '').trim() || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=?, tipo_entrada=?, entrada_label=? WHERE id=?', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label, req.params.id]);
+  res.redirect('/admin/servicos');
+});
 app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
-app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📱 IMEIs - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
+app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
 
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
