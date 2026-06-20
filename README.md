@@ -77,3 +77,14 @@ O webhook antigo continua:
 ```txt
 https://SEU-SITE.onrender.com/webhook/pixgo
 ```
+
+## Correção adicionada nesta versão
+
+Foram adicionadas rotas para resetar as sessões do WhatsApp quando aparecer erro 401 no Render.
+
+- WhatsApp Revenda: `/admin/qr` e `/admin/reset-whatsapp`
+- WhatsApp eSIM: `/esim/qr` e `/esim/reset-whatsapp`
+
+Quando clicar em reset, o sistema apaga somente a pasta de autenticação correspondente e reinicia o serviço para gerar QR novo. Não apaga banco, serviços, revendas, pedidos ou QR Codes.
+
+Também foi ajustado o upload do estoque eSIM para usar o disco persistente em `ESIM_UPLOAD_DIR=/data/uploads_esim`.
