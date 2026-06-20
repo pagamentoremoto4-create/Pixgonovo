@@ -1468,11 +1468,27 @@ async function initEsimDB() {
 }
 function moneyEsim(v) { return Number(v || 0).toFixed(2).replace('.', ','); }
 function esimJidFromPhone(phone) { return `${normalizarNumeroWhatsApp(phone)}@s.whatsapp.net`; }
-async function enviarTextoEsim(to, text) { if (sockEsim && to) await sockEsim.sendMessage(to, { text }); }
+async function enviarTextoEsim(to, text) {
+  if (!sockEsim || !to) return false;
+  try {
+    await sockEsim.sendMessage(to, { text });
+    console.log('✅ eSIM resposta enviada para', to);
+    return true;
+  } catch (e) {
+    console.log('❌ Falha ao enviar eSIM para', to, e.message);
+    return false;
+  }
+}
 async function enviarImagemEsim(to, filePath, caption='') {
   if (!sockEsim || !to || !filePath || !fs.existsSync(filePath)) return false;
-  await sockEsim.sendMessage(to, { image: fs.readFileSync(filePath), caption });
-  return true;
+  try {
+    await sockEsim.sendMessage(to, { image: fs.readFileSync(filePath), caption });
+    console.log('✅ eSIM imagem enviada para', to);
+    return true;
+  } catch (e) {
+    console.log('❌ Falha ao enviar imagem eSIM para', to, e.message);
+    return false;
+  }
 }
 async function avisarAdminsEsim(texto) {
   for (const n of ADMIN_NUMBERS) {
@@ -1573,8 +1589,13 @@ async function entregarPedidoEsim(pedidoId, manualTexto='', manualArquivo='') {
   await avisarAdminsEsim(`✅ *PEDIDO eSIM ENTREGUE AUTOMATICAMENTE*\n\nPedido: #${pedido.id}\nCliente: ${pedido.cliente_telefone}\nPlano: ${pedido.produto_nome}`);
 }
 async function tratarMensagemEsim(msg) {
-  const jid = msg.key.remoteJid;
-  if (!jid || isGroup(jid) || msg.key.fromMe || jid === 'status@broadcast') return;
+  const rawJid = msg.key.remoteJid;
+  // Em alguns WhatsApps novos o Baileys recebe @lid; quando existir remoteJidAlt/senderPn,
+  // usamos o JID real do telefone para conseguir responder corretamente.
+  const jid = melhorJidCliente(msg, rawJid);
+  if (!rawJid || isGroup(rawJid) || msg.key.fromMe || rawJid === 'status@broadcast') return;
+  const textoDebug = getText(msg).trim();
+  console.log('📩 eSIM', rawJid, '=>', jid, textoDebug || '[sem texto]');
   const tsRaw = Number(msg.messageTimestamp || 0);
   const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
   if (msgTime && msgTime < ESIM_START_TIME - 60000) return;
@@ -1635,7 +1656,7 @@ async function iniciarWhatsAppEsim() {
   await initEsimDB();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_ESIM_DIR);
   const { version } = await fetchLatestBaileysVersion();
-  sockEsim = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
+  sockEsim = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'], markOnlineOnConnect: false, syncFullHistory: false });
   sockEsim.ev.on('creds.update', saveCreds);
   sockEsim.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) { console.log('✅ QR CODE eSIM GERADO'); qrCodeEsimBase64 = await QRCode.toDataURL(qr); conectadoEsim = false; }
@@ -1647,9 +1668,10 @@ async function iniciarWhatsAppEsim() {
       if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsAppEsim(), 5000);
     }
   });
-  sockEsim.ev.on('messages.upsert', async ({ messages }) => {
-    for (const m of messages) {
-      try { await tratarMensagemEsim(m); } catch(e) { console.log('❌ ERRO WA eSIM:', e); }
+  sockEsim.ev.on('messages.upsert', async ({ messages, type }) => {
+    console.log('📥 Evento eSIM messages.upsert:', type, messages?.length || 0);
+    for (const m of messages || []) {
+      try { await tratarMensagemEsim(m); } catch(e) { console.log('❌ ERRO WA eSIM:', e?.stack || e); }
     }
   });
 }
