@@ -35,6 +35,14 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
 const ESIM_DIR = path.join(PUBLIC_DIR, 'esim');
+
+// ===== MÓDULO eSIM INDEPENDENTE (2º WhatsApp no mesmo domínio) =====
+const DATA_DIR = process.env.DATA_DIR || DB_DIR;
+const AUTH_REVENDA_DIR = process.env.AUTH_REVENDA_DIR || path.join(DATA_DIR, 'auth_revenda');
+const AUTH_ESIM_DIR = process.env.AUTH_ESIM_DIR || path.join(DATA_DIR, 'auth_esim');
+const ESIM_DB_PATH = process.env.ESIM_DB_PATH || path.join(DATA_DIR, 'esim.db');
+const ESIM_UPLOAD_DIR = process.env.ESIM_UPLOAD_DIR || path.join(DATA_DIR, 'uploads_esim');
+const ESIM_BACKUP_DIR = process.env.ESIM_BACKUP_DIR || path.join(DATA_DIR, 'backups_esim');
 const ADMIN_NUMBER = onlyDigits(process.env.ADMIN_NUMBER || '');
 const ADMIN_NUMBERS = Array.from(new Set([
   ADMIN_NUMBER,
@@ -43,16 +51,25 @@ const ADMIN_NUMBERS = Array.from(new Set([
 const ADMIN_PANEL_USER = process.env.ADMIN_PANEL_USER || 'admin';
 const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
+const SUPORTE_WHATSAPP = onlyDigits(process.env.SUPORTE_WHATSAPP || process.env.ADMIN_NUMBER || '');
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
+for (const dir of [DATA_DIR, AUTH_REVENDA_DIR, AUTH_ESIM_DIR, ESIM_UPLOAD_DIR, ESIM_BACKUP_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+app.use('/esim-files', express.static(ESIM_UPLOAD_DIR));
 
 let sock = null;
+let sockEsim = null;
 let qrCodeBase64 = null;
+let qrCodeEsimBase64 = null;
 let conectado = false;
+let conectadoEsim = false;
 let db = new sqlite3.Database(DB_PATH);
+let dbEsim = new sqlite3.Database(ESIM_DB_PATH);
 let PAINEL_TEMA = 'hacker-green';
 const TEMAS_PAINEL = {
   'hacker-green': { nome: '🟢 Hacker Verde', cor: '#00ff66', cor2: '#28d7ff' },
@@ -90,6 +107,15 @@ function get(sql, params = []) {
 }
 function all(sql, params = []) {
   return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
+}
+function runEsim(sql, params = []) {
+  return new Promise((resolve, reject) => dbEsim.run(sql, params, function (err) { err ? reject(err) : resolve(this); }));
+}
+function getEsim(sql, params = []) {
+  return new Promise((resolve, reject) => dbEsim.get(sql, params, (err, row) => err ? reject(err) : resolve(row)));
+}
+function allEsim(sql, params = []) {
+  return new Promise((resolve, reject) => dbEsim.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
 function normalizarNumeroWhatsApp(v) {
@@ -576,7 +602,7 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 
 async function iniciarWhatsApp() {
   await initDB();
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_REVENDA_DIR);
   const { version } = await fetchLatestBaileysVersion();
   sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
   sock.ev.on('creds.update', saveCreds);
@@ -1349,6 +1375,330 @@ async function notificarPedido(pedido, tipo, motivo = '') {
   if (tipo === 'cancelar') await enviarTexto(jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
 }
 
+
+
+// =========================
+// eSIM INDEPENDENTE: painel /esim + 2º WhatsApp
+// =========================
+const uploadEsimVenda = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, ESIM_UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '.png') || '.png';
+      cb(null, `qr_${Date.now()}_${Math.random().toString(16).slice(2)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype || ''))
+});
+const estadosEsim = new Map();
+const ESIM_START_TIME = Date.now();
+const mensagensEsimProcessadas = new Set();
+
+async function initEsimDB() {
+  await runEsim(`CREATE TABLE IF NOT EXISTS categorias (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL UNIQUE,
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await runEsim(`CREATE TABLE IF NOT EXISTS produtos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    categoria_id INTEGER,
+    nome TEXT NOT NULL,
+    descricao TEXT,
+    gb TEXT,
+    validade TEXT,
+    preco REAL NOT NULL,
+    entrega_tipo TEXT DEFAULT 'AUTOMATICA',
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await runEsim(`CREATE TABLE IF NOT EXISTS estoque_qr (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    produto_id INTEGER NOT NULL,
+    arquivo TEXT,
+    codigo_texto TEXT,
+    status TEXT DEFAULT 'DISPONIVEL',
+    pedido_id INTEGER,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    usado_em TEXT
+  )`);
+  await runEsim(`CREATE TABLE IF NOT EXISTS clientes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telefone TEXT UNIQUE,
+    nome TEXT,
+    jid TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await runEsim(`CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_ref TEXT UNIQUE,
+    cliente_id INTEGER,
+    cliente_nome TEXT,
+    cliente_telefone TEXT,
+    cliente_jid TEXT,
+    produto_id INTEGER,
+    produto_nome TEXT,
+    valor REAL,
+    status TEXT DEFAULT 'PENDENTE',
+    pixgo_id TEXT,
+    qr_estoque_id INTEGER,
+    entrega_manual_texto TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    pago_em TEXT,
+    entregue_em TEXT
+  )`);
+  const cat = await getEsim('SELECT * FROM categorias WHERE nome=?', ['eSIM']);
+  if (!cat) await runEsim('INSERT INTO categorias(nome,ativo) VALUES (?,1)', ['eSIM']);
+}
+function moneyEsim(v) { return Number(v || 0).toFixed(2).replace('.', ','); }
+function esimJidFromPhone(phone) { return `${normalizarNumeroWhatsApp(phone)}@s.whatsapp.net`; }
+async function enviarTextoEsim(to, text) { if (sockEsim && to) await sockEsim.sendMessage(to, { text }); }
+async function enviarImagemEsim(to, filePath, caption='') {
+  if (!sockEsim || !to || !filePath || !fs.existsSync(filePath)) return false;
+  await sockEsim.sendMessage(to, { image: fs.readFileSync(filePath), caption });
+  return true;
+}
+async function avisarAdminsEsim(texto) {
+  for (const n of ADMIN_NUMBERS) {
+    const jid = numberToJid(n);
+    if (!jid) continue;
+    try { await enviarTextoEsim(jid, texto); } catch(e) { console.log('⚠️ Aviso admin eSIM falhou:', e.message); }
+  }
+}
+async function getOrCreateClienteEsim(jid, nome='Cliente') {
+  const phone = jidToNumber(jid);
+  let c = await getEsim('SELECT * FROM clientes WHERE telefone=?', [phone]);
+  if (!c) {
+    const ins = await runEsim('INSERT INTO clientes(telefone,nome,jid) VALUES (?,?,?)', [phone, nome || phone, jid]);
+    c = await getEsim('SELECT * FROM clientes WHERE id=?', [ins.lastID]);
+  } else if (c.jid !== jid || (nome && c.nome !== nome)) {
+    await runEsim('UPDATE clientes SET jid=?, nome=? WHERE id=?', [jid, nome || c.nome, c.id]);
+    c = await getEsim('SELECT * FROM clientes WHERE id=?', [c.id]);
+  }
+  return c;
+}
+async function estoqueProdutoEsim(produtoId) {
+  const r = await getEsim("SELECT COUNT(*) qtd FROM estoque_qr WHERE produto_id=? AND status='DISPONIVEL'", [produtoId]);
+  return Number(r?.qtd || 0);
+}
+async function produtosEsimAtivos() {
+  return await allEsim(`SELECT p.*, c.nome categoria_nome FROM produtos p LEFT JOIN categorias c ON c.id=p.categoria_id WHERE p.ativo=1 ORDER BY p.id DESC`);
+}
+async function menuEsim() {
+  return `👋 Bem-vindo à Centralunlocker eSIM
+
+Escolha uma opção:
+
+1️⃣ Comprar eSIM
+2️⃣ Meus pedidos
+3️⃣ Suporte
+4️⃣ Cancelar
+
+Digite o número da opção.`;
+}
+async function listaProdutosEsim() {
+  const ps = await produtosEsimAtivos();
+  if (!ps.length) return '❌ Nenhum eSIM disponível no momento.';
+  let txt = '📱 *Planos eSIM disponíveis:*\n\n';
+  for (const p of ps) {
+    const qtd = p.entrega_tipo === 'MANUAL' ? 'manual' : await estoqueProdutoEsim(p.id);
+    txt += `${p.id}️⃣ ${p.nome}\n📶 ${p.gb || '-'} · ⏱ ${p.validade || '-'}\n💰 R$ ${moneyEsim(p.preco)} · 📦 ${qtd} disponível\n\n`;
+  }
+  txt += 'Digite o ID do plano para comprar.';
+  return txt.trim();
+}
+async function criarPixEsim(pedido, produto) {
+  if (!process.env.PIXGO_API_KEY) throw new Error('PIXGO_API_KEY não configurada');
+  const payload = {
+    amount: Number(pedido.valor),
+    description: `eSIM ${produto.nome} - Pedido ${pedido.id}`,
+    external_reference: pedido.external_ref,
+    external_id: pedido.external_ref,
+    webhook_url: `${BASE_URL || ''}/webhook/pixgo-esim`
+  };
+  const r = await axios.post(`${PIXGO_API}/payment/create`, payload, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
+  const data = r.data || {};
+  const pixId = data.payment_id || data.id || data.transaction_id || data.pixgo_id || data?.data?.payment_id || data?.data?.id || '';
+  const copia = data.qr_code || data.pix_copy_paste || data.copy_paste || data.pix || data.brcode || data?.data?.qr_code || data?.data?.copy_paste || data?.data?.pix_copy_paste || '';
+  await runEsim('UPDATE pedidos SET pixgo_id=? WHERE id=?', [pixId, pedido.id]);
+  return copia;
+}
+async function entregarPedidoEsim(pedidoId, manualTexto='', manualArquivo='') {
+  const pedido = await getEsim(`SELECT p.*, pr.entrega_tipo, pr.gb, pr.validade FROM pedidos p LEFT JOIN produtos pr ON pr.id=p.produto_id WHERE p.id=?`, [pedidoId]);
+  if (!pedido || pedido.status === 'ENTREGUE') return;
+  const jid = pedido.cliente_jid || esimJidFromPhone(pedido.cliente_telefone);
+  if (manualTexto || manualArquivo) {
+    await runEsim('UPDATE pedidos SET status="ENTREGUE", entrega_manual_texto=?, entregue_em=CURRENT_TIMESTAMP WHERE id=?', [manualTexto || '', pedido.id]);
+    const caption = manualTexto || `✅ eSIM entregue!\n\n📦 Pedido #${pedido.id}\n📱 Plano: ${pedido.produto_nome}`;
+    if (manualArquivo) await enviarImagemEsim(jid, manualArquivo, caption);
+    else await enviarTextoEsim(jid, caption);
+    await avisarAdminsEsim(`✅ *PEDIDO eSIM ENTREGUE MANUALMENTE*\n\nPedido: #${pedido.id}\nCliente: ${pedido.cliente_telefone}\nPlano: ${pedido.produto_nome}`);
+    return;
+  }
+  if (pedido.entrega_tipo === 'MANUAL') {
+    await runEsim('UPDATE pedidos SET status="AGUARDANDO_ENVIO" WHERE id=?', [pedido.id]);
+    await enviarTextoEsim(jid, `✅ Pagamento confirmado!\n\n📦 Pedido #${pedido.id}\n📱 ${pedido.produto_nome}\n\nSeu eSIM está aguardando envio manual.`);
+    await avisarAdminsEsim(`📦 *PEDIDO eSIM AGUARDANDO ENVIO*\n\nPedido: #${pedido.id}\nCliente: ${pedido.cliente_telefone}\nPlano: ${pedido.produto_nome}\nValor: R$ ${moneyEsim(pedido.valor)}\n\nAcesse o painel /esim para entregar.`);
+    return;
+  }
+  const qr = await getEsim("SELECT * FROM estoque_qr WHERE produto_id=? AND status='DISPONIVEL' ORDER BY id ASC LIMIT 1", [pedido.produto_id]);
+  if (!qr) {
+    await runEsim('UPDATE pedidos SET status="AGUARDANDO_ENVIO" WHERE id=?', [pedido.id]);
+    await enviarTextoEsim(jid, `✅ Pagamento confirmado!\n\n📦 Pedido #${pedido.id}\nSeu QR Code está aguardando envio.`);
+    await avisarAdminsEsim(`⚠️ *eSIM PAGO SEM ESTOQUE*\n\nPedido: #${pedido.id}\nPlano: ${pedido.produto_nome}\nCliente: ${pedido.cliente_telefone}`);
+    return;
+  }
+  await runEsim('UPDATE estoque_qr SET status="VENDIDO", pedido_id=?, usado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id, qr.id]);
+  await runEsim('UPDATE pedidos SET status="ENTREGUE", qr_estoque_id=?, entregue_em=CURRENT_TIMESTAMP WHERE id=?', [qr.id, pedido.id]);
+  const caption = `✅ eSIM entregue!\n\n📦 Pedido #${pedido.id}\n📱 Plano: ${pedido.produto_nome}\n📶 ${pedido.gb || ''} · ⏱ ${pedido.validade || ''}\n\n📌 Como instalar:\n1. Abra Ajustes/Configurações\n2. Vá em Celular/Dados móveis\n3. Toque em Adicionar eSIM\n4. Escaneie este QR Code\n\n⚠️ Use apenas uma vez.`;
+  const filePath = path.join(ESIM_UPLOAD_DIR, path.basename(qr.arquivo || ''));
+  if (fs.existsSync(filePath)) await enviarImagemEsim(jid, filePath, caption);
+  else await enviarTextoEsim(jid, caption + (qr.codigo_texto ? `\n\nCódigo: ${qr.codigo_texto}` : ''));
+  await avisarAdminsEsim(`✅ *PEDIDO eSIM ENTREGUE AUTOMATICAMENTE*\n\nPedido: #${pedido.id}\nCliente: ${pedido.cliente_telefone}\nPlano: ${pedido.produto_nome}`);
+}
+async function tratarMensagemEsim(msg) {
+  const jid = msg.key.remoteJid;
+  if (!jid || isGroup(jid) || msg.key.fromMe || jid === 'status@broadcast') return;
+  const tsRaw = Number(msg.messageTimestamp || 0);
+  const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
+  if (msgTime && msgTime < ESIM_START_TIME - 60000) return;
+  const msgId = `${jid}:${msg.key?.id || ''}`;
+  if (msg.key?.id && mensagensEsimProcessadas.has(msgId)) return;
+  if (msg.key?.id) mensagensEsimProcessadas.add(msgId);
+  if (mensagensEsimProcessadas.size > 5000) mensagensEsimProcessadas.clear();
+
+  const textoOriginal = getText(msg).trim();
+  if (!textoOriginal) return;
+  const texto = textoOriginal.toLowerCase();
+  const cliente = await getOrCreateClienteEsim(jid, nomeContatoSeguro(msg, 'Cliente'));
+
+  if (['menu','oi','olá','ola','start','/start','cancelar','4'].includes(texto)) {
+    estadosEsim.delete(jid);
+    await enviarTextoEsim(jid, await menuEsim());
+    return;
+  }
+  if (texto === '1' || texto.includes('comprar') || texto.includes('esim')) {
+    estadosEsim.set(jid, { etapa: 'escolher_produto' });
+    await enviarTextoEsim(jid, await listaProdutosEsim());
+    return;
+  }
+  if (texto === '2' || texto.includes('pedido')) {
+    const pedidos = await allEsim('SELECT * FROM pedidos WHERE cliente_id=? ORDER BY id DESC LIMIT 10', [cliente.id]);
+    if (!pedidos.length) { await enviarTextoEsim(jid, 'Você ainda não tem pedidos.'); return; }
+    await enviarTextoEsim(jid, '📦 *Seus pedidos:*\n\n' + pedidos.map(p => `#${p.id} · ${p.produto_nome}\nStatus: ${p.status}\nValor: R$ ${moneyEsim(p.valor)}`).join('\n\n'));
+    return;
+  }
+  if (texto === '3' || texto.includes('suporte')) {
+    await enviarTextoEsim(jid, SUPORTE_WHATSAPP ? `🆘 Suporte: https://wa.me/${SUPORTE_WHATSAPP}` : '🆘 Suporte indisponível no momento.');
+    return;
+  }
+  const estado = estadosEsim.get(jid);
+  if (estado?.etapa === 'escolher_produto') {
+    const produtoId = Number(texto.replace(/\D/g, ''));
+    const produto = await getEsim('SELECT * FROM produtos WHERE id=? AND ativo=1', [produtoId]);
+    if (!produto) { await enviarTextoEsim(jid, 'Plano inválido. Digite o ID correto.'); return; }
+    if (produto.entrega_tipo !== 'MANUAL' && await estoqueProdutoEsim(produto.id) <= 0) { await enviarTextoEsim(jid, 'Este plano está sem estoque no momento.'); return; }
+    const external = `ESIM-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const ins = await runEsim(`INSERT INTO pedidos(external_ref,cliente_id,cliente_nome,cliente_telefone,cliente_jid,produto_id,produto_nome,valor,status) VALUES (?,?,?,?,?,?,?,?, 'PENDENTE')`, [external, cliente.id, cliente.nome, cliente.telefone, jid, produto.id, produto.nome, produto.preco]);
+    const pedido = await getEsim('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+    try {
+      const copia = await criarPixEsim(pedido, produto);
+      estadosEsim.delete(jid);
+      await avisarAdminsEsim(`🆕 *NOVO PEDIDO eSIM*\n\nPedido: #${pedido.id}\nCliente: ${cliente.telefone}\nPlano: ${produto.nome}\nValor: R$ ${moneyEsim(produto.preco)}`);
+      await enviarTextoEsim(jid, `💳 Pedido #${pedido.id}\n📱 ${produto.nome}\n💰 R$ ${moneyEsim(produto.preco)}\n\nPague com o Pix copia e cola abaixo:`);
+      await enviarTextoEsim(jid, copia || 'Pix gerado. Aguarde os dados de pagamento.');
+    } catch(e) {
+      await runEsim('UPDATE pedidos SET status="ERRO_PIX" WHERE id=?', [pedido.id]);
+      await enviarTextoEsim(jid, '❌ Erro ao gerar Pix. Chame o suporte.');
+    }
+    return;
+  }
+  await enviarTextoEsim(jid, await menuEsim());
+}
+async function iniciarWhatsAppEsim() {
+  await initEsimDB();
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_ESIM_DIR);
+  const { version } = await fetchLatestBaileysVersion();
+  sockEsim = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
+  sockEsim.ev.on('creds.update', saveCreds);
+  sockEsim.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) { console.log('✅ QR CODE eSIM GERADO'); qrCodeEsimBase64 = await QRCode.toDataURL(qr); conectadoEsim = false; }
+    if (connection === 'open') { console.log('✅ WHATSAPP eSIM CONECTADO'); qrCodeEsimBase64 = null; conectadoEsim = true; }
+    if (connection === 'close') {
+      conectadoEsim = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log('❌ WHATSAPP eSIM DESCONECTOU:', statusCode);
+      if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsAppEsim(), 5000);
+    }
+  });
+  sockEsim.ev.on('messages.upsert', async ({ messages }) => {
+    for (const m of messages) {
+      try { await tratarMensagemEsim(m); } catch(e) { console.log('❌ ERRO WA eSIM:', e); }
+    }
+  });
+}
+function pageEsim(title, body) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:Arial;background:#07111f;color:#e5e7eb;margin:0}.wrap{max-width:1150px;margin:auto;padding:18px}.top{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:15px}.top a,.btn{background:#22c55e;color:#052e16;padding:10px 13px;border-radius:10px;text-decoration:none;font-weight:800;border:0;display:inline-block;margin:2px}.top a{background:#0f172a;color:#93c5fd;border:1px solid #334155}.card{background:#0f172a;border:1px solid #334155;border-radius:16px;padding:16px;margin:14px 0}input,select,textarea{width:100%;padding:12px;margin:6px 0 12px;border-radius:10px;border:1px solid #334155;background:#020617;color:white;box-sizing:border-box}table{width:100%;border-collapse:collapse;background:#0f172a;border-radius:12px;overflow:hidden}td,th{border-bottom:1px solid #334155;padding:9px;text-align:left}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.danger{background:#ef4444;color:white}.orange{background:#f59e0b;color:#1f1300}.muted{color:#94a3b8}.pill{background:#1e293b;border:1px solid #334155;border-radius:999px;padding:5px 9px;display:inline-block}</style></head><body><div class="wrap"><div class="top"><a href="/admin">↩ Revendas</a><a href="/esim">🏠 eSIM</a><a href="/esim/produtos">📱 Produtos</a><a href="/esim/estoque">📥 Estoque QR</a><a href="/esim/pedidos">📦 Pedidos</a><a href="/esim/backup">💾 Backup</a><a href="/esim/qr">🔗 QR WhatsApp</a></div>${body}</div></body></html>`;
+}
+app.use('/esim', basicAuth);
+app.get('/esim/qr', (req,res) => {
+  const body = qrCodeEsimBase64 ? `<div class="card" style="text-align:center"><h1>📱 Escaneie o WhatsApp eSIM</h1><img src="${qrCodeEsimBase64}" width="300"><p>WhatsApp > Aparelhos conectados</p></div>` : `<div class="card"><h1>${conectadoEsim ? '✅ WhatsApp eSIM conectado' : 'Aguardando QR do eSIM...'}</h1><p class="muted">Sessão: ${safeHtml(AUTH_ESIM_DIR)}</p></div>`;
+  res.send(pageEsim('QR eSIM', body));
+});
+app.get('/esim', async (req,res) => {
+  const clientes = await getEsim('SELECT COUNT(*) qtd FROM clientes');
+  const pedidos = await getEsim('SELECT COUNT(*) qtd FROM pedidos');
+  const pend = await getEsim("SELECT COUNT(*) qtd FROM pedidos WHERE status IN ('PENDENTE','AGUARDANDO_ENVIO')");
+  const estoque = await getEsim("SELECT COUNT(*) qtd FROM estoque_qr WHERE status='DISPONIVEL'");
+  res.send(pageEsim('Painel eSIM', `<h1>📱 Painel eSIM</h1><div class="grid"><div class="card"><h2>WhatsApp</h2><h1>${conectadoEsim?'Conectado':'Aguardando QR'}</h1></div><div class="card"><h2>Clientes</h2><h1>${clientes.qtd}</h1></div><div class="card"><h2>Pedidos</h2><h1>${pedidos.qtd}</h1></div><div class="card"><h2>Pendentes</h2><h1>${pend.qtd}</h1></div><div class="card"><h2>QR disponíveis</h2><h1>${estoque.qtd}</h1></div></div>`));
+});
+app.get('/esim/produtos', async (req,res) => {
+  const cats = await allEsim('SELECT * FROM categorias WHERE ativo=1 ORDER BY nome');
+  const ps = await allEsim('SELECT p.*, c.nome categoria_nome FROM produtos p LEFT JOIN categorias c ON c.id=p.categoria_id ORDER BY p.id DESC');
+  const opts = cats.map(c=>`<option value="${c.id}">${safeHtml(c.nome)}</option>`).join('');
+  let rows=''; for (const p of ps) rows += `<tr><td>#${p.id}</td><td>${safeHtml(p.nome)}</td><td>${safeHtml(p.categoria_nome||'-')}</td><td>R$ ${moneyEsim(p.preco)}</td><td>${safeHtml(p.entrega_tipo)}</td><td>${p.ativo?'Ativo':'Off'}</td><td><form method="post" action="/esim/produtos/${p.id}/toggle" style="display:inline"><button class="btn orange">Ativar/Desativar</button></form><form method="post" action="/esim/produtos/${p.id}/apagar" style="display:inline" onsubmit="return confirm('Apagar produto?')"><button class="btn danger">Apagar</button></form></td></tr>`;
+  res.send(pageEsim('Produtos eSIM', `<h1>📱 Produtos</h1><div class="card"><h2>➕ Novo produto/serviço</h2><form method="post"><div class="grid"><input name="nome" placeholder="TIM 67GB" required><select name="categoria_id">${opts}</select><input name="gb" placeholder="67GB"><input name="validade" placeholder="30 dias"><input name="preco" placeholder="55.00" required><select name="entrega_tipo"><option value="AUTOMATICA">Automática por QR</option><option value="MANUAL">Manual pelo admin</option></select></div><textarea name="descricao" placeholder="Descrição opcional"></textarea><button class="btn">Salvar</button></form></div><div class="card"><h2>Produtos cadastrados</h2><table><tr><th>ID</th><th>Nome</th><th>Categoria</th><th>Preço</th><th>Entrega</th><th>Status</th><th>Ações</th></tr>${rows}</table></div>`));
+});
+app.post('/esim/produtos', async (req,res) => {
+  const preco = Number(String(req.body.preco||'0').replace(',','.'));
+  await runEsim('INSERT INTO produtos(categoria_id,nome,descricao,gb,validade,preco,entrega_tipo,ativo) VALUES (?,?,?,?,?,?,?,1)', [req.body.categoria_id||1, req.body.nome, req.body.descricao||'', req.body.gb||'', req.body.validade||'', preco, req.body.entrega_tipo==='MANUAL'?'MANUAL':'AUTOMATICA']);
+  res.redirect('/esim/produtos');
+});
+app.post('/esim/produtos/:id/toggle', async (req,res)=>{ const p=await getEsim('SELECT * FROM produtos WHERE id=?',[req.params.id]); if(p) await runEsim('UPDATE produtos SET ativo=? WHERE id=?',[p.ativo?0:1,p.id]); res.redirect('/esim/produtos'); });
+app.post('/esim/produtos/:id/apagar', async (req,res)=>{ await runEsim('DELETE FROM produtos WHERE id=?',[req.params.id]); res.redirect('/esim/produtos'); });
+app.get('/esim/estoque', async (req,res) => {
+  const ps = await allEsim('SELECT * FROM produtos ORDER BY id DESC');
+  const itens = await allEsim('SELECT e.*, p.nome produto_nome FROM estoque_qr e LEFT JOIN produtos p ON p.id=e.produto_id ORDER BY e.id DESC LIMIT 500');
+  const opts = ps.map(p=>`<option value="${p.id}">#${p.id} ${safeHtml(p.nome)}</option>`).join('');
+  let rows=''; for (const i of itens) rows += `<tr><td>#${i.id}</td><td>${safeHtml(i.produto_nome||'-')}</td><td><span class="pill">${safeHtml(i.status)}</span></td><td>${i.arquivo?`<a href="/esim-files/${safeHtml(path.basename(i.arquivo))}" target="_blank">Ver QR</a>`:'-'}</td><td>${i.pedido_id?`Pedido #${i.pedido_id}`:'-'}</td><td><form method="post" action="/esim/estoque/${i.id}/apagar" onsubmit="return confirm('Apagar QR?')"><button class="btn danger">Apagar</button></form></td></tr>`;
+  res.send(pageEsim('Estoque eSIM', `<h1>📥 Estoque QR</h1><div class="card"><h2>Adicionar QR Code</h2><form method="post" enctype="multipart/form-data"><select name="produto_id">${opts}</select><input type="file" name="qr" accept="image/*" required><textarea name="codigo_texto" placeholder="Código texto opcional"></textarea><button class="btn">Enviar QR</button></form></div><div class="card"><h2>QR Codes</h2><table><tr><th>ID</th><th>Produto</th><th>Status</th><th>QR</th><th>Pedido</th><th>Ações</th></tr>${rows}</table></div>`));
+});
+app.post('/esim/estoque', uploadEsimVenda.single('qr'), async (req,res)=>{ if(req.file) await runEsim('INSERT INTO estoque_qr(produto_id,arquivo,codigo_texto,status) VALUES (?,?,?,"DISPONIVEL")',[req.body.produto_id, req.file.filename, req.body.codigo_texto||'']); res.redirect('/esim/estoque'); });
+app.post('/esim/estoque/:id/apagar', async (req,res)=>{ const i=await getEsim('SELECT * FROM estoque_qr WHERE id=?',[req.params.id]); if(i?.arquivo){try{fs.unlinkSync(path.join(ESIM_UPLOAD_DIR,path.basename(i.arquivo)))}catch(e){}} await runEsim('DELETE FROM estoque_qr WHERE id=?',[req.params.id]); res.redirect('/esim/estoque'); });
+app.get('/esim/pedidos', async (req,res)=>{
+  const rows = await allEsim('SELECT * FROM pedidos ORDER BY id DESC LIMIT 500');
+  let table = '<table><tr><th>ID</th><th>Cliente</th><th>Produto</th><th>Valor</th><th>Status</th><th>Ações</th></tr>';
+  for (const p of rows) table += `<tr><td>#${p.id}</td><td>${safeHtml(p.cliente_nome||'-')}<br>${safeHtml(p.cliente_telefone||'-')}</td><td>${safeHtml(p.produto_nome||'-')}</td><td>R$ ${moneyEsim(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><a class="btn" href="/esim/pedidos/${p.id}/entregar">Entregar manual</a><form method="post" action="/esim/pedidos/${p.id}/cancelar" style="display:inline"><button class="btn danger">Cancelar</button></form></td></tr>`;
+  table += '</table>'; res.send(pageEsim('Pedidos eSIM', `<h1>📦 Pedidos eSIM</h1><div class="card">${table}</div>`));
+});
+app.get('/esim/pedidos/:id/entregar', async (req,res)=>{ const p=await getEsim('SELECT * FROM pedidos WHERE id=?',[req.params.id]); res.send(pageEsim('Entregar eSIM', `<h1>📦 Entregar pedido #${p?.id||''}</h1><div class="card"><form method="post" enctype="multipart/form-data"><textarea name="texto" rows="8" placeholder="Mensagem ou código para enviar ao cliente">✅ Seu eSIM foi liberado!\n\nPedido #${p?.id||''}\nPlano: ${safeHtml(p?.produto_nome||'')}</textarea><input type="file" name="qr" accept="image/*"><button class="btn">Enviar ao cliente</button></form></div>`)); });
+app.post('/esim/pedidos/:id/entregar', uploadEsimVenda.single('qr'), async (req,res)=>{ await entregarPedidoEsim(Number(req.params.id), String(req.body.texto||''), req.file ? path.join(ESIM_UPLOAD_DIR, req.file.filename) : ''); res.redirect('/esim/pedidos'); });
+app.post('/esim/pedidos/:id/cancelar', async (req,res)=>{ await runEsim('UPDATE pedidos SET status="CANCELADO" WHERE id=?',[req.params.id]); res.redirect('/esim/pedidos'); });
+app.post('/webhook/pixgo-esim', async (req,res)=>{
+  try {
+    const b=req.body||{}; const ref=b.external_reference||b.external_ref||b.reference||b.id_ref||b.external_id; const status=String(b.status||b.payment_status||b?.data?.status||'').toLowerCase();
+    const pago=['paid','approved','completed','aprovado','pago'].includes(status);
+    if(ref){ const p=await getEsim('SELECT * FROM pedidos WHERE external_ref=?',[ref]); if(p && pago && !['PAGO','ENTREGUE','AGUARDANDO_ENVIO'].includes(p.status)){ await runEsim('UPDATE pedidos SET status="PAGO", pago_em=CURRENT_TIMESTAMP WHERE id=?',[p.id]); await avisarAdminsEsim(`💰 *PAGAMENTO eSIM APROVADO*\n\nPedido: #${p.id}\nCliente: ${p.cliente_telefone}\nPlano: ${p.produto_nome}\nValor: R$ ${moneyEsim(p.valor)}`); await entregarPedidoEsim(p.id); }}
+    res.status(200).json({success:true});
+  } catch(e) { console.log('❌ webhook pixgo-esim:', e.message); res.status(200).json({success:true,error:e.message}); }
+});
+app.get('/esim/backup', async (req,res)=>{ const files=fs.readdirSync(ESIM_BACKUP_DIR).filter(f=>f.endsWith('.db')).sort().reverse(); let rows=''; files.forEach(f=>rows+=`<tr><td>${safeHtml(f)}</td><td><a class="btn" href="/esim/backup/download/${encodeURIComponent(f)}">Baixar</a></td></tr>`); res.send(pageEsim('Backup eSIM', `<h1>💾 Backup eSIM</h1><div class="card"><form method="post" action="/esim/backup/criar"><button class="btn">Criar backup do banco eSIM</button></form><p class="muted">Os QR Codes ficam salvos em ${safeHtml(ESIM_UPLOAD_DIR)} no disco persistente.</p></div><table><tr><th>Arquivo</th><th>Ação</th></tr>${rows}</table>`)); });
+app.post('/esim/backup/criar', async (req,res)=>{ const dest=path.join(ESIM_BACKUP_DIR,`esim-backup-${today()}-${Date.now()}.db`); await new Promise((resolve,reject)=>dbEsim.backup(dest,(err)=>err?reject(err):resolve())); res.redirect('/esim/backup'); });
+app.get('/esim/backup/download/:file',(req,res)=>{ res.download(path.join(ESIM_BACKUP_DIR,path.basename(req.params.file))); });
+
+
 app.get('/', (req, res) => {
   if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 ESCANEIE O QR</h1><img src="${qrCodeBase64}" width="300"><p>WhatsApp > Aparelhos conectados</p></div>`));
   res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${conectado ? 'WhatsApp conectado ✅' : 'Aguardando QR...'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
@@ -1666,6 +2016,10 @@ app.post('/admin/config/hacker-image', async (req, res) => {
     if (!m) return res.send(page('Erro', '<h1>❌ Imagem inválida</h1><p>Envie uma imagem PNG, JPG ou WEBP.</p><a class="btn" href="/admin/config">Voltar</a>'));
     if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
+for (const dir of [DATA_DIR, AUTH_REVENDA_DIR, AUTH_ESIM_DIR, ESIM_UPLOAD_DIR, ESIM_BACKUP_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+app.use('/esim-files', express.static(ESIM_UPLOAD_DIR));
     fs.writeFileSync(HACKER_IMAGE_PATH, Buffer.from(m[2], 'base64'));
     notificarPainel('banner', '🖼️ Banner atualizado', 'Foto do hacker alterada manualmente');
     res.redirect('/admin/config?ok=1');
@@ -1687,3 +2041,4 @@ cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) 
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarWhatsApp();
+iniciarWhatsAppEsim();
