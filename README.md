@@ -116,3 +116,24 @@ Cada tema muda automaticamente:
 - Menu lateral
 
 As fotos/modelos ficam salvos em `/data/themes`.
+
+
+## Atualização: entrega eSIM somente pelo painel
+
+A entrega manual pelo WhatsApp admin foi removida do fluxo principal.
+
+Agora:
+1. Revenda compra eSIM.
+2. Se não houver QR automático, o pedido fica PENDENTE.
+3. Admin recebe apenas aviso no WhatsApp.
+4. Admin entra no painel em Pedidos.
+5. Clica em **📤 Entregar QR**.
+6. Envia a imagem do QR ou texto.
+7. O sistema envia ao cliente/revenda e finaliza o pedido.
+
+
+## Correção: temas com fotos
+
+Na tela Configurações, os cards dos temas agora mostram a foto hacker de cada tema.
+Ao aplicar um tema, a imagem também é copiada para `/public/img/hacker.png`.
+Os modelos ficam salvos em `/data/themes`, então não perde ao reiniciar o Render.
