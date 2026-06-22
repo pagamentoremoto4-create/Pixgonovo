@@ -1,27 +1,45 @@
-# CentralUnlocker - Cadastro de revenda pela conversa
+# CentralUnlocker - Dual WhatsApp
 
-## Como usar
+## O que foi adicionado
 
-Abra a conversa privada da revenda no WhatsApp conectado ao bot e envie:
+- WhatsApp 1 continua com o fluxo atual: revendas, serviços, IMEI, Lock Code, saldo e eSIM para revenda.
+- WhatsApp 2 foi adicionado apenas para venda automática de eSIM para cliente final.
+- Os dois WhatsApps usam o mesmo painel, mesmo banco e mesmo estoque `esim_estoque`.
+- O painel agora tem a página **Conexões WhatsApp** para mostrar os QR Codes dos dois números.
+- O cadastro de eSIM agora tem dois preços: **Preço Revenda** e **Preço Cliente**.
+
+## Sessões WhatsApp
+
+O WhatsApp 1 usa a pasta:
 
 ```txt
-cadastrar revenda Nome da Revenda
+auth/
 ```
 
-Exemplo:
+O WhatsApp 2 usa a pasta:
 
 ```txt
-cadastrar revenda Central Bahia
+auth_esim/
 ```
 
-O bot vai usar automaticamente o número daquela conversa como WhatsApp da revenda.
+No Render, use disco persistente para manter o banco e as sessões salvas.
 
-Depois a revenda pode enviar:
+## Fluxo WhatsApp 1
 
 ```txt
 menu
+1 - Serviços
+2 - Comprar eSIM
+3 - Histórico
+4 - Conta
 ```
 
-## Observação
+## Fluxo WhatsApp 2
 
-O bot continua ignorando mensagens enviadas pelo próprio WhatsApp, exceto comandos seguros de cadastro/ativação de revenda.
+```txt
+menu
+1 - Comprar eSIM
+2 - Suporte
+```
+
+Depois o cliente escolhe o plano, gera PIX, paga e recebe o QR Code automaticamente.
