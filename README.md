@@ -111,3 +111,16 @@ Variável opcional:
 ```txt
 THEME_DIR=/data/themes
 ```
+
+
+## Atualização: tema troca a foto automaticamente
+
+Agora cada tema já vem com uma foto hacker vinculada:
+
+- Hacker Verde → `/themes/hacker_green.svg`
+- Hacker Azul → `/themes/hacker_blue.svg`
+- Hacker Vermelho → `/themes/hacker_red.svg`
+- Hacker Roxo → `/themes/hacker_purple.svg`
+- Gold VIP → `/themes/hacker_gold.svg`
+
+Quando escolher o tema em `/admin/temas`, o painel muda as cores e a foto automaticamente.

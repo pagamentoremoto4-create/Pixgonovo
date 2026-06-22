@@ -91,6 +91,17 @@ function temaVars(nome) {
   };
   return temas[nome] || temas['hacker-green'];
 }
+function imagemPadraoDoTema(tema) {
+  const mapa = {
+    'hacker-green': '/themes/hacker_green.svg',
+    'hacker-blue': '/themes/hacker_blue.svg',
+    'hacker-red': '/themes/hacker_red.svg',
+    'hacker-purple': '/themes/hacker_purple.svg',
+    'dark-pro': '/themes/hacker_blue.svg',
+    'gold-vip': '/themes/hacker_gold.svg'
+  };
+  return mapa[tema] || mapa['hacker-green'];
+}
 function hackerImagemAtual() {
   return getConfig ? getConfig('painel_hacker_image', '') : '';
 }
@@ -99,7 +110,8 @@ function ensureHackerModelos() {
     ['hacker_green.svg', '#00ff66', '#28d7ff', 'CENTRALUNLOCKER'],
     ['hacker_blue.svg', '#28d7ff', '#2f80ed', 'SECURE PANEL'],
     ['hacker_red.svg', '#ff3b3b', '#ff9f43', 'FAST MODE'],
-    ['hacker_purple.svg', '#a855f7', '#28d7ff', 'CYBER ADMIN']
+    ['hacker_purple.svg', '#a855f7', '#28d7ff', 'CYBER ADMIN'],
+    ['hacker_gold.svg', '#ffd166', '#ff9f1c', 'GOLD VIP']
   ];
   for (const [file, c1, c2, title] of modelos) {
     const fp = path.join(THEME_DIR, file);
@@ -1111,16 +1123,21 @@ app.get('/admin/temas', async (req, res) => {
   const preview = atualImg ? `<img src="${safeHtml(atualImg)}">` : `<p class="muted">Nenhuma imagem ativa.</p>`;
 
   res.send(page('Temas', `<h1>🎨 Temas e fotos hacker</h1>
-    <div class="card hero"><div><h2>Tema atual</h2><form method="post" action="/admin/temas"><select name="tema">${temaOptions}</select><button class="btn green">Salvar tema</button></form><p class="muted">Tema e imagem ficam salvos no banco e as fotos em ${safeHtml(THEME_DIR)}. Não perde ao reiniciar o Render.</p></div><div>${preview}</div></div>
+    <div class="card hero"><div><h2>Tema atual</h2><form method="post" action="/admin/temas"><select name="tema">${temaOptions}</select><button class="btn green">Salvar tema</button></form><p class="muted">Ao salvar um tema, a foto hacker desse tema é aplicada automaticamente. Tema e imagem ficam salvos no banco e as fotos em ${safeHtml(THEME_DIR)}. Não perde ao reiniciar o Render.</p></div><div>${preview}</div></div>
     <div class="card"><h2>📤 Enviar foto hacker</h2><form method="post" action="/admin/temas/upload" enctype="multipart/form-data"><input type="file" name="foto" accept="image/*" required><button class="btn green">Enviar e usar</button></form></div>
     <div class="card"><h2>🔗 Usar link de imagem</h2><form method="post" action="/admin/temas/imagem"><input name="imagem" placeholder="https://... ou /themes/hacker_green.svg" value="${safeHtml(atualImg)}"><button>Salvar imagem</button></form><form method="post" action="/admin/temas/imagem"><input type="hidden" name="imagem" value=""><button class="btn red">Remover imagem</button></form></div>
     <div class="card"><h2>🖼️ Modelos prontos</h2>${galeria}</div>`));
 });
 app.post('/admin/temas', async (req, res) => {
   const tema = String(req.body.tema || 'hacker-green');
+
+  // Ao escolher um tema, troca automaticamente também a foto hacker padrão do tema.
+  ensureHackerModelos();
   await setConfig('painel_tema', tema);
+  await setConfig('painel_hacker_image', imagemPadraoDoTema(tema));
+
   PAINEL_TEMA = tema;
-  notificarPainel('tema', '🎨 Tema alterado', tema);
+  notificarPainel('tema', '🎨 Tema e foto alterados', tema);
   res.redirect('/admin/temas');
 });
 app.post('/admin/temas/imagem', async (req, res) => {
