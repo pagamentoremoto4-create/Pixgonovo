@@ -39,3 +39,18 @@ BACKUP_DIR=/data/backups
 ```
 
 Agora os arquivos enviados em **eSIM** são salvos em `/data/esim` e continuam disponíveis pela URL `/esim/nome-do-arquivo.png`.
+
+
+## Atualização: eSIM manual quando o estoque automático acabar
+
+Agora é possível cadastrar apenas o plano eSIM sem QR Code. Quando a revenda comprar um plano sem QR disponível no estoque, o sistema:
+
+1. Aprova a compra.
+2. Debita o saldo da revenda.
+3. Cria pedido pendente com `entrada_label = eSIM Manual`.
+4. Avisa os admins pelo WhatsApp.
+5. Permite entregar pelo WhatsApp admin com:
+   - `/esimpendentes`
+   - `/entregaresim ID_DO_PEDIDO`
+
+Depois de `/entregaresim ID`, envie a foto do QR Code ou texto da entrega.

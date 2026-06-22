@@ -16,7 +16,8 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  downloadContentFromMessage
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -416,6 +417,25 @@ async function initDB() {
   await addColumnIfMissing('esim_estoque', 'revenda_nome', 'TEXT');
   await addColumnIfMissing('esim_estoque', 'pedido_id', 'INTEGER');
 
+  // Catálogo de planos eSIM: permite vender manualmente mesmo sem QR disponível no estoque.
+  await run(`CREATE TABLE IF NOT EXISTS esim_planos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome_plano TEXT NOT NULL,
+    preco_revenda REAL DEFAULT 0,
+    preco_cliente REAL DEFAULT 0,
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(nome_plano, preco_revenda)
+  )`);
+  await addColumnIfMissing('esim_planos', 'preco_cliente', 'REAL DEFAULT 0');
+  await addColumnIfMissing('esim_planos', 'ativo', 'INTEGER DEFAULT 1');
+
+  // Migra os planos já existentes no estoque para o catálogo.
+  await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
+    SELECT nome_plano, preco_revenda, COALESCE(preco_cliente, preco_revenda), 1
+    FROM esim_estoque
+    WHERE nome_plano IS NOT NULL AND TRIM(nome_plano) != ''`);
+
   await run(`CREATE TABLE IF NOT EXISTS configs (
     chave TEXT PRIMARY KEY,
     valor TEXT,
@@ -537,6 +557,29 @@ async function enviarImagem(to, filePath, caption='') {
   if (!sock || !to || !filePath || !fs.existsSync(filePath)) return false;
   await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption });
   return true;
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+function mensagemImagem(msg) {
+  return msg.message?.imageMessage ||
+    msg.message?.ephemeralMessage?.message?.imageMessage ||
+    msg.message?.viewOnceMessage?.message?.imageMessage ||
+    msg.message?.viewOnceMessageV2?.message?.imageMessage ||
+    null;
+}
+async function salvarImagemWhatsAppEmEsim(msg) {
+  const imageMessage = mensagemImagem(msg);
+  if (!imageMessage) return null;
+  const stream = await downloadContentFromMessage(imageMessage, 'image');
+  const buffer = await streamToBuffer(stream);
+  const fileName = `esim_manual_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
+  const filePath = path.join(ESIM_DIR, fileName);
+  fs.writeFileSync(filePath, buffer);
+  return { fileName, filePath, rel: `esim/${fileName}` };
 }
 function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
 async function enviarParaAdmins(texto) {
@@ -720,6 +763,23 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   }
 
   if (admin) {
+    // Entrega manual de eSIM pelo WhatsApp admin.
+    const sessAdmin = adminSessao.get(from);
+    if (sessAdmin?.etapa === 'entregar_esim_manual') {
+      await concluirEntregaEsimManualAdmin(from, msg, textoOriginal);
+      return;
+    }
+    if (['/esimpendentes', 'esimpendentes', '/pendentesesim', 'pendentesesim'].includes(texto)) {
+      await listarEsimManuaisAdmin(from);
+      return;
+    }
+    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim')) {
+      const id = partes[1];
+      if (!id) { await enviarTexto(from, 'Use assim: /entregaresim ID_DO_PEDIDO'); return; }
+      await iniciarEntregaEsimManualAdmin(from, Number(id));
+      return;
+    }
+
     // Cadastro de revenda direto na conversa do WhatsApp
     if (await tratarCadastroRevendaConversa(from, textoOriginal, texto)) return;
 
@@ -918,23 +978,78 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
 
 
 async function planosEsimDisponiveis() {
-  return await all(`SELECT nome_plano, preco_revenda, preco_cliente, COUNT(*) qtd
-    FROM esim_estoque
-    WHERE status='DISPONIVEL'
-    GROUP BY nome_plano, preco_revenda, preco_cliente
-    ORDER BY nome_plano ASC`);
+  // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
+  return await all(`
+    SELECT
+      p.nome_plano,
+      p.preco_revenda,
+      p.preco_cliente,
+      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS qtd
+    FROM esim_planos p
+    LEFT JOIN esim_estoque e
+      ON e.nome_plano = p.nome_plano
+     AND e.preco_revenda = p.preco_revenda
+    WHERE p.ativo=1
+    GROUP BY p.nome_plano, p.preco_revenda, p.preco_cliente
+    ORDER BY p.nome_plano ASC
+  `);
 }
 async function enviarListaEsim(from) {
   const planos = await planosEsimDisponiveis();
-  if (!planos.length) { await enviarTexto(from, '❌ Nenhum eSIM disponível no momento.'); return; }
+  if (!planos.length) { await enviarTexto(from, '❌ Nenhum plano eSIM cadastrado no momento.'); return; }
   let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
-  planos.forEach((p, i) => { txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n📦 ${p.qtd} disponível${p.qtd > 1 ? 's' : ''}\n\n`; });
+  planos.forEach((p, i) => {
+    const qtd = Number(p.qtd || 0);
+    const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '📦 Sem QR no estoque\n👨‍💻 Entrega manual pelo admin';
+    txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n${entrega}\n\n`;
+  });
   txt += 'Digite o número do plano.';
   await enviarTexto(from, txt.trim());
 }
+
+async function criarPedidoEsimManualRevenda(from, revenda, plano) {
+  const valor = Number(plano.preco_revenda || 0);
+  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${plano.nome_plano}`));
+    return;
+  }
+
+  const ins = await run(`INSERT INTO pedidos
+    (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado)
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', 1)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${plano.nome_plano}`, plano.nome_plano, valor]);
+
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
+  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+
+  notificarPainel('esim', '📱 eSIM manual pendente', `${revenda.nome} - ${plano.nome_plano}`);
+  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nUse no WhatsApp admin:\n/entregaresim ${pedido.id}\n\nDepois envie a foto do QR Code ou texto da entrega.`);
+
+  await enviarTexto(from, `✅ Compra aprovada
+
+📱 ${plano.nome_plano}
+💰 Valor: ${brl(valor)}
+
+💳 Situação da conta:
+${textoSituacaoSaldo(revAtual?.saldo || 0)}
+
+👨‍💻 *Entrega manual*
+O estoque automático de QR acabou.
+Seu pedido ficou pendente para o admin enviar o QR.
+
+🆔 Pedido #${pedido.id}`);
+}
+
 async function entregarEsimRevenda(from, revenda, plano) {
   const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND preco_revenda=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, plano.preco_revenda]);
-  if (!item) { await enviarTexto(from, '❌ Esse eSIM acabou no estoque. Escolha outro plano.'); return; }
+
+  // Sem QR no estoque: cria pedido manual em vez de bloquear a venda.
+  if (!item) {
+    await criarPedidoEsimManualRevenda(from, revenda, plano);
+    return;
+  }
+
   const valor = Number(item.preco_revenda || 0);
   if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
     await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
@@ -951,6 +1066,61 @@ async function entregarEsimRevenda(from, revenda, plano) {
   await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
   if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
   await enviarTexto(from, mensagemInstrucaoEsim());
+}
+
+async function listarEsimManuaisAdmin(from) {
+  const rows = await all(`SELECT * FROM pedidos
+    WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO')
+    ORDER BY id ASC LIMIT 30`);
+  if (!rows.length) return enviarTexto(from, '✅ Nenhum eSIM manual pendente.');
+  let txt = '📱 *eSIM MANUAL PENDENTE*\n\n';
+  for (const p of rows) {
+    txt += `#${p.id}\n🏪 ${p.revenda_nome || '-'}\n📱 ${p.entrada_valor || p.servico_nome || '-'}\n💰 ${brl(p.valor)}\n➡️ /entregaresim ${p.id}\n\n`;
+  }
+  await enviarTexto(from, txt.trim());
+}
+
+async function iniciarEntregaEsimManualAdmin(from, pedidoId) {
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [pedidoId]);
+  if (!p) return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
+  if (p.status === 'FINALIZADO' || p.status === 'CANCELADO') return enviarTexto(from, `❌ Pedido #${p.id} está ${p.status}.`);
+  adminSessao.set(from, { etapa: 'entregar_esim_manual', pedido_id: p.id });
+  await enviarTexto(from, `📤 *Entregar eSIM manual*
+
+Pedido #${p.id}
+🏪 ${p.revenda_nome || '-'}
+📱 ${p.entrada_valor || p.servico_nome || '-'}
+📞 ${p.revenda_numero || '-'}
+
+Envie agora a foto do QR Code ou texto da entrega.
+Para cancelar, digite *cancelar*.`);
+}
+
+async function concluirEntregaEsimManualAdmin(from, msg, textoOriginal) {
+  const sess = adminSessao.get(from);
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [sess.pedido_id]);
+  if (!p) {
+    adminSessao.delete(from);
+    return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
+  }
+
+  const destino = p.revenda_jid || numberToJid(p.revenda_numero);
+  if (!destino) return enviarTexto(from, '❌ Não encontrei o WhatsApp da revenda para entregar.');
+
+  const img = await salvarImagemWhatsAppEmEsim(msg);
+  const textoEntrega = String(textoOriginal || '').trim() || `📱 eSIM ${p.entrada_valor || p.servico_nome}\n⚠️ QR Code de uso único.`;
+
+  if (img?.filePath) {
+    await enviarImagem(destino, img.filePath, textoEntrega);
+  } else {
+    await enviarTexto(destino, textoEntrega);
+  }
+  await enviarTexto(destino, mensagemInstrucaoEsim());
+
+  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
+  adminSessao.delete(from);
+  notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
+  await enviarTexto(from, `✅ Pedido #${p.id} entregue para ${p.revenda_nome || p.revenda_numero}.`);
 }
 function mensagemInstrucaoEsim() {
   return `📋 *COMO INSTALAR O eSIM*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie a imagem enviada\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet\n3️⃣ SIM Cards\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie a imagem enviada\n\n⚠️ *IMPORTANTE*\n• QR Code de uso único\n• Necessário internet para ativação\n• Não compartilhe o QR Code\n\n🏢 CentralUnlocker`;
@@ -1156,7 +1326,9 @@ async function enviarMenuAdmin(from) {
 async function tratarOpcaoAdmin(from, opcao) {
   if (opcao === '0') { adminSessao.delete(from); await enviarTexto(from, '✅ Menu encerrado.'); return; }
   if (opcao === '1') { await enviarTexto(from, await textoDashboardAdmin()); return; }
-  if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo`); return; }
+  if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo
+/esimpendentes
+/entregaresim ID`); return; }
   if (opcao === '3') { await enviarTexto(from, `🏪 *REVENDAS*\n\nComandos:\nrevendas\nrevenda nome\naddrevenda Nome | 5575999999999\nbloquearrevenda ID\ndesbloquearrevenda ID\nremoverrevenda ID`); return; }
   if (opcao === '4') { await enviarTexto(from, `🛠 *SERVIÇOS*\n\nComandos:\nservicos\naddservico Nome | 100\neditarservico ID | Novo Nome | 100\ndesativarservico ID\nativarservico ID\nexcluirservico ID`); return; }
   if (opcao === '5') { await enviarTexto(from, await resumoFinanceiro()); return; }
@@ -1499,28 +1671,52 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
 });
 
 app.get('/admin/esim', async (req, res) => {
-  const resumo = await all(`SELECT nome_plano, preco_revenda, COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' GROUP BY nome_plano, preco_revenda ORDER BY nome_plano ASC`);
+  const resumo = await all(`
+    SELECT p.nome_plano, p.preco_revenda,
+      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END),0) qtd
+    FROM esim_planos p
+    LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
+    WHERE p.ativo=1
+    GROUP BY p.nome_plano, p.preco_revenda
+    ORDER BY p.nome_plano ASC`);
   const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
+  const manuais = await all(`SELECT * FROM pedidos WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO') ORDER BY id DESC LIMIT 100`);
+
   let cards = '<div class="grid">';
-  for (const r of resumo) cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${r.qtd}</h1><p class="muted">${brl(r.preco_revenda)}</p></div>`;
+  for (const r of resumo) {
+    const qtd = Number(r.qtd || 0);
+    cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${qtd}</h1><p class="muted">${brl(r.preco_revenda)} ${qtd ? '· automático' : '· manual'}</p></div>`;
+  }
   cards += '</div>';
+
+  let manualTable = '<table><tr><th>Pedido</th><th>Revenda</th><th>Plano</th><th>Valor</th><th>Status</th><th>Ação</th></tr>';
+  for (const p of manuais) {
+    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><span class="muted">WhatsApp admin:<br>/entregaresim ${p.id}</span></td></tr>`;
+  }
+  manualTable += '</table>';
+
   let table = '<table><tr><th>ID</th><th>Plano</th><th>Preço Revenda</th><th>Status</th><th>Revenda/Pedido</th><th>QR</th><th>Ações</th></tr>';
   for (const i of itens) {
     const img = i.arquivo_qr ? `<a href="/${safeHtml(i.arquivo_qr)}" target="_blank">Visualizar</a>` : '-';
     table += `<tr><td>#${i.id}</td><td>${safeHtml(i.nome_plano)}</td><td>${brl(i.preco_revenda)}</td><td><span class="pill">${safeHtml(i.status)}</span></td><td>${safeHtml(i.revenda_nome || '-')}${i.pedido_id ? `<br><span class="muted">Pedido #${i.pedido_id}</span>` : ''}</td><td>${img}</td><td><form class="forms-inline" method="post" action="/admin/esim/${i.id}/apagar"><button class="btn red" onclick="return confirm('Apagar este QR do estoque?')">🗑️ Apagar</button></form></td></tr>`;
   }
   table += '</table>';
-  const form = `<div class="card"><h2>➕ Adicionar QR Code eSIM</h2><form method="post" enctype="multipart/form-data"><div class="grid"><input name="nome_plano" placeholder="Nome do plano. Ex: TIM 70GB" required><input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required><input type="file" name="qr" accept="image/*" required></div><br><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0"> Avisar revendas com mensagem simples</label><br><button class="btn green">Salvar QR Code</button></form><p class="muted">Digite o plano manualmente e envie apenas a imagem do QR Code.</p></div>`;
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${form}${cards}<div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+  const form = `<div class="card"><h2>➕ Adicionar Plano / QR Code eSIM</h2><form method="post" enctype="multipart/form-data"><div class="grid"><input name="nome_plano" placeholder="Nome do plano. Ex: TIM 70GB" required><input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required><input type="file" name="qr" accept="image/*"></div><br><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0"> Avisar revendas com mensagem simples</label><br><button class="btn green">Salvar</button></form><p class="muted">Sem foto: salva apenas o plano e vende manualmente quando não houver QR. Com foto: adiciona QR ao estoque automático.</p></div>`;
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${form}${cards}<div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
 app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
   const nome = String(req.body.nome_plano || '').trim();
   const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
-  if (nome && preco > 0 && req.file) {
-    await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`, [nome, preco, preco, `esim/${req.file.filename}`]);
-    notificarPainel('esim', '📱 QR eSIM adicionado', nome);
+  if (nome && preco > 0) {
+    await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
+    if (req.file) {
+      await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`, [nome, preco, preco, `esim/${req.file.filename}`]);
+      notificarPainel('esim', '📱 QR eSIM adicionado', nome);
+    } else {
+      notificarPainel('esim', '📱 Plano eSIM cadastrado', `${nome} - entrega manual se não houver QR`);
+    }
     if (req.body.avisar_revendas === '1') {
-      const aviso = `🚀 Novo eSIM adicionado ao estoque
+      const aviso = `🚀 Novo eSIM adicionado ao catálogo
 
 📱 ${nome}
 
