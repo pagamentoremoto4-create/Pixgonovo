@@ -63,3 +63,29 @@ Depois de `/entregaresim ID`, envie a foto do QR Code ou texto da entrega.
 - Para adicionar QR, selecione o plano cadastrado e envie a imagem do QR.
 - Com QR disponível: entrega automática.
 - Com estoque zerado: venda manual.
+
+
+## Atualização: apagar plano eSIM
+
+Na aba eSIM agora existe a opção **Apagar plano**.
+
+Ao apagar:
+- O plano fica inativo.
+- QR Codes disponíveis desse plano são removidos.
+- Pedidos antigos não são apagados.
+- QR Codes já vendidos não são alterados.
+
+
+## Atualização: editar plano eSIM
+
+Na aba eSIM agora existem as opções:
+- ✏️ Editar plano
+- 🗑️ Apagar plano
+
+A edição permite alterar:
+- Nome do plano
+- Preço revenda
+- Preço cliente
+- Ativo/Inativo
+
+Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.

@@ -1690,9 +1690,35 @@ app.get('/admin/esim', async (req, res) => {
   for (const p of planos) {
     const qtd = Number(p.qtd || 0);
     const status = qtd > 0 ? `🟢 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '🔴 Sem QR · venda manual';
-    cards += `<div class="card metric"><h2>📱 ${safeHtml(p.nome_plano)}</h2><h1>${qtd}</h1><p class="muted">${brl(p.preco_revenda)}<br>${status}</p></div>`;
+    cards += `<div class="card metric">
+      <h2>📱 ${safeHtml(p.nome_plano)}</h2>
+      <h1>${qtd}</h1>
+      <p class="muted">${brl(p.preco_revenda)}<br>${status}</p>
+      <a class="btn" href="/admin/esim/plano/${p.id}/editar">✏️ Editar</a>
+      <form method="post" action="/admin/esim/plano/${p.id}/apagar" onsubmit="return confirm('Apagar este plano? Os QR Codes disponíveis desse plano também serão removidos. Pedidos antigos não serão apagados.')" style="display:inline">
+        <button class="btn red">🗑️ Apagar plano</button>
+      </form>
+    </div>`;
   }
   cards += '</div>';
+
+  let planosTable = '<table><tr><th>ID</th><th>Plano</th><th>Preço</th><th>QR Disponíveis</th><th>Ação</th></tr>';
+  for (const p of planos) {
+    planosTable += `<tr>
+      <td>#${p.id}</td>
+      <td>${safeHtml(p.nome_plano)}</td>
+      <td>${brl(p.preco_revenda)}</td>
+      <td>${Number(p.qtd || 0)}</td>
+      <td>
+        <a class="btn" href="/admin/esim/plano/${p.id}/editar">✏️ Editar</a>
+        <form method="post" action="/admin/esim/plano/${p.id}/apagar" onsubmit="return confirm('Apagar este plano? Os QR Codes disponíveis desse plano também serão removidos. Pedidos antigos não serão apagados.')" style="display:inline">
+          <button class="btn red">🗑️ Apagar plano</button>
+        </form>
+      </td>
+    </tr>`;
+  }
+  planosTable += '</table>';
+
 
   const options = planos.map(p =>
     `<option value="${p.id}">${safeHtml(p.nome_plano)} - ${brl(p.preco_revenda)} - ${Number(p.qtd || 0)} QR</option>`
@@ -1743,7 +1769,7 @@ app.get('/admin/esim', async (req, res) => {
   }
   table += '</table>';
 
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
 
 app.post('/admin/esim/plano', async (req, res) => {
@@ -1752,6 +1778,99 @@ app.post('/admin/esim/plano', async (req, res) => {
   if (nome && preco > 0) {
     await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
     notificarPainel('esim', '📱 Plano eSIM cadastrado', `${nome} - disponível para venda manual`);
+  }
+  res.redirect('/admin/esim');
+});
+
+
+
+app.get('/admin/esim/plano/:id/editar', async (req, res) => {
+  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [req.params.id]);
+  if (!plano) return res.redirect('/admin/esim');
+
+  const qtd = await get(`SELECT COUNT(*) qtd FROM esim_estoque
+    WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
+    [plano.nome_plano, plano.preco_revenda]);
+
+  const html = `<h1>✏️ Editar plano eSIM</h1>
+  <div class="card">
+    <form method="post">
+      <label>Nome do plano</label>
+      <input name="nome_plano" value="${safeHtml(plano.nome_plano || '')}" required>
+
+      <label>Preço revenda</label>
+      <input name="preco_revenda" value="${Number(plano.preco_revenda || 0).toFixed(2).replace('.', ',')}" required>
+
+      <label>Preço cliente</label>
+      <input name="preco_cliente" value="${Number(plano.preco_cliente || plano.preco_revenda || 0).toFixed(2).replace('.', ',')}">
+
+      <label>Status</label>
+      <select name="ativo">
+        <option value="1" ${plano.ativo ? 'selected' : ''}>Ativo</option>
+        <option value="0" ${!plano.ativo ? 'selected' : ''}>Inativo</option>
+      </select>
+
+      <p class="muted">QR disponíveis neste plano: ${qtd?.qtd || 0}</p>
+
+      <button class="btn green">Salvar alterações</button>
+      <a class="btn" href="/admin/esim">Voltar</a>
+    </form>
+  </div>`;
+
+  res.send(page('Editar plano eSIM', html));
+});
+
+app.post('/admin/esim/plano/:id/editar', async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
+  if (!plano) return res.redirect('/admin/esim');
+
+  const nomeNovo = String(req.body.nome_plano || '').trim();
+  const precoNovo = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
+  const precoClienteNovo = Number(String(req.body.preco_cliente || req.body.preco_revenda || '0').replace(',', '.'));
+  const ativo = req.body.ativo === '1' ? 1 : 0;
+
+  if (nomeNovo && precoNovo > 0) {
+    // Atualiza o catálogo.
+    await run(`UPDATE esim_planos
+      SET nome_plano=?, preco_revenda=?, preco_cliente=?, ativo=?
+      WHERE id=?`,
+      [nomeNovo, precoNovo, precoClienteNovo || precoNovo, ativo, id]);
+
+    // Atualiza apenas QR disponíveis, para não alterar histórico de QR vendidos.
+    await run(`UPDATE esim_estoque
+      SET nome_plano=?, preco_revenda=?, preco_cliente=?
+      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
+      [nomeNovo, precoNovo, precoClienteNovo || precoNovo, plano.nome_plano, plano.preco_revenda]);
+
+    notificarPainel('esim', '✏️ Plano eSIM alterado', `${plano.nome_plano} → ${nomeNovo}`);
+  }
+
+  res.redirect('/admin/esim');
+});
+
+app.post('/admin/esim/plano/:id/apagar', async (req, res) => {
+  const id = Number(req.params.id || 0);
+  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
+  if (plano) {
+    // Não apaga pedidos antigos. Apenas desativa o plano e remove QR disponíveis não vendidos.
+    const qrs = await all(`SELECT * FROM esim_estoque
+      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
+      [plano.nome_plano, plano.preco_revenda]);
+
+    for (const q of qrs) {
+      try {
+        if (q.arquivo_qr) fs.unlinkSync(caminhoArquivoEsim(q.arquivo_qr));
+      } catch(e) {}
+    }
+
+    await run(`DELETE FROM esim_estoque
+      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
+      [plano.nome_plano, plano.preco_revenda]);
+
+    await run('UPDATE esim_planos SET ativo=0 WHERE id=?', [id]);
+
+    notificarPainel('esim', '🗑️ Plano eSIM apagado', plano.nome_plano);
   }
   res.redirect('/admin/esim');
 });
