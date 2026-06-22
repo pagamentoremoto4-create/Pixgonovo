@@ -1703,7 +1703,9 @@ app.get('/admin', async (req, res) => {
 });
 
 function pedidoEhEsimManual(o) {
-  return o && o.tipo === 'CLIENTE' && String(o.entrada_label || '').toUpperCase().includes('ESIM') && !String(o.status || '').includes('FINALIZADO');
+  const label = String(o?.entrada_label || '').toUpperCase();
+  const status = String(o?.status || '').toUpperCase();
+  return !!(o && label.includes('ESIM') && !status.includes('FINALIZADO') && !status.includes('CANCELADO'));
 }
 function pedidoActions(o, back = '/admin/pedidos') {
   const entregaManual = pedidoEhEsimManual(o) ? `<form class="forms-inline" method="post" enctype="multipart/form-data" action="/admin/pedido/${o.id}/entregar-esim" onsubmit="return confirm('Enviar este QR ao cliente e finalizar o pedido #${o.id}?')">
@@ -1808,16 +1810,19 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
 
 
 app.get('/admin/esim/manuais', async (req, res) => {
-  const rows = await all(`SELECT * FROM pedidos WHERE tipo='CLIENTE' AND entrada_label LIKE '%eSIM%' AND status NOT IN ('FINALIZADO','CANCELADO') ORDER BY id DESC LIMIT 100`);
+  const rows = await all(`SELECT * FROM pedidos
+    WHERE UPPER(COALESCE(entrada_label,'')) LIKE '%ESIM%'
+      AND status NOT IN ('FINALIZADO','CANCELADO')
+    ORDER BY id DESC LIMIT 100`);
   const html = `<div class="topbar"><h1>📦 Entregas Manuais eSIM</h1><a class="btn" href="/admin/esim">Voltar ao estoque</a></div>
-  <div class="card"><p class="muted">Aqui aparecem os eSIM pagos que precisam de envio manual. Escolha a imagem do QR Code e clique em entregar.</p></div>${pedidoTable(rows)}`;
+  <div class="card"><p class="muted">Aqui aparecem os eSIM de cliente ou revenda que precisam de envio manual. Escolha a imagem do QR Code e clique em entregar.</p></div>${pedidoTable(rows)}`;
   res.send(page('Entregas Manuais eSIM', html));
 });
 
 app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr_manual'), async (req, res) => {
   const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (!p || !req.file) return res.redirect(req.get('referer') || '/admin/esim/manuais');
-  const jid = p.cliente_jid || numberToJid(p.cliente_whatsapp);
+  const jid = p.cliente_jid || p.revenda_jid || numberToJid(p.cliente_whatsapp || p.revenda_numero);
   const arquivoRel = `esim/${req.file.filename}`;
   const qrPath = esimQrPath(arquivoRel);
 

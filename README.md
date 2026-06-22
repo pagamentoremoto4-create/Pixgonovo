@@ -17,3 +17,9 @@ DB_PATH=/data/database.db
 DATA_DIR=/data
 ESIM_DIR=/data/esim
 ```
+
+
+## Correção eSIM manual revenda
+- Pedidos eSIM manuais de revenda agora aparecem em `/admin/esim/manuais`.
+- A entrega manual pelo painel envia o QR para revenda ou cliente corretamente.
+- O botão `📤 Entregar QR` aparece para qualquer pedido com `entrada_label` contendo eSIM.
