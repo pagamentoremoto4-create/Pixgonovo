@@ -93,3 +93,26 @@ Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendido
 
 ## Correção temas
 Tema muda foto automaticamente e mantém iniciarWhatsApp intacto.
+
+
+## Atualização final: galeria hacker e temas extras
+
+Temas prontos:
+- Hacker Verde
+- Hacker Azul
+- Hacker Vermelho
+- Hacker Roxo
+- Gold VIP
+- Matrix Hacker
+- Cyber Security
+- Black Elite
+
+Cada tema muda automaticamente:
+- Cores
+- Fundo
+- Foto hacker
+- Cards
+- Botões
+- Menu lateral
+
+As fotos/modelos ficam salvos em `/data/themes`.
