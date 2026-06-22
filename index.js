@@ -133,6 +133,14 @@ function jidToNumber(jid) {
   return normalizarNumeroWhatsApp(raw);
 }
 function numberToJid(n) { const d = normalizarNumeroWhatsApp(n); return d ? `${d}@s.whatsapp.net` : ''; }
+function isNewsletter(jid) { return String(jid || '').endsWith('@newsletter'); }
+function isStatusBroadcast(jid) { return String(jid || '') === 'status@broadcast'; }
+function withTimeout(promise, ms, label='operação') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout ${label}`)), ms))
+  ]);
+}
 function numerosPossiveisDaMensagem(msg, fallbackJid) {
   const valores = [
     msg?.key?.remoteJid,
@@ -283,12 +291,12 @@ function notificarPainel(tipo, titulo, mensagem) {
 
 
 function pastaAuthWhatsApp(tipo) {
-  return path.join(__dirname, tipo === 'esim' ? 'auth_esim' : 'auth');
+  return path.join(DATA_DIR, tipo === 'esim' ? 'auth_esim' : 'auth');
 }
 function apagarPastaSeguro(dir) {
-  const base = path.resolve(__dirname);
+  const bases = [path.resolve(__dirname), path.resolve(DATA_DIR)];
   const alvo = path.resolve(dir);
-  if (!alvo.startsWith(base)) throw new Error('Caminho inválido para reset de sessão');
+  if (!bases.some(base => alvo.startsWith(base))) throw new Error('Caminho inválido para reset de sessão');
   if (fs.existsSync(alvo)) fs.rmSync(alvo, { recursive: true, force: true });
 }
 function reiniciarServicoRender(motivo) {
@@ -561,17 +569,25 @@ async function listarServicosTexto(revenda) {
   texto += '\nDigite o número do serviço.';
   return texto;
 }
-async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
+async function enviarTexto(to, text) {
+  if (!sock || !to) return false;
+  try { await withTimeout(sock.sendMessage(to, { text }), 15000, 'enviar texto'); return true; }
+  catch (e) { console.log('⚠️ Falha ao enviar texto:', to, e.message); return false; }
+}
 async function enviarImagem(to, filePath, caption='') {
   if (!sock || !to || !filePath || !fs.existsSync(filePath)) return false;
-  await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption });
-  return true;
+  try { await withTimeout(sock.sendMessage(to, { image: fs.readFileSync(filePath), caption }), 20000, 'enviar imagem'); return true; }
+  catch (e) { console.log('⚠️ Falha ao enviar imagem:', to, e.message); return false; }
 }
-async function enviarTextoEsim(to, text) { if (sockEsim && to) await sockEsim.sendMessage(to, { text }); }
+async function enviarTextoEsim(to, text) {
+  if (!sockEsim || !to) return false;
+  try { await withTimeout(sockEsim.sendMessage(to, { text }), 15000, 'enviar texto eSIM'); return true; }
+  catch (e) { console.log('⚠️ Falha ao enviar texto eSIM:', to, e.message); return false; }
+}
 async function enviarImagemEsim(to, filePath, caption='') {
   if (!sockEsim || !to || !filePath || !fs.existsSync(filePath)) return false;
-  await sockEsim.sendMessage(to, { image: fs.readFileSync(filePath), caption });
-  return true;
+  try { await withTimeout(sockEsim.sendMessage(to, { image: fs.readFileSync(filePath), caption }), 20000, 'enviar imagem eSIM'); return true; }
+  catch (e) { console.log('⚠️ Falha ao enviar imagem eSIM:', to, e.message); return false; }
 }
 function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
 async function enviarParaAdmins(texto) {
@@ -625,7 +641,7 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 
 async function iniciarWhatsApp() {
   await initDB();
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { state, saveCreds } = await useMultiFileAuthState(pastaAuthWhatsApp('principal'));
   const { version } = await fetchLatestBaileysVersion();
   sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
   sock.ev.on('creds.update', saveCreds);
@@ -650,7 +666,7 @@ async function iniciarWhatsApp() {
     // Assim o bot usa o número daquela conversa como WhatsApp da revenda.
     if (msg.key?.fromMe) {
       if (type && type !== 'notify') return;
-      if (msg.key?.remoteJid === 'status@broadcast') return;
+      if (msg.key?.remoteJid === 'status@broadcast' || isNewsletter(msg.key?.remoteJid)) return;
       if (isGroup(msg.key?.remoteJid)) return;
 
       const textoFromMe = getText(msg).trim();
@@ -687,7 +703,7 @@ async function iniciarWhatsApp() {
     }
 
     if (type && type !== 'notify') return;
-    if (msg.key?.remoteJid === 'status@broadcast') return;
+    if (msg.key?.remoteJid === 'status@broadcast' || isNewsletter(msg.key?.remoteJid)) return;
 
     // Evita processar histórico antigo quando reconecta/reinicia no Render
     const tsRaw = Number(msg.messageTimestamp || 0);
@@ -701,7 +717,7 @@ async function iniciarWhatsApp() {
     if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
 
     const from = msg.key.remoteJid;
-    if (isGroup(from)) return;
+    if (isGroup(from) || isNewsletter(from) || isStatusBroadcast(from)) return;
     const textoOriginal = getText(msg).trim();
     if (!textoOriginal) return;
     const texto = textoOriginal.toLowerCase();
@@ -709,13 +725,15 @@ async function iniciarWhatsApp() {
     const nomeContato = nomeContatoSeguro(msg);
     console.log('📩', from, msg.key.fromMe ? 'FROMME' : '', textoOriginal);
     try { await tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato); }
-    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
+    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, `❌ Erro interno. Tente novamente.
+
+Detalhe: ${e.message || 'sem detalhe'}`); }
   });
 }
 
 async function iniciarWhatsAppEsim() {
   await initDB();
-  const { state, saveCreds } = await useMultiFileAuthState('./auth_esim');
+  const { state, saveCreds } = await useMultiFileAuthState(pastaAuthWhatsApp('esim'));
   const { version } = await fetchLatestBaileysVersion();
   sockEsim = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
   sockEsim.ev.on('creds.update', saveCreds);
@@ -735,7 +753,7 @@ async function iniciarWhatsAppEsim() {
     if (!msg || !msg.message) return;
     if (msg.key?.fromMe) return;
     if (type && type !== 'notify') return;
-    if (msg.key?.remoteJid === 'status@broadcast') return;
+    if (msg.key?.remoteJid === 'status@broadcast' || isNewsletter(msg.key?.remoteJid)) return;
 
     const tsRaw = Number(msg.messageTimestamp || 0);
     const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
@@ -747,13 +765,15 @@ async function iniciarWhatsAppEsim() {
     if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
 
     const from = msg.key.remoteJid;
-    if (isGroup(from)) return;
+    if (isGroup(from) || isNewsletter(from) || isStatusBroadcast(from)) return;
     const textoOriginal = getText(msg).trim();
     if (!textoOriginal) return;
     const texto = textoOriginal.toLowerCase();
     const nomeContato = nomeContatoSeguro(msg);
     try { await tratarWhatsAppEsim(msg, from, textoOriginal, texto, nomeContato); }
-    catch (e) { console.log('❌ ERRO WA eSIM:', e); await enviarTextoEsim(from, '❌ Erro interno. Tente novamente.'); }
+    catch (e) { console.log('❌ ERRO WA eSIM:', e); await enviarTextoEsim(from, `❌ Erro interno. Tente novamente.
+
+Detalhe: ${e.message || 'sem detalhe'}`); }
   });
 }
 
@@ -1717,7 +1737,7 @@ app.get('/admin/pedidos', async (req, res) => {
   let where = [];
   if (status) { where.push('status=?'); params.push(status); }
   if (q) { where.push('(imei LIKE ? OR entrada_valor LIKE ? OR cliente_whatsapp LIKE ? OR cliente_nome LIKE ? OR revenda_numero LIKE ? OR revenda_nome LIKE ?)'); params.push(`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`); }
-  const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`;
+  const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 100`;
   const rows = await all(sql, params);
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
   <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, WhatsApp ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
@@ -1788,7 +1808,7 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
 
 
 app.get('/admin/esim/manuais', async (req, res) => {
-  const rows = await all(`SELECT * FROM pedidos WHERE tipo='CLIENTE' AND entrada_label LIKE '%eSIM%' AND status NOT IN ('FINALIZADO','CANCELADO') ORDER BY id DESC LIMIT 300`);
+  const rows = await all(`SELECT * FROM pedidos WHERE tipo='CLIENTE' AND entrada_label LIKE '%eSIM%' AND status NOT IN ('FINALIZADO','CANCELADO') ORDER BY id DESC LIMIT 100`);
   const html = `<div class="topbar"><h1>📦 Entregas Manuais eSIM</h1><a class="btn" href="/admin/esim">Voltar ao estoque</a></div>
   <div class="card"><p class="muted">Aqui aparecem os eSIM pagos que precisam de envio manual. Escolha a imagem do QR Code e clique em entregar.</p></div>${pedidoTable(rows)}`;
   res.send(page('Entregas Manuais eSIM', html));
@@ -1819,7 +1839,7 @@ app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr_manual'), asyn
 
 app.get('/admin/esim', async (req, res) => {
   const resumo = await all(`SELECT nome_plano, preco_revenda, SUM(CASE WHEN status='DISPONIVEL' THEN 1 ELSE 0 END) qtd, MAX(CASE WHEN status='MANUAL' THEN 1 ELSE 0 END) manual_ativo FROM esim_estoque WHERE status='DISPONIVEL' OR status='MANUAL' GROUP BY nome_plano, preco_revenda ORDER BY nome_plano ASC`);
-  const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
+  const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 100');
   let cards = '<div class="grid">';
   for (const r of resumo) cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${r.qtd}</h1><p class="muted">${brl(r.preco_revenda)}${Number(r.manual_ativo || 0) ? '<br>⚠️ Manual ativo' : ''}</p></div>`;
   cards += '</div>';
@@ -1927,7 +1947,7 @@ app.post('/admin/revenda/:id/editar', async (req, res) => { const w = normalizar
 app.get('/admin/revenda/:id/precos', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC'); let html = `<h1>💰 Preços - ${safeHtml(r.nome)}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`; for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${safeHtml(s.nome)}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; } html += `</table><br><button class="btn green">Salvar preços</button></form>`; res.send(page('Preços', html)); });
 app.post('/admin/revenda/:id/precos', async (req, res) => { const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1'); for (const s of servs) { const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.')); await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]); } res.redirect('/admin/revendas'); });
 app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
-app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
+app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 100', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
 app.post('/admin/revenda/:id/pagamento', async (req, res) => {
   const valor = Number(String(req.body.valor || '0').replace(',', '.'));
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
@@ -1991,7 +2011,7 @@ app.post('/admin/servico/:id/editar', async (req, res) => {
 });
 app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
-app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
+app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 100', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
 
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
