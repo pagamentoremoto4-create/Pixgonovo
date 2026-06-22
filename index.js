@@ -28,13 +28,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 10000;
 const PIXGO_API = 'https://pixgo.org/api/v1';
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'database.db');
+
+// Tudo que precisa sobreviver a restart/deploy do Render fica no Persistent Disk.
+// Configure DATA_DIR=/data no Render e crie o Disk com mount path /data.
+const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : __dirname);
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'database.db');
 const DB_DIR = path.dirname(DB_PATH);
-const BACKUP_DIR = path.join(DB_DIR, 'backups');
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
-const ESIM_DIR = path.join(PUBLIC_DIR, 'esim');
+const ESIM_DIR = process.env.ESIM_DIR || path.join(DATA_DIR, 'esim');
+
+// Mantém os QR Codes eSIM acessíveis pela URL /esim/arquivo.png,
+// mas os arquivos ficam salvos em /data/esim.
+app.use('/esim', express.static(ESIM_DIR));
 const ADMIN_NUMBER = onlyDigits(process.env.ADMIN_NUMBER || '');
 const ADMIN_NUMBERS = Array.from(new Set([
   ADMIN_NUMBER,
@@ -92,6 +100,12 @@ function all(sql, params = []) {
   return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
+
+function caminhoArquivoEsim(arquivoQr) {
+  if (!arquivoQr) return '';
+  return path.join(ESIM_DIR, path.basename(String(arquivoQr)));
+}
+
 function normalizarNumeroWhatsApp(v) {
   let d = onlyDigits(v);
   // remove zeros na frente
@@ -933,7 +947,7 @@ async function entregarEsimRevenda(from, revenda, plano) {
   await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
-  const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
+  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
   await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
   if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
   await enviarTexto(from, mensagemInstrucaoEsim());
@@ -1526,7 +1540,7 @@ menu
 app.post('/admin/esim/:id/apagar', async (req, res) => {
   const item = await get('SELECT * FROM esim_estoque WHERE id=?', [req.params.id]);
   if (item) {
-    try { if (item.arquivo_qr) fs.unlinkSync(path.join(PUBLIC_DIR, item.arquivo_qr)); } catch(e) {}
+    try { if (item.arquivo_qr) fs.unlinkSync(caminhoArquivoEsim(item.arquivo_qr)); } catch(e) {}
     await run('DELETE FROM esim_estoque WHERE id=?', [item.id]);
   }
   res.redirect('/admin/esim');
@@ -1536,7 +1550,7 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
   if (item?.revenda_id) {
     const r = await get('SELECT * FROM revendas WHERE id=?', [item.revenda_id]);
     const jid = r?.jid || numberToJid(r?.whatsapp);
-    const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
+    const qrPath = caminhoArquivoEsim(item.arquivo_qr);
     if (jid && fs.existsSync(qrPath)) {
       await sock.sendMessage(jid, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ Reenvio do QR Code.` });
       await enviarTexto(jid, mensagemInstrucaoEsim());
