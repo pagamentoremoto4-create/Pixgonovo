@@ -89,3 +89,25 @@ A edição permite alterar:
 - Ativo/Inativo
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
+
+
+## Atualização: temas prontos e fotos hacker
+
+Nova aba no painel:
+
+```txt
+/admin/temas
+```
+
+Recursos:
+- Temas prontos: hacker verde, azul, vermelho, roxo, dark pro e gold VIP.
+- Modelos de imagens hacker gerados automaticamente.
+- Upload de foto hacker pelo painel.
+- Usar link de imagem.
+- Tudo fica salvo no Persistent Disk em `/data/themes`.
+- Configuração salva no banco, não perde ao reiniciar o Render.
+
+Variável opcional:
+```txt
+THEME_DIR=/data/themes
+```
