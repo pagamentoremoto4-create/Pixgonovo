@@ -1671,23 +1671,64 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
 });
 
 app.get('/admin/esim', async (req, res) => {
-  const resumo = await all(`
-    SELECT p.nome_plano, p.preco_revenda,
-      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END),0) qtd
+  const planos = await all(`
+    SELECT p.*,
+      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END),0) AS qtd
     FROM esim_planos p
-    LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
+    LEFT JOIN esim_estoque e
+      ON e.nome_plano=p.nome_plano
+     AND e.preco_revenda=p.preco_revenda
     WHERE p.ativo=1
-    GROUP BY p.nome_plano, p.preco_revenda
-    ORDER BY p.nome_plano ASC`);
+    GROUP BY p.id
+    ORDER BY p.nome_plano ASC
+  `);
+
   const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
   const manuais = await all(`SELECT * FROM pedidos WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO') ORDER BY id DESC LIMIT 100`);
 
   let cards = '<div class="grid">';
-  for (const r of resumo) {
-    const qtd = Number(r.qtd || 0);
-    cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${qtd}</h1><p class="muted">${brl(r.preco_revenda)} ${qtd ? '· automático' : '· manual'}</p></div>`;
+  for (const p of planos) {
+    const qtd = Number(p.qtd || 0);
+    const status = qtd > 0 ? `🟢 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '🔴 Sem QR · venda manual';
+    cards += `<div class="card metric"><h2>📱 ${safeHtml(p.nome_plano)}</h2><h1>${qtd}</h1><p class="muted">${brl(p.preco_revenda)}<br>${status}</p></div>`;
   }
   cards += '</div>';
+
+  const options = planos.map(p =>
+    `<option value="${p.id}">${safeHtml(p.nome_plano)} - ${brl(p.preco_revenda)} - ${Number(p.qtd || 0)} QR</option>`
+  ).join('');
+
+  const formPlano = `<div class="card">
+    <h2>➕ Cadastrar plano eSIM</h2>
+    <form method="post" action="/admin/esim/plano">
+      <div class="grid">
+        <input name="nome_plano" placeholder="Nome do plano. Ex: TIM 50GB" required>
+        <input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required>
+      </div>
+      <button class="btn green">Salvar plano</button>
+    </form>
+    <p class="muted">O plano fica disponível para venda manual mesmo sem QR no estoque.</p>
+  </div>`;
+
+  const formQr = `<div class="card">
+    <h2>📥 Adicionar QR Code ao plano</h2>
+    <form method="post" action="/admin/esim/qrcode" enctype="multipart/form-data">
+      <div class="grid">
+        <select name="plano_id" required>
+          <option value="">Selecione o plano</option>
+          ${options}
+        </select>
+        <input type="file" name="qr" accept="image/*" required>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px">
+        <input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0">
+        Avisar revendas com mensagem simples
+      </label>
+      <br>
+      <button class="btn green">Salvar QR no estoque</button>
+    </form>
+    <p class="muted">Com QR disponível, entrega automática. Quando o estoque chegar a 0, a venda vira manual.</p>
+  </div>`;
 
   let manualTable = '<table><tr><th>Pedido</th><th>Revenda</th><th>Plano</th><th>Valor</th><th>Status</th><th>Ação</th></tr>';
   for (const p of manuais) {
@@ -1701,24 +1742,32 @@ app.get('/admin/esim', async (req, res) => {
     table += `<tr><td>#${i.id}</td><td>${safeHtml(i.nome_plano)}</td><td>${brl(i.preco_revenda)}</td><td><span class="pill">${safeHtml(i.status)}</span></td><td>${safeHtml(i.revenda_nome || '-')}${i.pedido_id ? `<br><span class="muted">Pedido #${i.pedido_id}</span>` : ''}</td><td>${img}</td><td><form class="forms-inline" method="post" action="/admin/esim/${i.id}/apagar"><button class="btn red" onclick="return confirm('Apagar este QR do estoque?')">🗑️ Apagar</button></form></td></tr>`;
   }
   table += '</table>';
-  const form = `<div class="card"><h2>➕ Adicionar Plano / QR Code eSIM</h2><form method="post" enctype="multipart/form-data"><div class="grid"><input name="nome_plano" placeholder="Nome do plano. Ex: TIM 70GB" required><input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required><input type="file" name="qr" accept="image/*"></div><br><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0"> Avisar revendas com mensagem simples</label><br><button class="btn green">Salvar</button></form><p class="muted">Sem foto: salva apenas o plano e vende manualmente quando não houver QR. Com foto: adiciona QR ao estoque automático.</p></div>`;
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${form}${cards}<div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
-app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
+
+app.post('/admin/esim/plano', async (req, res) => {
   const nome = String(req.body.nome_plano || '').trim();
   const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
   if (nome && preco > 0) {
     await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
-    if (req.file) {
-      await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`, [nome, preco, preco, `esim/${req.file.filename}`]);
-      notificarPainel('esim', '📱 QR eSIM adicionado', nome);
-    } else {
-      notificarPainel('esim', '📱 Plano eSIM cadastrado', `${nome} - entrega manual se não houver QR`);
-    }
-    if (req.body.avisar_revendas === '1') {
-      const aviso = `🚀 Novo eSIM adicionado ao catálogo
+    notificarPainel('esim', '📱 Plano eSIM cadastrado', `${nome} - disponível para venda manual`);
+  }
+  res.redirect('/admin/esim');
+});
 
-📱 ${nome}
+app.post('/admin/esim/qrcode', uploadEsim.single('qr'), async (req, res) => {
+  const planoId = Number(req.body.plano_id || 0);
+  const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [planoId]);
+  if (plano && req.file) {
+    await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`,
+      [plano.nome_plano, plano.preco_revenda, plano.preco_cliente || plano.preco_revenda, `esim/${req.file.filename}`]);
+    notificarPainel('esim', '📱 QR eSIM adicionado', plano.nome_plano);
+
+    if (req.body.avisar_revendas === '1') {
+      const aviso = `🚀 QR Code eSIM disponível
+
+📱 ${plano.nome_plano}
 
 Digite:
 
@@ -1729,6 +1778,19 @@ menu
 🏢 Centralunlocker`;
       const r = await enviarMensagemRevendas({ texto: aviso });
       await run('INSERT INTO mensagens_envio (destino, mensagem, total, enviadas, falhas) VALUES (?, ?, ?, ?, ?)', ['TODAS_REVENDAS', aviso, r.total, r.enviadas, r.falhas]);
+    }
+  }
+  res.redirect('/admin/esim');
+});
+
+app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
+  const nome = String(req.body.nome_plano || '').trim();
+  const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
+  if (nome && preco > 0) {
+    await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
+    if (req.file) {
+      await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`,
+        [nome, preco, preco, `esim/${req.file.filename}`]);
     }
   }
   res.redirect('/admin/esim');

@@ -54,3 +54,12 @@ Agora é possível cadastrar apenas o plano eSIM sem QR Code. Quando a revenda c
    - `/entregaresim ID_DO_PEDIDO`
 
 Depois de `/entregaresim ID`, envie a foto do QR Code ou texto da entrega.
+
+
+## Atualização: plano e QR separados
+
+- Cadastre o plano eSIM primeiro, por exemplo TIM 50GB.
+- O plano fica disponível para venda manual mesmo sem QR.
+- Para adicionar QR, selecione o plano cadastrado e envie a imagem do QR.
+- Com QR disponível: entrega automática.
+- Com estoque zerado: venda manual.
