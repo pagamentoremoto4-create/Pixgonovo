@@ -91,36 +91,5 @@ A edição permite alterar:
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
 
 
-## Atualização: temas prontos e fotos hacker
-
-Nova aba no painel:
-
-```txt
-/admin/temas
-```
-
-Recursos:
-- Temas prontos: hacker verde, azul, vermelho, roxo, dark pro e gold VIP.
-- Modelos de imagens hacker gerados automaticamente.
-- Upload de foto hacker pelo painel.
-- Usar link de imagem.
-- Tudo fica salvo no Persistent Disk em `/data/themes`.
-- Configuração salva no banco, não perde ao reiniciar o Render.
-
-Variável opcional:
-```txt
-THEME_DIR=/data/themes
-```
-
-
-## Atualização: tema troca a foto automaticamente
-
-Agora cada tema já vem com uma foto hacker vinculada:
-
-- Hacker Verde → `/themes/hacker_green.svg`
-- Hacker Azul → `/themes/hacker_blue.svg`
-- Hacker Vermelho → `/themes/hacker_red.svg`
-- Hacker Roxo → `/themes/hacker_purple.svg`
-- Gold VIP → `/themes/hacker_gold.svg`
-
-Quando escolher o tema em `/admin/temas`, o painel muda as cores e a foto automaticamente.
+## Correção temas
+Tema muda foto automaticamente e mantém iniciarWhatsApp intacto.

@@ -39,7 +39,6 @@ const BACKUP_DIR = process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
-const THEME_DIR = process.env.THEME_DIR || path.join(DATA_DIR, 'themes');
 const ESIM_DIR = process.env.ESIM_DIR || path.join(DATA_DIR, 'esim');
 
 // Mantém os QR Codes eSIM acessíveis pela URL /esim/arquivo.png,
@@ -58,8 +57,6 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
-if (!fs.existsSync(THEME_DIR)) fs.mkdirSync(THEME_DIR, { recursive: true });
-app.use('/themes', express.static(THEME_DIR));
 
 let sock = null;
 let qrCodeBase64 = null;
@@ -76,79 +73,6 @@ const TEMAS_PAINEL = {
 
 const pedidoSessao = new Map();
 const adminSessao = new Map();
-
-function temaAtualPainel() {
-  return PAINEL_TEMA || 'hacker-green';
-}
-function temaVars(nome) {
-  const temas = {
-    'hacker-green': { bg:'#07111f', bg2:'#0c1426', card:'#101b31', card2:'#0d172a', line:'#24324b', text:'#eaf0f8', muted:'#97a6ba', accent:'#00ff66', accent2:'#28d7ff' },
-    'hacker-blue': { bg:'#061122', bg2:'#081a34', card:'#0d1b33', card2:'#0b1730', line:'#1f3b67', text:'#eaf6ff', muted:'#9ab4d3', accent:'#28d7ff', accent2:'#2f80ed' },
-    'hacker-red': { bg:'#120707', bg2:'#1d0b0b', card:'#201010', card2:'#160b0b', line:'#4a1d1d', text:'#fff1f1', muted:'#d6a2a2', accent:'#ff3b3b', accent2:'#ff9f43' },
-    'hacker-purple': { bg:'#0b0716', bg2:'#130b28', card:'#19112e', card2:'#110b22', line:'#3a2465', text:'#f5efff', muted:'#b8a6d9', accent:'#a855f7', accent2:'#28d7ff' },
-    'dark-pro': { bg:'#05070b', bg2:'#0b1020', card:'#101827', card2:'#0b1220', line:'#263143', text:'#f8fafc', muted:'#94a3b8', accent:'#94a3b8', accent2:'#2f80ed' },
-    'gold-vip': { bg:'#111006', bg2:'#1c1709', card:'#211b0c', card2:'#151106', line:'#4a3b14', text:'#fff8df', muted:'#d7c58b', accent:'#ffd166', accent2:'#ff9f1c' }
-  };
-  return temas[nome] || temas['hacker-green'];
-}
-function imagemPadraoDoTema(tema) {
-  const mapa = {
-    'hacker-green': '/themes/hacker_green.svg',
-    'hacker-blue': '/themes/hacker_blue.svg',
-    'hacker-red': '/themes/hacker_red.svg',
-    'hacker-purple': '/themes/hacker_purple.svg',
-    'dark-pro': '/themes/hacker_blue.svg',
-    'gold-vip': '/themes/hacker_gold.svg'
-  };
-  return mapa[tema] || mapa['hacker-green'];
-}
-function hackerImagemAtual() {
-  return getConfig ? getConfig('painel_hacker_image', '') : '';
-}
-function ensureHackerModelos() {
-  const modelos = [
-    ['hacker_green.svg', '#00ff66', '#28d7ff', 'CENTRALUNLOCKER'],
-    ['hacker_blue.svg', '#28d7ff', '#2f80ed', 'SECURE PANEL'],
-    ['hacker_red.svg', '#ff3b3b', '#ff9f43', 'FAST MODE'],
-    ['hacker_purple.svg', '#a855f7', '#28d7ff', 'CYBER ADMIN'],
-    ['hacker_gold.svg', '#ffd166', '#ff9f1c', 'GOLD VIP']
-  ];
-  for (const [file, c1, c2, title] of modelos) {
-    const fp = path.join(THEME_DIR, file);
-    if (!fs.existsSync(fp)) {
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
-<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#05070b"/><stop offset="1" stop-color="#111827"/></linearGradient><radialGradient id="r" cx="70%" cy="35%" r="60%"><stop offset="0" stop-color="${c1}" stop-opacity=".35"/><stop offset="1" stop-color="${c2}" stop-opacity="0"/></radialGradient></defs>
-<rect width="1200" height="650" fill="url(#g)"/><rect width="1200" height="650" fill="url(#r)"/>
-<g opacity=".17" font-family="monospace" font-size="22" fill="${c1}">
-${Array.from({length:18}).map((_,i)=>`<text x="${20+(i%3)*390}" y="${40+i*34}">010101  ACCESS  ${title}  101010</text>`).join('')}
-</g>
-<g transform="translate(710 80)">
-<circle cx="160" cy="120" r="92" fill="#0b1220" stroke="${c1}" stroke-width="5"/>
-<path d="M55 315c35-110 175-145 255-45 30 37 44 90 48 155H10c7-45 20-82 45-110z" fill="#0b1220" stroke="${c1}" stroke-width="6"/>
-<path d="M88 116c55 40 110 43 172 0 0 70-26 115-86 132-60-16-86-62-86-132z" fill="#111827" stroke="${c2}" stroke-width="5"/>
-<rect x="94" y="141" width="160" height="42" rx="20" fill="#020617" stroke="${c1}" stroke-width="4"/>
-<circle cx="140" cy="162" r="7" fill="${c1}"/><circle cx="210" cy="162" r="7" fill="${c1}"/>
-</g>
-<text x="70" y="510" font-family="Arial Black, Arial" font-size="58" fill="${c1}">${title}</text>
-<text x="72" y="560" font-family="Arial" font-size="28" fill="#eaf0f8">Painel profissional • eSIM • Revendas • PIX</text>
-</svg>`;
-      fs.writeFileSync(fp, svg);
-    }
-  }
-}
-
-
-const uploadTema = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, THEME_DIR),
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname || '.jpg') || '.jpg';
-      cb(null, `hacker_${Date.now()}_${Math.random().toString(16).slice(2)}${ext}`);
-    }
-  }),
-  limits: { fileSize: 8 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype || ''))
-});
 
 const uploadEsim = multer({
   storage: multer.diskStorage({
@@ -531,7 +455,6 @@ async function initDB() {
   )`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
-  ensureHackerModelos();
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -554,22 +477,1062 @@ function basicAuth(req, res, next) {
 }
 
 function page(title, body) {
-  const tv = temaVars(temaAtualPainel());
-  const img = hackerImagemAtual();
-  const imgCss = img ? `body:before{content:"";position:fixed;inset:0;background:linear-gradient(90deg,rgba(7,17,31,.96),rgba(7,17,31,.82)),url('${img}') right bottom/520px auto no-repeat;pointer-events:none;z-index:-1}` : '';
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
-  :root{--bg:${tv.bg};--bg2:${tv.bg2};--card:${tv.card};--card2:${tv.card2};--soft:#16223a;--line:${tv.line};--text:${tv.text};--muted:${tv.muted};--blue:#2f80ed;--cyan:${tv.accent2};--green:${tv.accent};--red:#ff4d4f;--orange:#ff9f43;--purple:#9b5cff;--shadow:0 18px 45px rgba(0,0,0,.35)}
-  *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,${tv.accent}22,transparent 32%),linear-gradient(135deg,var(--bg),var(--bg2));color:var(--text);font-family:Inter,Arial,sans-serif;min-height:100vh}${imgCss}
-  .layout{display:grid;grid-template-columns:270px 1fr;min-height:100vh}.side{background:linear-gradient(180deg,rgba(8,17,31,.98),rgba(8,17,31,.88));backdrop-filter:blur(12px);border-right:1px solid var(--line);padding:18px;position:sticky;top:0;height:100vh;overflow:auto}
-  .brand{font-size:21px;font-weight:900;margin:4px 0 18px;letter-spacing:.3px}.brand span{color:var(--green)}.side a{display:flex;gap:10px;align-items:center;color:var(--text);text-decoration:none;padding:11px 12px;border-radius:14px;margin:6px 0;background:transparent;border:1px solid transparent}.side a:hover{background:rgba(255,255,255,.05);border-color:var(--line);transform:translateX(2px)}
-  .main{padding:24px;max-width:1400px;width:100%}h1{font-size:30px;margin:0 0 18px}h2{margin:0 0 12px}.card{background:linear-gradient(180deg,rgba(16,27,49,.96),rgba(13,23,42,.94));border:1px solid var(--line);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric h1{font-size:36px;color:var(--green);text-shadow:0 0 18px ${tv.accent}55}
-  input,select,textarea{width:100%;padding:12px 13px;border-radius:14px;border:1px solid var(--line);background:#050b16;color:var(--text);margin:6px 0 12px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--green);box-shadow:0 0 0 3px ${tv.accent}22}
-  .btn,button{background:linear-gradient(135deg,var(--blue),var(--cyan));color:white;border:0;border-radius:13px;padding:10px 14px;text-decoration:none;font-weight:800;display:inline-block;margin:2px;cursor:pointer;box-shadow:0 8px 18px rgba(0,0,0,.22)}.green{background:linear-gradient(135deg,var(--green),var(--cyan))}.red{background:linear-gradient(135deg,var(--red),#b91c1c)}.orange{background:linear-gradient(135deg,var(--orange),#ef4444)}
-  .muted{color:var(--muted)}table{width:100%;border-collapse:collapse;background:#08111f;border-radius:16px;overflow:hidden}td,th{padding:11px;border-bottom:1px solid var(--line);text-align:left}th{background:rgba(255,255,255,.05)}.pill{padding:6px 10px;border-radius:999px;background:${tv.accent}22;color:var(--green);font-weight:900}
-  .hero{display:grid;grid-template-columns:1.2fr .8fr;gap:16px;align-items:center}.hero img{max-width:100%;border-radius:20px;border:1px solid var(--line);box-shadow:var(--shadow)}
-  @media(max-width:900px){.layout{grid-template-columns:1fr}.side{position:relative;height:auto}.main{padding:14px}.hero{grid-template-columns:1fr}}
-  </style></head><body><div class="layout"><div class="side"><div class="brand">⚡ <span>Central</span>unlocker</div><a href="/admin">📊 Dashboard</a><a href="/admin/produtos">📦 Produtos</a><a href="/admin/estoque">📥 Estoque QR</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/mensagem">📢 Mensagem</a><a href="/admin/financeiro">💵 Financeiro</a><a href="/admin/temas">🎨 Temas</a><a href="/admin/config">⚙️ Config</a><a href="/admin/logout">🚪 Sair</a></div><div class="main">${body}</div></div></body></html>`;
+  :root{--bg:#07111f;--bg2:#0c1426;--card:#101b31;--card2:#0d172a;--soft:#16223a;--line:#24324b;--text:#eaf0f8;--muted:#97a6ba;--blue:#2f80ed;--cyan:#28d7ff;--green:#28c76f;--red:#ff4d4f;--orange:#ff9f43;--purple:#9b5cff;--shadow:0 18px 45px rgba(0,0,0,.32)}
+  *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:20px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:31px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:12px 14px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:32px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:9px 13px;border-radius:12px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{padding:12px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:12px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:18px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:42px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:18px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:24px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:30px}}
+  
+  body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+(function(){
+ const socket=io(); let total=0;
+ const wrap=document.getElementById('toastWrap');
+ const bell=document.createElement('div'); bell.className='notif-bell'; bell.innerHTML='🔔 <span id="notifCount">0</span>'; document.body.appendChild(bell);
+ function toast(n){ total++; const c=document.getElementById('notifCount'); if(c)c.textContent=total; const el=document.createElement('div'); el.className='toast'; el.innerHTML='<b>'+((n&&n.titulo)||'Notificação')+'</b><div>'+((n&&n.mensagem)||'Atualização recebida')+'</div><small>'+((n&&n.hora)||'')+'</small>'; wrap.appendChild(el); setTimeout(()=>el.remove(),7000); }
+ window.confirmarAcaoPedido=function(form){
+   const acao=form.querySelector('select[name=acao]')?.value||'';
+   const motivo=form.querySelector('input[name=motivo]');
+   if(!acao){ alert('Escolha uma ação.'); return false; }
+   if(acao==='cancelar'){
+     if(motivo){ motivo.style.display='block'; motivo.required=true; if(!motivo.value.trim()){ motivo.focus(); alert('Informe o motivo do cancelamento.'); return false; } }
+     return confirm('Cancelar este pedido?');
+   }
+   if(motivo){ motivo.required=false; }
+   if(acao==='finalizar') return confirm('Finalizar este pedido?');
+   if(acao==='processo') return confirm('Colocar este pedido em processo?');
+   return true;
+ };
+ document.addEventListener('change',function(e){
+   if(e.target && e.target.matches('.status-action-form select[name=acao]')){
+     const form=e.target.closest('form'); const motivo=form&&form.querySelector('input[name=motivo]');
+     if(motivo){ motivo.style.display=e.target.value==='cancelar'?'block':'none'; motivo.required=e.target.value==='cancelar'; }
+   }
+ });
+ socket.on('notificacao', toast);
+ socket.on('dashboard-update', ()=>{ const live=document.querySelector('[data-live-dashboard]'); if(live){ setTimeout(()=>location.reload(),900); } });
+})();
+</script></body></html>`;
+}
+async function precoDaRevenda(revendaId, servicoId) {
+  const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [revendaId, servicoId]);
+  if (pr && Number(pr.preco) > 0) return Number(pr.preco);
+  const s = await get('SELECT preco_padrao FROM servicos_catalogo WHERE id=?', [servicoId]);
+  return Number(s?.preco_padrao || 0);
+}
+async function getRevendaByJidOrNumber(jid) {
+  const numeros = variantesNumero(jidToNumber(jid));
+  const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
+  for (const r of rows) {
+    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
+    if (r.jid === jid || numeros.some(n => rvNums.has(n))) return r;
+  }
+  return null;
+}
+async function getRevendaByMsg(msg, fallbackJid) {
+  const numeros = numerosPossiveisDaMensagem(msg, fallbackJid);
+  const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
+  console.log('🔎 BUSCA REVENDA numeros=', numeros.join(','));
+  for (const r of rows) {
+    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
+    if (r.jid === fallbackJid || numeros.some(n => rvNums.has(n))) {
+      console.log('✅ REVENDA ENCONTRADA:', r.id, r.nome, r.whatsapp);
+      return r;
+    }
+  }
+  console.log('❌ REVENDA NÃO ENCONTRADA para:', numeros.join(','));
+  return null;
+}
+async function listarServicosTexto(revenda) {
+  const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+  let texto = `🛠 *SERVIÇOS DISPONÍVEIS*\n\n`;
+  for (let i = 0; i < servicos.length; i++) {
+    const preco = revenda ? await precoDaRevenda(revenda.id, servicos[i].id) : Number(servicos[i].preco_padrao || 0);
+    texto += `${i + 1} - ${servicos[i].nome} - ${brl(preco)}\n`;
+  }
+  texto += '\nDigite o número do serviço.';
+  return texto;
+}
+async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
+async function enviarImagem(to, filePath, caption='') {
+  if (!sock || !to || !filePath || !fs.existsSync(filePath)) return false;
+  await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption });
+  return true;
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+function mensagemImagem(msg) {
+  return msg.message?.imageMessage ||
+    msg.message?.ephemeralMessage?.message?.imageMessage ||
+    msg.message?.viewOnceMessage?.message?.imageMessage ||
+    msg.message?.viewOnceMessageV2?.message?.imageMessage ||
+    null;
+}
+async function salvarImagemWhatsAppEmEsim(msg) {
+  const imageMessage = mensagemImagem(msg);
+  if (!imageMessage) return null;
+  const stream = await downloadContentFromMessage(imageMessage, 'image');
+  const buffer = await streamToBuffer(stream);
+  const fileName = `esim_manual_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
+  const filePath = path.join(ESIM_DIR, fileName);
+  fs.writeFileSync(filePath, buffer);
+  return { fileName, filePath, rel: `esim/${fileName}` };
+}
+function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
+async function enviarParaAdmins(texto) {
+  for (const jid of adminsJids()) {
+    try { await enviarTexto(jid, texto); } catch (e) { console.log('⚠️ Falha ao avisar admin:', jid, e.message); }
+  }
+}
+async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null }) {
+  const rows = revendaId
+    ? await all('SELECT * FROM revendas WHERE id=? AND status="ATIVA"', [revendaId])
+    : await all('SELECT * FROM revendas WHERE status="ATIVA"');
+  let enviadas = 0, falhas = 0;
+  for (const r of rows) {
+    const jid = r.jid || numberToJid(r.whatsapp);
+    if (!jid) { falhas++; continue; }
+    try {
+      if (imagemPath) await enviarImagem(jid, imagemPath, texto);
+      else await enviarTexto(jid, texto);
+      enviadas++;
+      await new Promise(resolve => setTimeout(resolve, 350));
+    } catch (e) { falhas++; console.log('⚠️ Falha mensagem revenda:', r.id, e.message); }
+  }
+  return { total: rows.length, enviadas, falhas };
+}
+async function avisarNovoPedidoAdmins(pedido, extra='') {
+  const entrada = textoEntradaPedido(pedido);
+  const origem = pedido.revenda_nome ? `🏪 Revenda: ${pedido.revenda_nome}` : `👤 Cliente: ${pedido.cliente_nome || pedido.cliente_whatsapp || '-'}`;
+  await enviarParaAdmins(`🔔 *Novo serviço recebido*
+
+${origem}
+🛠 Serviço: ${pedido.servico_nome || '-'}
+${entrada}
+💰 Valor: ${brl(pedido.valor)}
+📍 Status: ${pedido.status || 'PENDENTE'}${extra ? `
+
+${extra}` : ''}
+
+🏢 Centralunlocker`);
+}
+async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
+  await enviarParaAdmins(`📦 *Novo lote recebido*
+
+🏪 Revenda: ${revenda.nome}
+🛠 Serviço: ${servico.nome}
+📦 Quantidade: ${quantidade}
+💰 Total: ${brl(total)}
+📍 Status: PENDENTE
+
+🏢 Centralunlocker`);
+}
+
+async function iniciarWhatsApp() {
+  await initDB();
+  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { version } = await fetchLatestBaileysVersion();
+  sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) { console.log('✅ QR CODE GERADO'); qrCodeBase64 = await QRCode.toDataURL(qr); conectado = false; }
+    if (connection === 'open') { console.log('✅ WHATSAPP CONECTADO'); qrCodeBase64 = null; conectado = true; }
+    if (connection === 'close') {
+      conectado = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log('❌ WHATSAPP DESCONECTOU:', statusCode);
+      if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsApp(), 5000);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    const msg = messages[0];
+    if (!msg || !msg.message) return;
+
+    // TRAVA CRÍTICA: por padrão não processa mensagens enviadas pelo próprio WhatsApp/bot.
+    // Exceção segura: quando o administrador digita na conversa da revenda:
+    // cadastrar revenda Nome da Revenda
+    // Assim o bot usa o número daquela conversa como WhatsApp da revenda.
+    if (msg.key?.fromMe) {
+      if (type && type !== 'notify') return;
+      if (msg.key?.remoteJid === 'status@broadcast') return;
+      if (isGroup(msg.key?.remoteJid)) return;
+
+      const textoFromMe = getText(msg).trim();
+
+      if (/^(cadastrar|ativar)\s+revenda(\s+.+)?$/i.test(textoFromMe)) {
+        try {
+          await cadastrarRevendaPelaConversaAdmin(msg.key.remoteJid, textoFromMe);
+        } catch (e) {
+          console.log('❌ ERRO CADASTRO FROMME:', e);
+          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar revenda.');
+        }
+        return;
+      }
+
+      // Permite que o admin cadastre serviço para cliente final direto na conversa do cliente.
+      // Exemplo: servico desbloqueio tim 180 356789123456789
+      if (/^servico\s+/i.test(textoFromMe)) {
+        try {
+          await tratarServicoClienteFinal(
+            msg,
+            msg.key.remoteJid,
+            textoFromMe,
+            textoFromMe.toLowerCase(),
+            'Cliente'
+          );
+        } catch (e) {
+          console.log('❌ ERRO SERVIÇO CLIENTE FROMME:', e);
+          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar serviço do cliente.');
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if (type && type !== 'notify') return;
+    if (msg.key?.remoteJid === 'status@broadcast') return;
+
+    // Evita processar histórico antigo quando reconecta/reinicia no Render
+    const tsRaw = Number(msg.messageTimestamp || 0);
+    const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
+    if (msgTime && msgTime < BOT_START_TIME - 60000) return;
+
+    // Evita processar a mesma mensagem várias vezes
+    const msgId = `${msg.key?.remoteJid || ''}:${msg.key?.id || ''}:${msg.key?.fromMe ? 'me' : 'in'}`;
+    if (msg.key?.id && mensagensProcessadas.has(msgId)) return;
+    if (msg.key?.id) mensagensProcessadas.add(msgId);
+    if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
+
+    const from = msg.key.remoteJid;
+    if (isGroup(from)) return;
+    const textoOriginal = getText(msg).trim();
+    if (!textoOriginal) return;
+    const texto = textoOriginal.toLowerCase();
+    const admin = msg.key.fromMe || isAdminJid(from);
+    const nomeContato = nomeContatoSeguro(msg);
+    console.log('📩', from, msg.key.fromMe ? 'FROMME' : '', textoOriginal);
+    try { await tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato); }
+    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
+  });
+}
+
+async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato) {
+  const numero = jidToNumber(from);
+  const partes = textoOriginal.trim().split(/\s+/);
+
+  // Comandos que limpam qualquer fluxo preso, principalmente aguardando IMEI
+  if (['cancelar', 'sair', 'voltar'].includes(texto)) {
+    pedidoSessao.delete(from);
+    adminSessao.delete(from);
+    await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    return;
+  }
+
+  // PIX livre para qualquer pessoa
+  if (texto.startsWith('pagar')) {
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 180'); return; }
+    await enviarTexto(from, '⏳ Gerando PIX...');
+    const pix = await gerarPix(valor, from);
+    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
+    await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
+    await enviarTexto(from, qrCode || 'PIX indisponível');
+    try {
+      const revendaPix = await getRevendaByMsg(msg, from);
+
+      if (paymentId) {
+        await run(
+          'INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',
+          [paymentId, revendaPix?.id || null, revendaPix ? from : null, from, valor]
+        );
+
+        verificarPagamento(paymentId, revendaPix?.id || null, from, valor);
+      }
+    } catch (e) {
+      console.log('⚠️ ERRO PÓS-PIX:', e.message);
+    }
+
+    return;
+  }
+
+  if (admin) {
+    // Entrega manual de eSIM pelo WhatsApp admin.
+    const sessAdmin = adminSessao.get(from);
+    if (sessAdmin?.etapa === 'entregar_esim_manual') {
+      await concluirEntregaEsimManualAdmin(from, msg, textoOriginal);
+      return;
+    }
+    if (['/esimpendentes', 'esimpendentes', '/pendentesesim', 'pendentesesim'].includes(texto)) {
+      await listarEsimManuaisAdmin(from);
+      return;
+    }
+    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim')) {
+      const id = partes[1];
+      if (!id) { await enviarTexto(from, 'Use assim: /entregaresim ID_DO_PEDIDO'); return; }
+      await iniciarEntregaEsimManualAdmin(from, Number(id));
+      return;
+    }
+
+    // Cadastro de revenda direto na conversa do WhatsApp
+    if (await tratarCadastroRevendaConversa(from, textoOriginal, texto)) return;
+
+    // Painel admin pelo WhatsApp removido. Mantém apenas backup manual e cadastro rápido de serviço em conversas de clientes.
+    if (texto === 'backup') {
+      const arq = await criarBackup();
+      await enviarTexto(from, `✅ BACKUP GERADO
+
+📁 ${path.basename(arq)}
+
+🏢 CentralUnlocker`);
+      return;
+    }
+    if (await tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato)) return;
+  }
+
+  // menu/servicos/historico/conta sempre limpam fluxo anterior antes de validar revenda
+  if (['menu', 'servicos', '/servicos', 'historico', '/historico', 'conta', '/conta', 'saldo', '/saldo'].includes(texto)) {
+    pedidoSessao.delete(from);
+  }
+
+  const revenda = await getRevendaByMsg(msg, from);
+  if (!revenda) {
+    if (texto === 'menu' || texto === 'servicos' || texto === 'historico' || texto === 'conta') {
+      await enviarTexto(from, '❌ Número não cadastrado como revenda.');
+    }
+    return;
+  }
+
+  // atualiza jid se mudou
+  if (revenda.jid !== from) await run('UPDATE revendas SET jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [from, revenda.id]);
+
+  if (texto === 'menu') {
+    pedidoSessao.delete(from);
+    pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarTexto(from, `🏪 *${revenda.nome}*\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Conta\n\nDigite uma opção:`);
+    return;
+  }
+
+  if (texto === 'servicos' || texto === '/servicos') {
+    pedidoSessao.set(from, { etapa: 'servico_escolha' });
+    await enviarTexto(from, await listarServicosTexto(revenda));
+    return;
+  }
+
+  if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
+  if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
+
+  const sess = pedidoSessao.get(from);
+  if (sess?.etapa === 'menu') {
+    if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
+    if (texto === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (texto === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, revenda); return; }
+    if (texto === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, revenda); return; }
+  }
+
+  if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(texto)) {
+    const planos = await planosEsimDisponiveis();
+    const plano = planos[Number(texto) - 1];
+    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await enviarTexto(from, `📱 *${plano.nome_plano}*
+
+💰 Valor: ${brl(plano.preco_revenda)}
+💳 Seu saldo: ${brl(revenda.saldo)}
+🏷 Tipo: ${labelTipoRevenda(revenda.tipo_revenda)}
+
+1️⃣ Confirmar compra
+2️⃣ Cancelar`);
+    return;
+  }
+
+  if (sess?.etapa === 'esim_confirmar') {
+    if (texto === '2' || texto === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
+    const plano = sess.plano;
+    pedidoSessao.delete(from);
+    await entregarEsimRevenda(from, revenda, plano);
+    return;
+  }
+
+  if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(texto)) {
+    const pos = Number(texto);
+    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+    const servico = servicos[pos - 1];
+    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
+    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    if (tipoEntrada === 'IMEI') {
+      await enviarTexto(from, `📱 Informe o IMEI:
+
+Pode enviar 1 IMEI ou vários em lote, um por linha.`);
+    } else {
+      await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+    }
+    return;
+  }
+
+  if (sess?.etapa === 'entrada' || sess?.etapa === 'imei') {
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
+    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+
+    const validacao = validarEntradaServico(servico, textoOriginal);
+    if (!validacao.ok) {
+      const agora = Date.now();
+      const ultima = ultimoErroImei.get(from) || 0;
+      if (agora - ultima > 15000) {
+        ultimoErroImei.set(from, agora);
+        await enviarTexto(from, validacao.erro);
+      }
+      return;
+    }
+
+    const valor = await precoDaRevenda(revenda.id, servico.id);
+    const totalPedido = valor * validacao.entradas.length;
+    if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < totalPedido) {
+      await enviarTexto(from, textoSaldoInsuficiente(revenda, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      return;
+    }
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    const entradaLabel = labelEntradaServico(servico);
+    const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+    let criados = [];
+    let duplicados = [];
+
+    for (const entrada of validacao.entradas) {
+      const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
+      if (tipoEntrada === 'IMEI') {
+        const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada]);
+        if (duplicado) { duplicados.push(entrada); continue; }
+      }
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status)
+        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor]);
+      criados.push({ id: ins.lastID, entrada });
+    }
+
+    pedidoSessao.delete(from);
+
+    if (!criados.length) {
+      await enviarTexto(from, `⚠️ Nenhum pedido novo foi criado.${duplicados.length ? `\n\nJá estavam em andamento:\n${duplicados.join('\n')}` : ''}`);
+      return;
+    }
+
+    if (criados.length === 1) {
+      notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
+      await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+      return;
+    }
+
+    notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
+    await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
+    return;
+  }
+
+}
+
+async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeContato) {
+  if (!texto.startsWith('servico ')) return false;
+  const partes = textoOriginal.trim().split(/\s+/);
+  const imei = onlyDigits(partes[partes.length - 1]);
+  const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
+  const nomeServico = partes.slice(1, -2).join(' ').trim();
+  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
+    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
+    return true;
+  }
+  const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
+  if (duplicado) { await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return true; }
+  let servico = await get('SELECT * FROM servicos_catalogo WHERE lower(nome)=lower(?)', [nomeServico]);
+  if (!servico) {
+    const ins = await run("INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, 'IMEI', 'IMEI', 1)", [nomeServico, valor]);
+    servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [ins.lastID]);
+  }
+  const clienteJid = melhorJidCliente(msg, from);
+  const clienteNumero = jidToNumber(clienteJid);
+  const clienteNome = nomeContatoSeguro(msg, nomeContato || 'Cliente');
+
+  await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status)
+    VALUES ('CLIENTE', ?, ?, ?, ?, ?, ?, ?, 'IMEI', 'IMEI', ?, 'PENDENTE')`, [clienteNome || 'Cliente', clienteNumero, clienteJid, servico.id, servico.nome, imei, imei, valor]);
+
+  notificarPainel('pedido', '🔔 Pedido cliente final', `${clienteNome || 'Cliente'} - ${servico.nome}`);
+  const pedidoCriado = await get('SELECT * FROM pedidos WHERE id=(SELECT MAX(id) FROM pedidos)');
+  if (pedidoCriado) await avisarNovoPedidoAdmins(pedidoCriado);
+  await enviarTexto(from, `✅ Serviço cadastrado
+
+🛠 ${servico.nome}
+📱 ${imei}
+💰 ${brl(valor)}
+
+👤 Cliente: ${clienteNome || 'Cliente'}
+📞 WhatsApp: ${clienteNumero || '-'}
+
+📍 Pendente`);
+  return true;
+}
+
+
+async function planosEsimDisponiveis() {
+  // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
+  return await all(`
+    SELECT
+      p.nome_plano,
+      p.preco_revenda,
+      p.preco_cliente,
+      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS qtd
+    FROM esim_planos p
+    LEFT JOIN esim_estoque e
+      ON e.nome_plano = p.nome_plano
+     AND e.preco_revenda = p.preco_revenda
+    WHERE p.ativo=1
+    GROUP BY p.nome_plano, p.preco_revenda, p.preco_cliente
+    ORDER BY p.nome_plano ASC
+  `);
+}
+async function enviarListaEsim(from) {
+  const planos = await planosEsimDisponiveis();
+  if (!planos.length) { await enviarTexto(from, '❌ Nenhum plano eSIM cadastrado no momento.'); return; }
+  let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
+  planos.forEach((p, i) => {
+    const qtd = Number(p.qtd || 0);
+    const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '📦 Sem QR no estoque\n👨‍💻 Entrega manual pelo admin';
+    txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n${entrega}\n\n`;
+  });
+  txt += 'Digite o número do plano.';
+  await enviarTexto(from, txt.trim());
+}
+
+async function criarPedidoEsimManualRevenda(from, revenda, plano) {
+  const valor = Number(plano.preco_revenda || 0);
+  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${plano.nome_plano}`));
+    return;
+  }
+
+  const ins = await run(`INSERT INTO pedidos
+    (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado)
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', 1)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${plano.nome_plano}`, plano.nome_plano, valor]);
+
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
+  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+
+  notificarPainel('esim', '📱 eSIM manual pendente', `${revenda.nome} - ${plano.nome_plano}`);
+  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nUse no WhatsApp admin:\n/entregaresim ${pedido.id}\n\nDepois envie a foto do QR Code ou texto da entrega.`);
+
+  await enviarTexto(from, `✅ Compra aprovada
+
+📱 ${plano.nome_plano}
+💰 Valor: ${brl(valor)}
+
+💳 Situação da conta:
+${textoSituacaoSaldo(revAtual?.saldo || 0)}
+
+👨‍💻 *Entrega manual*
+O estoque automático de QR acabou.
+Seu pedido ficou pendente para o admin enviar o QR.
+
+🆔 Pedido #${pedido.id}`);
+}
+
+async function entregarEsimRevenda(from, revenda, plano) {
+  const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND preco_revenda=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, plano.preco_revenda]);
+
+  // Sem QR no estoque: cria pedido manual em vez de bloquear a venda.
+  if (!item) {
+    await criarPedidoEsimManualRevenda(from, revenda, plano);
+    return;
+  }
+
+  const valor = Number(item.preco_revenda || 0);
+  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
+    return;
+  }
+  const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor]);
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
+  await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
+  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
+  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+  await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
+  if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
+  await enviarTexto(from, mensagemInstrucaoEsim());
+}
+
+async function listarEsimManuaisAdmin(from) {
+  const rows = await all(`SELECT * FROM pedidos
+    WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO')
+    ORDER BY id ASC LIMIT 30`);
+  if (!rows.length) return enviarTexto(from, '✅ Nenhum eSIM manual pendente.');
+  let txt = '📱 *eSIM MANUAL PENDENTE*\n\n';
+  for (const p of rows) {
+    txt += `#${p.id}\n🏪 ${p.revenda_nome || '-'}\n📱 ${p.entrada_valor || p.servico_nome || '-'}\n💰 ${brl(p.valor)}\n➡️ /entregaresim ${p.id}\n\n`;
+  }
+  await enviarTexto(from, txt.trim());
+}
+
+async function iniciarEntregaEsimManualAdmin(from, pedidoId) {
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [pedidoId]);
+  if (!p) return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
+  if (p.status === 'FINALIZADO' || p.status === 'CANCELADO') return enviarTexto(from, `❌ Pedido #${p.id} está ${p.status}.`);
+  adminSessao.set(from, { etapa: 'entregar_esim_manual', pedido_id: p.id });
+  await enviarTexto(from, `📤 *Entregar eSIM manual*
+
+Pedido #${p.id}
+🏪 ${p.revenda_nome || '-'}
+📱 ${p.entrada_valor || p.servico_nome || '-'}
+📞 ${p.revenda_numero || '-'}
+
+Envie agora a foto do QR Code ou texto da entrega.
+Para cancelar, digite *cancelar*.`);
+}
+
+async function concluirEntregaEsimManualAdmin(from, msg, textoOriginal) {
+  const sess = adminSessao.get(from);
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [sess.pedido_id]);
+  if (!p) {
+    adminSessao.delete(from);
+    return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
+  }
+
+  const destino = p.revenda_jid || numberToJid(p.revenda_numero);
+  if (!destino) return enviarTexto(from, '❌ Não encontrei o WhatsApp da revenda para entregar.');
+
+  const img = await salvarImagemWhatsAppEmEsim(msg);
+  const textoEntrega = String(textoOriginal || '').trim() || `📱 eSIM ${p.entrada_valor || p.servico_nome}\n⚠️ QR Code de uso único.`;
+
+  if (img?.filePath) {
+    await enviarImagem(destino, img.filePath, textoEntrega);
+  } else {
+    await enviarTexto(destino, textoEntrega);
+  }
+  await enviarTexto(destino, mensagemInstrucaoEsim());
+
+  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
+  adminSessao.delete(from);
+  notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
+  await enviarTexto(from, `✅ Pedido #${p.id} entregue para ${p.revenda_nome || p.revenda_numero}.`);
+}
+function mensagemInstrucaoEsim() {
+  return `📋 *COMO INSTALAR O eSIM*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie a imagem enviada\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet\n3️⃣ SIM Cards\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie a imagem enviada\n\n⚠️ *IMPORTANTE*\n• QR Code de uso único\n• Necessário internet para ativação\n• Não compartilhe o QR Code\n\n🏢 CentralUnlocker`;
+}
+
+async function enviarHistoricoRevenda(from, revenda) {
+  const rows = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 10', [revenda.id]);
+  if (!rows.length) { await enviarTexto(from, '📋 Nenhum pedido encontrado.'); return; }
+  let txt = `📋 *HISTÓRICO*\n\n`;
+  for (const p of rows) txt += `🛠 ${p.servico_nome}\n📱 ${p.imei}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function enviarContaRevenda(from, revenda) {
+  await enviarTexto(from, `💳 *CONTA*\n\n🏪 ${revenda.nome}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revenda.saldo)}\n\nPara gerar PIX digite:\n*pagar valor*\n\nExemplos:\npagar 100\npagar 420`);
+}
+
+
+async function mensagemBoasVindasRevenda(revenda) {
+  return `🎉 *BEM-VINDO À CENTRALUNLOCKER*
+
+Olá, *${revenda.nome}*!
+
+Sua revenda foi cadastrada e ativada com sucesso.
+
+Para começar, digite:
+
+*menu*
+
+🏢 CentralUnlocker`;
+}
+async function mensagemTutorialRevenda() {
+  return `📚 *TUTORIAL RÁPIDO*
+
+Digite:
+
+*menu*
+
+Você verá:
+
+1️⃣ Serviços
+2️⃣ Comprar eSIM
+3️⃣ Histórico
+4️⃣ Conta
+
+🔹 *Solicitar serviço*
+menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a informação solicitada
+
+📦 Para serviço tipo IMEI, pode enviar vários IMEIs de uma vez, um por linha
+
+🔹 *Ver histórico*
+menu → 2 Histórico
+
+🔹 *Ver conta*
+menu → 3 Conta
+
+🔹 *Gerar PIX*
+Digite:
+
+*pagar valor*
+
+Exemplo:
+*pagar 100*
+
+🏢 CentralUnlocker`;
+}
+async function enviarBoasVindasTutorialRevenda(revenda) {
+  const w = normalizarNumeroWhatsApp(revenda.whatsapp);
+  const jid = revenda.jid || numberToJid(w);
+  if (!jid) return false;
+  try {
+    await enviarTexto(jid, await mensagemBoasVindasRevenda(revenda));
+    await enviarTexto(jid, await mensagemTutorialRevenda());
+    return true;
+  } catch (e) {
+    console.log('❌ ERRO BOAS-VINDAS:', e.message);
+    return false;
+  }
+}
+
+
+async function cadastrarRevendaPelaConversaAdmin(conversaJid, textoOriginal) {
+  const numeroRevenda = jidToNumber(conversaJid);
+  let nome = String(textoOriginal || '').replace(/^(cadastrar|ativar)\s+revenda\s*/i, '').trim();
+
+  if (!numeroRevenda || !/^55\d{10,11}$/.test(numeroRevenda)) {
+    await enviarTexto(conversaJid, '❌ Não consegui identificar o número desta conversa. Abra a conversa privada da revenda e envie:\n\ncadastrar revenda Nome da Revenda');
+    return null;
+  }
+
+  if (!nome) nome = `Revenda ${numeroRevenda.slice(-4)}`;
+
+  // Cadastra usando o próprio número/JID da conversa onde o admin digitou o comando.
+  return await cadastrarRevendaDireto(conversaJid, nome, numeroRevenda);
+}
+
+async function cadastrarRevendaDireto(from, nome, whatsapp) {
+  nome = String(nome || '').trim();
+  const w = normalizarNumeroWhatsApp(whatsapp);
+  if (!nome || nome.length < 2) {
+    await enviarTexto(from, '❌ Nome inválido. Envie o nome da revenda.');
+    return null;
+  }
+  if (!w || !/^55\d{10,11}$/.test(w)) {
+    await enviarTexto(from, '❌ Número inválido. Envie com DDD.\n\nExemplo:\n75999999999\nou\n5575999999999');
+    return null;
+  }
+
+  const jid = numberToJid(w);
+  let revenda = await get('SELECT * FROM revendas WHERE whatsapp=? OR jid=?', [w, jid]);
+
+  if (revenda) {
+    await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, w, jid, revenda.id]);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
+  } else {
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
+    revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+  }
+
+  notificarPainel('revenda', '🏪 Revenda cadastrada', revenda.nome);
+  await enviarTexto(from, `✅ *REVENDA CADASTRADA*\n\n🏪 Nome: ${revenda.nome}\n📞 WhatsApp: ${revenda.whatsapp}\n🆔 ID: #${revenda.id}\n📍 Status: ${revenda.status}\n\nO bot vai enviar as boas-vindas para a revenda agora.`);
+  const enviado = await enviarBoasVindasTutorialRevenda(revenda);
+  if (!enviado) await enviarTexto(from, '⚠️ Revenda salva, mas não consegui enviar mensagem para ela. Peça para ela mandar uma mensagem para o bot primeiro e reenvie as boas-vindas pelo painel.');
+  return revenda;
+}
+
+async function tratarCadastroRevendaConversa(from, textoOriginal, texto) {
+  const sess = adminSessao.get(from);
+
+  // Formato rápido em uma linha:
+  // addrevenda Nome | 5575999999999
+  // cadastrar revenda Nome | 5575999999999
+  const rapido = textoOriginal.match(/^(?:addrevenda|cadastrar\s+revenda)\s+(.+?)\s*\|\s*([+\d\s().-]+)$/i);
+  if (rapido) {
+    adminSessao.delete(from);
+    await cadastrarRevendaDireto(from, rapido[1], rapido[2]);
+    return true;
+  }
+
+  if (['cadastrar revenda', 'cadastro revenda', 'nova revenda', 'addrevenda'].includes(texto)) {
+    pedidoSessao.delete(from);
+    adminSessao.set(from, { etapa: 'cadastro_revenda_nome' });
+    await enviarTexto(from, `🏪 *CADASTRAR REVENDA*\n\nEnvie o *nome da revenda*.\n\nExemplo:\nJoão Unlock\n\nPara cancelar, digite *cancelar*.`);
+    return true;
+  }
+
+  if (sess?.etapa === 'cadastro_revenda_nome') {
+    const nome = textoOriginal.trim();
+    if (nome.length < 2) {
+      await enviarTexto(from, '❌ Nome muito curto. Envie o nome da revenda.');
+      return true;
+    }
+    adminSessao.set(from, { etapa: 'cadastro_revenda_numero', nome });
+    await enviarTexto(from, `✅ Nome salvo: *${nome}*\n\nAgora envie o WhatsApp da revenda com DDD.\n\nExemplo:\n75999999999\nou\n5575999999999`);
+    return true;
+  }
+
+  if (sess?.etapa === 'cadastro_revenda_numero') {
+    await cadastrarRevendaDireto(from, sess.nome, textoOriginal);
+    adminSessao.delete(from);
+    return true;
+  }
+
+  return false;
+}
+
+async function tratarAdminWhatsApp(from, textoOriginal, texto, nomeContato) {
+  const partes = textoOriginal.trim().split(/\s+/);
+  const cmd = partes[0].toLowerCase();
+  if (cmd === '/admin' || cmd === 'admin') { await enviarMenuAdmin(from); return true; }
+  if (adminSessao.get(from)?.menu && /^[0-9]$/.test(texto)) { await tratarOpcaoAdmin(from, texto); return true; }
+
+  if (cmd === 'backup') { const arq = await criarBackup(); await enviarTexto(from, `✅ BACKUP GERADO\n\n📁 ${path.basename(arq)}\n\n🏢 CentralUnlocker`); return true; }
+  if (cmd === 'backups') { await enviarTexto(from, await textoBackups()); return true; }
+  if (cmd === 'hoje') { await enviarTexto(from, await resumoPeriodo('daily')); return true; }
+  if (cmd === 'financeiro') { await enviarTexto(from, await resumoFinanceiro()); return true; }
+  if (cmd === 'pendentes' || cmd === 'processo' || cmd === 'finalizados' || cmd === 'cancelados') { await enviarListaStatus(from, cmd); return true; }
+  if (cmd === 'imei') { await enviarBuscaIMEI(from, partes[1]); return true; }
+  if (cmd === 'cliente') { await enviarBuscaPessoa(from, partes[1]); return true; }
+  if (cmd === 'revenda') { await enviarBuscaRevenda(from, partes.slice(1).join(' ')); return true; }
+
+  if (cmd === 'processar' || cmd === 'processo') { await adminMudarStatus(from, partes[1], 'EM PROCESSO'); return true; }
+  if (cmd === 'finalizar') { await adminFinalizarPedido(from, partes[1]); return true; }
+  if (cmd === 'cancelar') { await adminCancelarPedido(from, partes[1], partes.slice(2).join(' ') || 'Não informado'); return true; }
+  if (cmd === 'addrevenda') { await adminAddRevenda(from, textoOriginal.replace(/^addrevenda\s+/i, '')); return true; }
+  if (cmd === 'revendas') { await adminListRevendas(from); return true; }
+  if (cmd === 'bloquearrevenda') { await adminSetRevendaStatus(from, partes[1], 'BLOQUEADA'); return true; }
+  if (cmd === 'desbloquearrevenda') { await adminSetRevendaStatus(from, partes[1], 'ATIVA'); return true; }
+  if (cmd === 'removerrevenda') { await adminSetRevendaStatus(from, partes[1], 'REMOVIDA'); return true; }
+
+  if (cmd === 'servicos') { await adminListServicos(from); return true; }
+  if (cmd === 'addservico') { await adminAddServico(from, textoOriginal.replace(/^addservico\s+/i, '')); return true; }
+  if (cmd === 'editarservico') { await adminEditarServico(from, textoOriginal.replace(/^editarservico\s+/i, '')); return true; }
+  if (cmd === 'desativarservico') { await adminToggleServico(from, partes[1], 0); return true; }
+  if (cmd === 'ativarservico') { await adminToggleServico(from, partes[1], 1); return true; }
+  if (cmd === 'excluirservico') { await adminExcluirServico(from, partes[1]); return true; }
+  if (cmd === 'relatorio') { await enviarTexto(from, await resumoPeriodo(partes[1] || 'daily')); return true; }
+  return false;
+}
+async function enviarMenuAdmin(from) {
+  adminSessao.set(from, { menu: true });
+  await enviarTexto(from, `🏢 *CENTRALUNLOCKER ADMIN*\n\n1️⃣ Dashboard\n2️⃣ Pedidos\n3️⃣ Revendas\n4️⃣ Serviços\n5️⃣ Financeiro\n6️⃣ Relatórios\n7️⃣ Backup\n8️⃣ Configurações\n9️⃣ Painel Web\n0️⃣ Sair\n\nDigite uma opção:`);
+}
+async function tratarOpcaoAdmin(from, opcao) {
+  if (opcao === '0') { adminSessao.delete(from); await enviarTexto(from, '✅ Menu encerrado.'); return; }
+  if (opcao === '1') { await enviarTexto(from, await textoDashboardAdmin()); return; }
+  if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo
+/esimpendentes
+/entregaresim ID`); return; }
+  if (opcao === '3') { await enviarTexto(from, `🏪 *REVENDAS*\n\nComandos:\nrevendas\nrevenda nome\naddrevenda Nome | 5575999999999\nbloquearrevenda ID\ndesbloquearrevenda ID\nremoverrevenda ID`); return; }
+  if (opcao === '4') { await enviarTexto(from, `🛠 *SERVIÇOS*\n\nComandos:\nservicos\naddservico Nome | 100\neditarservico ID | Novo Nome | 100\ndesativarservico ID\nativarservico ID\nexcluirservico ID`); return; }
+  if (opcao === '5') { await enviarTexto(from, await resumoFinanceiro()); return; }
+  if (opcao === '6') { await enviarTexto(from, `📈 *RELATÓRIOS*\n\nrelatorio diario\nrelatorio mensal\nrelatorio anual\nhoje`); return; }
+  if (opcao === '7') { await enviarTexto(from, `💾 *BACKUP*\n\nbackup\nbackups\n\nNo painel você também pode baixar/restaurar.`); return; }
+  if (opcao === '8') { await enviarTexto(from, `⚙️ *CONFIGURAÇÕES*\n\nAdmin: ${ADMIN_NUMBER}\nDB: ${DB_PATH}\nStatus WhatsApp: ${conectado ? 'Conectado' : 'Desconectado'}`); return; }
+  if (opcao === '9') { await enviarTexto(from, `🌐 Painel Web:\n${BASE_URL ? BASE_URL + '/admin' : '/admin'}`); return; }
+}
+
+async function textoDashboardAdmin() {
+  const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
+  const ep = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="EM PROCESSO"');
+  const f = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="FINALIZADO"');
+  const c = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"');
+  const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"');
+  const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
+  return `📊 *DASHBOARD*\n\n🟡 Pendentes: ${p.qtd}\n🔄 Em Processo: ${ep.qtd}\n✅ Finalizados: ${f.qtd}\n❌ Cancelados: ${c.qtd}\n\n💰 Recebido hoje: ${brl(hoje.total)}\n💳 Balanço revendas: ${brl(saldo.total)}`;
+}
+async function enviarListaStatus(from, cmd) {
+  const mapa = { pendentes:'PENDENTE', processo:'EM PROCESSO', finalizados:'FINALIZADO', cancelados:'CANCELADO' };
+  const st = mapa[cmd];
+  const rows = await all('SELECT * FROM pedidos WHERE status=? ORDER BY id DESC LIMIT 20', [st]);
+  if (!rows.length) { await enviarTexto(from, `Nenhum pedido ${st}.`); return; }
+  let txt = `📋 *${st}*\n\n`;
+  for (const p of rows) txt += `#${p.id} | ${p.imei}\n${p.servico_nome}\n${p.revenda_nome || p.cliente_nome || '-'} | ${brl(p.valor)}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function enviarBuscaIMEI(from, imei) {
+  imei = onlyDigits(imei || '');
+  if (!imei) { await enviarTexto(from, 'Use: imei 356789123456789'); return; }
+  const rows = await all('SELECT * FROM pedidos WHERE imei LIKE ? ORDER BY id DESC LIMIT 10', [`%${imei}%`]);
+  if (!rows.length) { await enviarTexto(from, '❌ IMEI não encontrado.'); return; }
+  let txt = '🔍 *RESULTADO IMEI*\n\n';
+  for (const p of rows) txt += `#${p.id}\n📱 ${p.imei}\n🛠 ${p.servico_nome}\n👤 ${p.revenda_nome || p.cliente_nome || '-'}\n📞 ${p.revenda_numero || p.cliente_whatsapp || '-'}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function enviarBuscaPessoa(from, termo) {
+  termo = onlyDigits(termo || '');
+  if (!termo) { await enviarTexto(from, 'Use: cliente 5575999999999'); return; }
+  const rows = await all('SELECT * FROM pedidos WHERE cliente_whatsapp LIKE ? OR revenda_numero LIKE ? ORDER BY id DESC LIMIT 10', [`%${termo}%`, `%${termo}%`]);
+  if (!rows.length) { await enviarTexto(from, '❌ Nenhum pedido encontrado.'); return; }
+  let txt = '👤 *PEDIDOS DO NÚMERO*\n\n';
+  for (const p of rows) txt += `#${p.id} | ${p.imei}\n${p.servico_nome} | ${brl(p.valor)} | ${p.status}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function enviarBuscaRevenda(from, termo) {
+  if (!termo) { await enviarTexto(from, 'Use: revenda nome'); return; }
+  const rows = await all('SELECT * FROM revendas WHERE nome LIKE ? OR whatsapp LIKE ? ORDER BY id DESC LIMIT 10', [`%${termo}%`, `%${onlyDigits(termo)}%`]);
+  if (!rows.length) { await enviarTexto(from, '❌ Revenda não encontrada.'); return; }
+  let txt = '🏪 *REVENDAS*\n\n';
+  for (const r of rows) txt += `#${r.id}\n${r.nome}\n📞 ${r.whatsapp || '-'}\n📍 ${r.status}\n💰 ${textoSaldoCurto(r.saldo)}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function adminMudarStatus(from, id, status) {
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
+  if (!pedido) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
+  await run('UPDATE pedidos SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [status, pedido.id]);
+  const atual = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
+  await notificarPedido(atual, 'processo');
+  await enviarTexto(from, `✅ Pedido #${id} atualizado para ${status}.`);
+}
+async function adminFinalizarPedido(from, id) {
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
+  if (!pedido) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
+  await finalizarPedido(pedido);
+  notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${id}`);
+  await enviarTexto(from, `✅ Pedido #${id} finalizado.`);
+}
+async function adminCancelarPedido(from, id, motivo) {
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
+  if (!pedido) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
+  await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, id]);
+  const atual = await get('SELECT * FROM pedidos WHERE id=?', [id]);
+  await notificarPedido(atual, 'cancelar', motivo);
+  notificarPainel('cancelado', '❌ Pedido cancelado', `Pedido #${id}`);
+  await enviarTexto(from, `❌ Pedido #${id} cancelado.`);
+}
+async function adminAddRevenda(from, texto) {
+  const [nome, whats] = texto.split('|').map(s => s?.trim());
+  if (!nome || !whats) { await enviarTexto(from, 'Use: addrevenda Nome | 5575999999999'); return; }
+  const w = onlyDigits(whats);
+  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
+  await enviarTexto(from, `✅ Revenda adicionada:\n${nome}\n${w}`);
+}
+async function adminListRevendas(from) { await enviarBuscaRevenda(from, ''); }
+async function adminSetRevendaStatus(from, id, status) {
+  if (!id) { await enviarTexto(from, `Use o ID da revenda.`); return; }
+  await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [status, id]);
+  await enviarTexto(from, `✅ Revenda #${id}: ${status}`);
+}
+async function adminListServicos(from) {
+  const rows = await all('SELECT * FROM servicos_catalogo ORDER BY id ASC');
+  let txt = '🛠 *SERVIÇOS*\n\n';
+  for (const s of rows) txt += `#${s.id} ${s.nome}\nEntrada: ${tituloTipoEntrada(s.tipo_entrada)} (${labelEntradaServico(s)})\nPreço: ${brl(s.preco_padrao)} | ${s.ativo ? 'Ativo' : 'Inativo'}\n\n`;
+  await enviarTexto(from, txt.trim());
+}
+async function adminAddServico(from, texto) {
+  const [nome, precoTxt, tipoTxt, labelTxt] = texto.split('|').map(s => s?.trim());
+  const preco = Number(String(precoTxt || '0').replace(',', '.'));
+  const tipoEntrada = normalizarTipoEntrada(tipoTxt || 'IMEI');
+  const label = labelTxt || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  if (!nome) { await enviarTexto(from, 'Use: addservico Nome | 100 | IMEI\nOu: addservico Nome | 100 | LOCK_CODE | Lock Code'); return; }
+  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, ?, ?, 1)', [nome, preco, tipoEntrada, label]);
+  await enviarTexto(from, `✅ Serviço adicionado:\n${nome}\nEntrada: ${tituloTipoEntrada(tipoEntrada)} (${label})\n${brl(preco)}`);
+}
+async function adminEditarServico(from, texto) {
+  const [id, nome, precoTxt, tipoTxt, labelTxt] = texto.split('|').map(s => s?.trim());
+  const preco = Number(String(precoTxt || '0').replace(',', '.'));
+  const tipoEntrada = normalizarTipoEntrada(tipoTxt || 'IMEI');
+  const label = labelTxt || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
+  if (!id || !nome) { await enviarTexto(from, 'Use: editarservico ID | Novo Nome | 100 | IMEI'); return; }
+  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=?, tipo_entrada=?, entrada_label=? WHERE id=?', [nome, preco, tipoEntrada, label, id]);
+  await enviarTexto(from, `✅ Serviço #${id} editado.`);
+}
+async function adminToggleServico(from, id, ativo) { await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [ativo, id]); notificarPainel('servico', '🛠 Serviço atualizado', `#${id}: ${ativo ? 'ATIVO' : 'INATIVO'}`); await enviarTexto(from, `✅ Serviço #${id}: ${ativo ? 'ATIVO' : 'INATIVO'}`); }
+async function adminExcluirServico(from, id) { await run('DELETE FROM precos_revenda WHERE servico_id=?', [id]); await run('DELETE FROM pedidos WHERE servico_id=?', [id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [id]); await enviarTexto(from, `🗑️ Serviço #${id} excluído.`); }
+
+async function resumoFinanceiro() {
+  const aberto = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"');
+  const recebido = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos');
+  const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
+  return `💰 *FINANCEIRO*\n\n💳 Balanço revendas: ${brl(aberto.total)}\n✅ Recebido total: ${brl(recebido.total)}\n📅 Recebido hoje: ${brl(hoje.total)}`;
+}
+async function resumoPeriodo(tipo) {
+  let label = 'DIÁRIO', where = 'date(criado_em)=date("now")';
+  if (['mensal','mes','month'].includes(tipo)) { label = 'MENSAL'; where = `date(criado_em)>=date('${monthStart()}')`; }
+  if (['anual','ano','year'].includes(tipo)) { label = 'ANUAL'; where = `date(criado_em)>=date('${yearStart()}')`; }
+  const pag = await get(`SELECT COALESCE(SUM(valor),0) total, COUNT(*) qtd FROM pagamentos WHERE ${where}`);
+  const fin = await get(`SELECT COUNT(*) qtd FROM pedidos WHERE status="FINALIZADO" AND ${where.replace('criado_em','finalizado_em')}`);
+  return `📈 *RELATÓRIO ${label}*\n\n💰 Faturamento: ${brl(pag.total)}\n✅ Pagamentos: ${pag.qtd}\n🛠 Serviços finalizados: ${fin.qtd}`;
+}
+async function textoBackups() {
+  const backs = listarBackups();
+  if (!backs.length) return 'Nenhum backup encontrado.';
+  return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
+}
+
+async function gerarPix(valor, cliente) {
+  try {
+    const response = await axios.post(`${PIXGO_API}/payment/create`, {
+      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
+      customer_name: 'Cliente WhatsApp', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+    }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
+    return response.data;
+  } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
+}
+async function consultarStatus(paymentId) {
+  try { return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, { headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000 })).data; }
+  catch (e) { return null; }
+}
+async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
+  let tentativas = 0;
+  const interval = setInterval(async () => {
+    tentativas++;
+    const status = await consultarStatus(paymentId);
+    if (status?.success && status.data?.status === 'completed') {
+      clearInterval(interval);
+      let novo = null;
+      if (revendaId) {
+        const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
+        if (rev) {
+          novo = Number(rev.saldo || 0) + Number(valorPix || 0);
+          await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
+          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, "pixgo")', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix]);
+        }
+      } else {
+        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, "pixgo")', [jid, jidToNumber(jid), valorPix]);
+      }
+      await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
+      notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${revendaId ? 'revenda' : 'cliente'}`);
+      await enviarTexto(jid, `✅ Pagamento confirmado\n\n💰 Valor pago: ${brl(valorPix)}${novo !== null ? `\n\n💳 Situação da conta:\n${textoSituacaoSaldo(novo)}` : ''}\n\n🏢 CentralUnlocker`);
+    }
+    if (status?.success && status.data?.status === 'expired') {
+      clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+    }
+    if (tentativas >= 40) clearInterval(interval);
+  }, 30000);
+}
+
+async function finalizarPedido(pedido) {
+  await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]);
+  if (pedido.tipo === 'REVENDA' && !pedido.cobrado && pedido.revenda_id) {
+    await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.valor, pedido.revenda_id]);
+    await run('UPDATE pedidos SET cobrado=1 WHERE id=?', [pedido.id]);
+  }
+  const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
+  notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
+  await notificarPedido(atualizado, 'finalizar');
+}
+async function notificarPedido(pedido, tipo, motivo = '') {
+  let jid = pedido.revenda_jid || pedido.cliente_jid;
+  if (!jid && pedido.revenda_numero) jid = numberToJid(pedido.revenda_numero);
+  if (!jid && pedido.cliente_whatsapp) jid = numberToJid(pedido.cliente_whatsapp);
+  if (!jid) return;
+  if (tipo === 'processo') await enviarTexto(jid, `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n💰 Valor: ${brl(pedido.valor)}`);
+  if (tipo === 'finalizar') {
+    if (pedido.tipo === 'REVENDA') {
+      const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
+      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`);
+    } else {
+      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nPara pagar digite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`);
+    }
+  }
+  if (tipo === 'cancelar') await enviarTexto(jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
 }
 
 app.get('/', (req, res) => {
@@ -1094,8 +2057,6 @@ app.post('/admin/config/hacker-image', async (req, res) => {
     if (!m) return res.send(page('Erro', '<h1>❌ Imagem inválida</h1><p>Envie uma imagem PNG, JPG ou WEBP.</p><a class="btn" href="/admin/config">Voltar</a>'));
     if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
-if (!fs.existsSync(THEME_DIR)) fs.mkdirSync(THEME_DIR, { recursive: true });
-app.use('/themes', express.static(THEME_DIR));
     fs.writeFileSync(HACKER_IMAGE_PATH, Buffer.from(m[2], 'base64'));
     notificarPainel('banner', '🖼️ Banner atualizado', 'Foto do hacker alterada manualmente');
     res.redirect('/admin/config?ok=1');
@@ -1104,55 +2065,6 @@ app.use('/themes', express.static(THEME_DIR));
     res.send(page('Erro', '<h1>❌ Erro ao salvar imagem</h1><a class="btn" href="/admin/config">Voltar</a>'));
   }
 });
-
-app.get('/admin/temas', async (req, res) => {
-  ensureHackerModelos();
-  const tema = temaAtualPainel();
-  const atualImg = hackerImagemAtual();
-  const modelos = fs.readdirSync(THEME_DIR).filter(f => /\.(png|jpg|jpeg|webp|svg)$/i.test(f));
-  const temaOptions = Object.entries(TEMAS_PAINEL).concat([['gold-vip',{nome:'🟡 Gold VIP'}]]).map(([k,v]) =>
-    `<option value="${k}" ${k===tema?'selected':''}>${safeHtml(v.nome || k)}</option>`).join('');
-
-  let galeria = '<div class="grid">';
-  for (const f of modelos) {
-    const url = `/themes/${encodeURIComponent(f)}`;
-    galeria += `<div class="card"><img src="${url}" style="width:100%;border-radius:16px;max-height:190px;object-fit:cover"><p class="muted">${safeHtml(f)}</p><form method="post" action="/admin/temas/imagem"><input type="hidden" name="imagem" value="${url}"><button class="btn green">Usar esta imagem</button></form></div>`;
-  }
-  galeria += '</div>';
-
-  const preview = atualImg ? `<img src="${safeHtml(atualImg)}">` : `<p class="muted">Nenhuma imagem ativa.</p>`;
-
-  res.send(page('Temas', `<h1>🎨 Temas e fotos hacker</h1>
-    <div class="card hero"><div><h2>Tema atual</h2><form method="post" action="/admin/temas"><select name="tema">${temaOptions}</select><button class="btn green">Salvar tema</button></form><p class="muted">Ao salvar um tema, a foto hacker desse tema é aplicada automaticamente. Tema e imagem ficam salvos no banco e as fotos em ${safeHtml(THEME_DIR)}. Não perde ao reiniciar o Render.</p></div><div>${preview}</div></div>
-    <div class="card"><h2>📤 Enviar foto hacker</h2><form method="post" action="/admin/temas/upload" enctype="multipart/form-data"><input type="file" name="foto" accept="image/*" required><button class="btn green">Enviar e usar</button></form></div>
-    <div class="card"><h2>🔗 Usar link de imagem</h2><form method="post" action="/admin/temas/imagem"><input name="imagem" placeholder="https://... ou /themes/hacker_green.svg" value="${safeHtml(atualImg)}"><button>Salvar imagem</button></form><form method="post" action="/admin/temas/imagem"><input type="hidden" name="imagem" value=""><button class="btn red">Remover imagem</button></form></div>
-    <div class="card"><h2>🖼️ Modelos prontos</h2>${galeria}</div>`));
-});
-app.post('/admin/temas', async (req, res) => {
-  const tema = String(req.body.tema || 'hacker-green');
-
-  // Ao escolher um tema, troca automaticamente também a foto hacker padrão do tema.
-  ensureHackerModelos();
-  await setConfig('painel_tema', tema);
-  await setConfig('painel_hacker_image', imagemPadraoDoTema(tema));
-
-  PAINEL_TEMA = tema;
-  notificarPainel('tema', '🎨 Tema e foto alterados', tema);
-  res.redirect('/admin/temas');
-});
-app.post('/admin/temas/imagem', async (req, res) => {
-  await setConfig('painel_hacker_image', String(req.body.imagem || '').trim());
-  notificarPainel('tema', '🖼️ Imagem do painel alterada', '');
-  res.redirect('/admin/temas');
-});
-app.post('/admin/temas/upload', uploadTema.single('foto'), async (req, res) => {
-  if (req.file) {
-    await setConfig('painel_hacker_image', `/themes/${req.file.filename}`);
-    notificarPainel('tema', '🖼️ Foto hacker enviada', req.file.filename);
-  }
-  res.redirect('/admin/temas');
-});
-
 app.get('/admin/logout', (req, res) => { res.status(401).set('WWW-Authenticate', 'Basic realm="CentralUnlocker Admin"').send(page('Sair', '<h1>🚪 Sessão encerrada</h1><p>Feche esta aba ou entre novamente.</p>')); });
 
 async function criarBackup() { const destino = path.join(BACKUP_DIR, `backup-${today()}-${Date.now()}.db`); await new Promise((resolve, reject) => db.backup(destino, (err) => err ? reject(err) : resolve())); console.log('✅ BACKUP CRIADO:', destino); return destino; }
