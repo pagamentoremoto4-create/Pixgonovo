@@ -524,6 +524,8 @@ async function initDB() {
   )`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
+  ensureHackerModelos();
+  aplicarImagemTema(PAINEL_TEMA);
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
