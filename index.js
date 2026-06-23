@@ -16,8 +16,7 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  downloadContentFromMessage
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -29,23 +28,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 10000;
 const PIXGO_API = 'https://pixgo.org/api/v1';
-
-// Tudo que precisa sobreviver a restart/deploy do Render fica no Persistent Disk.
-// Configure DATA_DIR=/data no Render e crie o Disk com mount path /data.
-const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : __dirname);
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'database.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'database.db');
 const DB_DIR = path.dirname(DB_PATH);
-const BACKUP_DIR = process.env.BACKUP_DIR || path.join(DATA_DIR, 'backups');
+const BACKUP_DIR = path.join(DB_DIR, 'backups');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
-const THEME_DIR = process.env.THEME_DIR || path.join(DATA_DIR, 'themes');
-const ESIM_DIR = process.env.ESIM_DIR || path.join(DATA_DIR, 'esim');
-
-// Mantém os QR Codes eSIM acessíveis pela URL /esim/arquivo.png,
-// mas os arquivos ficam salvos em /data/esim.
-app.use('/esim', express.static(ESIM_DIR));
-app.use('/themes', express.static(THEME_DIR));
+const ESIM_DIR = path.join(PUBLIC_DIR, 'esim');
 const ADMIN_NUMBER = onlyDigits(process.env.ADMIN_NUMBER || '');
 const ADMIN_NUMBERS = Array.from(new Set([
   ADMIN_NUMBER,
@@ -59,7 +48,6 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
-if (!fs.existsSync(THEME_DIR)) fs.mkdirSync(THEME_DIR, { recursive: true });
 
 let sock = null;
 let qrCodeBase64 = null;
@@ -71,11 +59,7 @@ const TEMAS_PAINEL = {
   'hacker-blue': { nome: '🔵 Hacker Azul', cor: '#28d7ff', cor2: '#2f80ed' },
   'hacker-red': { nome: '🔴 Hacker Vermelho', cor: '#ff3b3b', cor2: '#ff9f43' },
   'hacker-purple': { nome: '🟣 Hacker Roxo', cor: '#a855f7', cor2: '#28d7ff' },
-  'dark-pro': { nome: '⚫ Dark Pro', cor: '#94a3b8', cor2: '#2f80ed' },
-  'gold-vip': { nome: '🟡 Gold VIP', cor: '#ffd166', cor2: '#ff9f1c' },
-  'matrix-hacker': { nome: '💻 Matrix Hacker', cor: '#00ff41', cor2: '#39ff14' },
-  'cyber-security': { nome: '🌐 Cyber Security', cor: '#00d4ff', cor2: '#00ffcc' },
-  'black-elite': { nome: '⚫ Black Elite', cor: '#00ff66', cor2: '#c0c0c0' }
+  'dark-pro': { nome: '⚫ Dark Pro', cor: '#94a3b8', cor2: '#2f80ed' }
 };
 
 const pedidoSessao = new Map();
@@ -108,12 +92,6 @@ function all(sql, params = []) {
   return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
-
-function caminhoArquivoEsim(arquivoQr) {
-  if (!arquivoQr) return '';
-  return path.join(ESIM_DIR, path.basename(String(arquivoQr)));
-}
-
 function normalizarNumeroWhatsApp(v) {
   let d = onlyDigits(v);
   // remove zeros na frente
@@ -284,84 +262,6 @@ function nomeContatoSeguro(msg, fallback = 'Cliente') {
   return msg?.pushName || msg?.notifyName || msg?.verifiedBizName || fallback;
 }
 function safeHtml(s) { return String(s ?? '').replace(/[&<>'"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m])); }
-
-function imagemTemaArquivo(theme) {
-  const map = {
-    'hacker-green': 'hacker_green.svg',
-    'hacker-blue': 'hacker_blue.svg',
-    'hacker-red': 'hacker_red.svg',
-    'hacker-purple': 'hacker_purple.svg',
-    'dark-pro': 'hacker_blue.svg',
-    'gold-vip': 'hacker_gold.svg',
-    'matrix-hacker': 'hacker_matrix.svg',
-    'cyber-security': 'hacker_cyber.svg',
-    'black-elite': 'hacker_elite.svg'
-  };
-  return map[theme] || map['hacker-green'];
-}
-function imagemTemaUrl(theme) {
-  return `/themes/${imagemTemaArquivo(theme)}`;
-}
-function ensureHackerModelos() {
-  const modelos = [
-    ['hacker_green.svg', '#00ff66', '#28d7ff', 'CENTRALUNLOCKER'],
-    ['hacker_blue.svg', '#28d7ff', '#2f80ed', 'SECURE PANEL'],
-    ['hacker_red.svg', '#ff3b3b', '#ff9f43', 'FAST MODE'],
-    ['hacker_purple.svg', '#a855f7', '#28d7ff', 'CYBER ADMIN'],
-    ['hacker_gold.svg', '#ffd166', '#ff9f1c', 'GOLD VIP'],
-    ['hacker_matrix.svg', '#00ff41', '#39ff14', 'MATRIX HACKER'],
-    ['hacker_cyber.svg', '#00d4ff', '#00ffcc', 'CYBER SECURITY'],
-    ['hacker_elite.svg', '#00ff66', '#c0c0c0', 'BLACK ELITE']
-  ];
-  for (const [file, c1, c2, title] of modelos) {
-    const fp = path.join(THEME_DIR, file);
-    if (!fs.existsSync(fp)) {
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
-<defs>
-<linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#020617"/><stop offset="1" stop-color="#111827"/></linearGradient>
-<radialGradient id="r" cx="70%" cy="35%" r="60%"><stop offset="0" stop-color="${c1}" stop-opacity=".38"/><stop offset="1" stop-color="${c2}" stop-opacity="0"/></radialGradient>
-</defs>
-<rect width="1200" height="650" fill="url(#g)"/><rect width="1200" height="650" fill="url(#r)"/>
-<g opacity=".18" font-family="monospace" font-size="22" fill="${c1}">
-${Array.from({length:18}).map((_,i)=>`<text x="${20+(i%3)*390}" y="${40+i*34}">010101 ACCESS ${title} 101010</text>`).join('')}
-</g>
-<g transform="translate(705 76)">
-<circle cx="165" cy="125" r="96" fill="#0b1220" stroke="${c1}" stroke-width="5"/>
-<path d="M48 322c38-118 184-154 270-47 32 40 47 95 51 162H0c8-47 22-87 48-115z" fill="#0b1220" stroke="${c1}" stroke-width="6"/>
-<path d="M89 116c58 42 115 45 180 0 0 74-28 121-91 139-63-17-89-65-89-139z" fill="#111827" stroke="${c2}" stroke-width="5"/>
-<rect x="94" y="143" width="168" height="45" rx="22" fill="#020617" stroke="${c1}" stroke-width="4"/>
-<circle cx="142" cy="165" r="7" fill="${c1}"/><circle cx="214" cy="165" r="7" fill="${c1}"/>
-</g>
-<text x="70" y="505" font-family="Arial Black,Arial" font-size="58" fill="${c1}">${title}</text>
-<text x="72" y="555" font-family="Arial" font-size="28" fill="#eaf0f8">Painel profissional • eSIM • Revendas • PIX</text>
-</svg>`;
-      fs.writeFileSync(fp, svg);
-    }
-  }
-}
-function aplicarImagemTema(theme) {
-  ensureHackerModelos();
-  const src = path.join(THEME_DIR, imagemTemaArquivo(theme));
-  if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-  if (fs.existsSync(src)) fs.copyFileSync(src, HACKER_IMAGE_PATH);
-}
-
-
-function temaVarsPremium(theme) {
-  const base = {
-    'hacker-green': { accent:'#39ff14', accent2:'#00e5ff', danger:'#ff5c7a', warning:'#ffb020', purple:'#a855f7', name:'Hacker Verde' },
-    'hacker-blue': { accent:'#00d4ff', accent2:'#2f80ed', danger:'#ff5c7a', warning:'#ffb020', purple:'#7c3aed', name:'Hacker Azul' },
-    'hacker-red': { accent:'#ff3b3b', accent2:'#ff9f43', danger:'#ff5c7a', warning:'#ffb020', purple:'#a855f7', name:'Hacker Vermelho' },
-    'hacker-purple': { accent:'#a855f7', accent2:'#00e5ff', danger:'#ff5c7a', warning:'#ffb020', purple:'#c084fc', name:'Hacker Roxo' },
-    'dark-pro': { accent:'#94a3b8', accent2:'#00e5ff', danger:'#ff5c7a', warning:'#ffb020', purple:'#64748b', name:'Dark Pro' },
-    'gold-vip': { accent:'#ffd166', accent2:'#ff9f1c', danger:'#ff5c7a', warning:'#ffb020', purple:'#a855f7', name:'Gold VIP' },
-    'matrix-hacker': { accent:'#00ff41', accent2:'#39ff14', danger:'#ff5c7a', warning:'#ffb020', purple:'#00ff99', name:'Matrix Hacker' },
-    'cyber-security': { accent:'#00d4ff', accent2:'#00ffcc', danger:'#ff5c7a', warning:'#ffb020', purple:'#2f80ed', name:'Cyber Security' },
-    'black-elite': { accent:'#00ff66', accent2:'#c0c0c0', danger:'#ff5c7a', warning:'#ffb020', purple:'#94a3b8', name:'Black Elite' }
-  };
-  return base[theme] || base['hacker-green'];
-}
-
 function temaAtual() { return TEMAS_PAINEL[PAINEL_TEMA] ? PAINEL_TEMA : 'hacker-green'; }
 function temCor() { return TEMAS_PAINEL[temaAtual()].cor; }
 async function getConfig(chave, padrao='') { const r = await get('SELECT valor FROM configs WHERE chave=?', [chave]); return r ? r.valor : padrao; }
@@ -502,25 +402,6 @@ async function initDB() {
   await addColumnIfMissing('esim_estoque', 'revenda_nome', 'TEXT');
   await addColumnIfMissing('esim_estoque', 'pedido_id', 'INTEGER');
 
-  // Catálogo de planos eSIM: permite vender manualmente mesmo sem QR disponível no estoque.
-  await run(`CREATE TABLE IF NOT EXISTS esim_planos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome_plano TEXT NOT NULL,
-    preco_revenda REAL DEFAULT 0,
-    preco_cliente REAL DEFAULT 0,
-    ativo INTEGER DEFAULT 1,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(nome_plano, preco_revenda)
-  )`);
-  await addColumnIfMissing('esim_planos', 'preco_cliente', 'REAL DEFAULT 0');
-  await addColumnIfMissing('esim_planos', 'ativo', 'INTEGER DEFAULT 1');
-
-  // Migra os planos já existentes no estoque para o catálogo.
-  await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
-    SELECT nome_plano, preco_revenda, COALESCE(preco_cliente, preco_revenda), 1
-    FROM esim_estoque
-    WHERE nome_plano IS NOT NULL AND TRIM(nome_plano) != ''`);
-
   await run(`CREATE TABLE IF NOT EXISTS configs (
     chave TEXT PRIMARY KEY,
     valor TEXT,
@@ -540,9 +421,6 @@ async function initDB() {
   )`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
-  ensureHackerModelos();
-  aplicarImagemTema(PAINEL_TEMA);
-  if (!(await getConfig('painel_tema_rev', ''))) await setConfig('painel_tema_rev', String(Date.now()));
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -565,22 +443,41 @@ function basicAuth(req, res, next) {
 }
 
 function page(title, body) {
-  const currentTheme = temaAtual();
-  const tv = temaVarsPremium(currentTheme);
-  const cache = Date.now();
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
   <style>
-  :root{--bg:#03070b;--bg2:#07131c;--panel:#0d141d;--panel2:#101e2b;--line:rgba(255,255,255,.09);--text:#e8fff2;--muted:#90a8a0;--accent:${tv.accent};--accent2:${tv.accent2};--danger:${tv.danger};--warning:${tv.warning};--purple:${tv.purple};--shadow:0 18px 45px rgba(0,0,0,.42);--glow:0 0 22px color-mix(in srgb,var(--accent) 22%,transparent)}
-  *{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:radial-gradient(circle at 16% 0%,color-mix(in srgb,var(--accent) 13%,transparent),transparent 28%),radial-gradient(circle at 100% 0%,color-mix(in srgb,var(--accent2) 11%,transparent),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));color:var(--text);min-height:100vh}a{color:inherit;text-decoration:none}body:before{content:"";position:fixed;inset:0;background:linear-gradient(rgba(57,255,20,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(57,255,20,.014) 1px,transparent 1px);background-size:38px 38px;pointer-events:none;z-index:-1}
-  .layout{display:grid;grid-template-columns:292px minmax(0,1fr);min-height:100vh}.side{height:100vh;position:sticky;top:0;padding:22px 18px;background:linear-gradient(180deg,rgba(2,7,12,.98),rgba(5,13,22,.94));border-right:1px solid color-mix(in srgb,var(--accent) 18%,transparent);box-shadow:18px 0 48px rgba(0,0,0,.38);overflow:auto}.brand{display:flex;gap:12px;align-items:center;margin-bottom:24px}.brand-logo{width:52px;height:52px;border-radius:16px;display:grid;place-items:center;background:radial-gradient(circle,var(--accent),#063b17);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 36%,transparent);font-size:28px}.brand-title{font-size:20px;line-height:1.05;font-weight:900}.brand-title span{display:block;color:var(--accent);text-shadow:0 0 12px color-mix(in srgb,var(--accent) 45%,transparent)}.brand small{color:var(--muted);letter-spacing:.12em;text-transform:uppercase}.side a{display:flex;align-items:center;gap:12px;padding:13px 14px;border-radius:14px;color:#d9e6df;font-weight:800;margin:6px 0;border:1px solid transparent;transition:.18s}.side a:hover,.side a.active{background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 18%,transparent),rgba(255,255,255,.02));border-color:color-mix(in srgb,var(--accent) 28%,transparent);color:var(--accent);transform:translateX(3px)}.side-profile{margin-top:28px;border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:20px;min-height:134px;background:linear-gradient(180deg,rgba(0,0,0,.3),rgba(0,0,0,.72)),url('/img/hacker.png?v=${cache}') center/cover no-repeat;padding:16px;display:flex;align-items:end}.side-profile b{background:#02070b;color:var(--accent);padding:8px 12px;border-radius:999px;box-shadow:var(--glow)}
-  .main{padding:18px 24px 28px;max-width:1680px;width:100%;margin:0 auto}.topbar{height:68px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}.searchbox{flex:1;max-width:420px;display:flex;align-items:center;gap:10px;background:#071018;border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);border-radius:16px;padding:12px 14px;color:var(--muted)}.status-top{display:flex;gap:18px;align-items:center;flex-wrap:wrap}.wa-online{display:flex;gap:10px;align-items:center;color:var(--accent);font-weight:900}.clock{color:#d9e6df}.bell{width:48px;height:48px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;background:#071018;position:relative}.bell span{position:absolute;right:-3px;top:-3px;background:#ef4444;color:#fff;border-radius:999px;padding:2px 7px;font-size:11px;font-weight:900}
-  .hero-hacker{position:relative;overflow:hidden;min-height:274px;border-radius:24px;border:1px solid color-mix(in srgb,var(--accent) 24%,transparent);box-shadow:var(--shadow),var(--glow);background:linear-gradient(90deg,rgba(0,0,0,.86),rgba(0,0,0,.52)),url('/img/hacker.png?v=${cache}') center right/cover no-repeat,linear-gradient(135deg,#02060a,#0b1824);padding:34px;margin-bottom:18px}.hero-hacker:before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg,color-mix(in srgb,var(--accent) 4%,transparent) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,color-mix(in srgb,var(--accent) 3%,transparent) 0 1px,transparent 1px 46px);pointer-events:none}.hero-content{position:relative;z-index:1;max-width:760px}.eyebrow{color:var(--accent);font-weight:900;letter-spacing:.18em;text-transform:uppercase}.hero-hacker h1{font-size:clamp(34px,4vw,60px);line-height:1;margin:8px 0 12px;text-transform:uppercase;letter-spacing:-.04em;text-shadow:0 0 18px color-mix(in srgb,var(--accent) 35%,transparent)}.hero-hacker h1 span{color:var(--accent)}.hero-hacker p{font-size:17px;color:#d8ffe4;max-width:620px}.system-card{position:absolute;right:30px;bottom:28px;width:360px;background:rgba(4,10,15,.75);border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:18px;padding:15px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.08);font-weight:800}.system-row:last-child{border-bottom:0}.online{color:var(--accent);text-shadow:0 0 12px color-mix(in srgb,var(--accent) 55%,transparent)}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.dash-grid{display:grid;grid-template-columns:1.05fr .95fr .95fr;gap:14px}.card,.service-card{background:linear-gradient(180deg,rgba(13,20,29,.96),rgba(16,30,43,.92));border:1px solid color-mix(in srgb,var(--accent) 14%,transparent);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow),0 0 14px color-mix(in srgb,var(--accent) 7%,transparent)}.metric{min-height:132px;position:relative;overflow:hidden}.metric:before{content:"";position:absolute;right:-25px;top:-25px;width:94px;height:94px;border-radius:50%;background:radial-gradient(circle,var(--accent),transparent 68%);opacity:.18}.metric h2{font-size:12px;text-transform:uppercase;color:#c7d5cf;margin:0 0 12px;letter-spacing:.05em}.metric h1{font-family:Rajdhani,Inter,sans-serif;font-size:34px;margin:0}.metric small{display:block;margin-top:8px;color:var(--accent);font-weight:900}
-  .btn,button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);border-radius:13px;padding:10px 13px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 70%,#111),color-mix(in srgb,var(--accent2) 65%,#111));color:#fff!important;font-weight:900;cursor:pointer;box-shadow:0 12px 22px rgba(0,0,0,.25)}.btn.red,button.red{background:linear-gradient(135deg,#ef4444,#9f1239)}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9)}input,select,textarea{width:100%;padding:12px;border-radius:13px;border:1px solid rgba(255,255,255,.12);background:#061018;color:var(--text);outline:none}input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}label{font-size:12px;color:var(--muted);font-weight:900;text-transform:uppercase;letter-spacing:.08em}.muted{color:var(--muted)}
-  table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(6,12,19,.72);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}th,td{padding:13px 12px;border-bottom:1px solid rgba(255,255,255,.07);text-align:left;vertical-align:middle}th{font-size:12px;text-transform:uppercase;color:#cbd5e1;background:rgba(11,22,34,.95)}tr:hover td{background:color-mix(in srgb,var(--accent) 5%,transparent)}.pill{display:inline-flex;align-items:center;border-radius:999px;background:color-mix(in srgb,var(--accent) 16%,transparent);border:1px solid color-mix(in srgb,var(--accent) 26%,transparent);color:var(--accent);padding:6px 10px;font-weight:900}.tag{display:inline-flex;border-radius:999px;padding:5px 9px;background:rgba(255,255,255,.07);font-size:12px;font-weight:900}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}.theme-card{border:1px solid color-mix(in srgb,var(--accent) 15%,transparent);border-radius:18px;padding:14px;background:#071018}.theme-preview{height:130px;border-radius:14px;background-size:cover!important;background-position:center!important;border:1px solid rgba(255,255,255,.12);box-shadow:inset 0 0 45px rgba(0,0,0,.55);margin-bottom:10px}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:var(--glow);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.actions{white-space:nowrap}.forms-inline{display:inline}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.empty{padding:28px;text-align:center;color:var(--muted)}
-  @keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}@media(max-width:1100px){.dash-grid{grid-template-columns:1fr}.system-card{position:relative;right:auto;bottom:auto;margin-top:18px;width:100%}}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.side a{display:inline-flex}.main{padding:14px}.topbar{height:auto;align-items:flex-start;flex-direction:column}.hero-hacker{min-height:420px;background-position:center}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.search,.form-grid,.status-action-form{grid-template-columns:1fr}table{display:block;overflow-x:auto;font-size:12px}.actions{white-space:normal}}@media(max-width:520px){.grid{grid-template-columns:1fr}.hero-hacker h1{font-size:31px}}
-  </style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${currentTheme}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand"><div class="brand-logo">🔐</div><div><div class="brand-title">Central<span>Unlocker</span></div><small>Admin Panel</small></div></div><a class="active" href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">✉️ Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">☁️ Backup</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>👑 Admin Master</b></div></aside><main class="main"><div class="topbar"><div class="searchbox">🔎 <span>Buscar no sistema...</span></div><div class="status-top"><div class="wa-online">🟢 BOT WHATSAPP ${conectado ? 'Conectado' : 'Offline'}</div><div class="clock" id="clockBox">--:--:--</div><div class="bell">🔔<span id="notifCount">0</span></div></div></div>${body}</main></div><script>(function(){const socket=io();let total=0;const wrap=document.getElementById('toastWrap');function clock(){const el=document.getElementById('clockBox');if(el)el.textContent=new Date().toLocaleString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit',day:'2-digit',month:'2-digit',year:'numeric'});}clock();setInterval(clock,1000);function toast(n){total++;const c=document.getElementById('notifCount');if(c)c.textContent=total;const el=document.createElement('div');el.className='toast';el.innerHTML='<b>'+((n&&n.titulo)||'Notificação')+'</b><div>'+((n&&n.mensagem)||'Atualização recebida')+'</div><small>'+((n&&n.hora)||'')+'</small>';wrap.appendChild(el);setTimeout(()=>el.remove(),7000);}window.confirmarAcaoPedido=function(form){const acao=form.querySelector('select[name=acao]')?.value||'';const motivo=form.querySelector('input[name=motivo]');if(!acao){alert('Escolha uma ação.');return false;}if(acao==='cancelar'){if(motivo){motivo.style.display='block';motivo.required=true;if(!motivo.value.trim()){motivo.focus();alert('Informe o motivo do cancelamento.');return false;}}return confirm('Cancelar este pedido?');}if(motivo)motivo.required=false;if(acao==='finalizar')return confirm('Finalizar este pedido?');if(acao==='processo')return confirm('Colocar este pedido em processo?');return true;};document.addEventListener('change',function(e){if(e.target&&e.target.matches('.status-action-form select[name=acao]')){const form=e.target.closest('form');const motivo=form&&form.querySelector('input[name=motivo]');if(motivo){motivo.style.display=e.target.value==='cancelar'?'block':'none';motivo.required=e.target.value==='cancelar';}}});socket.on('notificacao',toast);socket.on('dashboard-update',()=>{const live=document.querySelector('[data-live-dashboard]');if(live){setTimeout(()=>location.reload(),900);}});})();</script></body></html>`;
+  :root{--bg:#07111f;--bg2:#0c1426;--card:#101b31;--card2:#0d172a;--soft:#16223a;--line:#24324b;--text:#eaf0f8;--muted:#97a6ba;--blue:#2f80ed;--cyan:#28d7ff;--green:#28c76f;--red:#ff4d4f;--orange:#ff9f43;--purple:#9b5cff;--shadow:0 18px 45px rgba(0,0,0,.32)}
+  *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:20px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:31px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:12px 14px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:32px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:9px 13px;border-radius:12px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{padding:12px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:12px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:18px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:42px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:18px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:24px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:30px}}
+  
+  body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+(function(){
+ const socket=io(); let total=0;
+ const wrap=document.getElementById('toastWrap');
+ const bell=document.createElement('div'); bell.className='notif-bell'; bell.innerHTML='🔔 <span id="notifCount">0</span>'; document.body.appendChild(bell);
+ function toast(n){ total++; const c=document.getElementById('notifCount'); if(c)c.textContent=total; const el=document.createElement('div'); el.className='toast'; el.innerHTML='<b>'+((n&&n.titulo)||'Notificação')+'</b><div>'+((n&&n.mensagem)||'Atualização recebida')+'</div><small>'+((n&&n.hora)||'')+'</small>'; wrap.appendChild(el); setTimeout(()=>el.remove(),7000); }
+ window.confirmarAcaoPedido=function(form){
+   const acao=form.querySelector('select[name=acao]')?.value||'';
+   const motivo=form.querySelector('input[name=motivo]');
+   if(!acao){ alert('Escolha uma ação.'); return false; }
+   if(acao==='cancelar'){
+     if(motivo){ motivo.style.display='block'; motivo.required=true; if(!motivo.value.trim()){ motivo.focus(); alert('Informe o motivo do cancelamento.'); return false; } }
+     return confirm('Cancelar este pedido?');
+   }
+   if(motivo){ motivo.required=false; }
+   if(acao==='finalizar') return confirm('Finalizar este pedido?');
+   if(acao==='processo') return confirm('Colocar este pedido em processo?');
+   return true;
+ };
+ document.addEventListener('change',function(e){
+   if(e.target && e.target.matches('.status-action-form select[name=acao]')){
+     const form=e.target.closest('form'); const motivo=form&&form.querySelector('input[name=motivo]');
+     if(motivo){ motivo.style.display=e.target.value==='cancelar'?'block':'none'; motivo.required=e.target.value==='cancelar'; }
+   }
+ });
+ socket.on('notificacao', toast);
+ socket.on('dashboard-update', ()=>{ const live=document.querySelector('[data-live-dashboard]'); if(live){ setTimeout(()=>location.reload(),900); } });
+})();
+</script></body></html>`;
 }
 async function precoDaRevenda(revendaId, servicoId) {
   const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [revendaId, servicoId]);
@@ -626,29 +523,6 @@ async function enviarImagem(to, filePath, caption='') {
   if (!sock || !to || !filePath || !fs.existsSync(filePath)) return false;
   await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption });
   return true;
-}
-
-async function streamToBuffer(stream) {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-function mensagemImagem(msg) {
-  return msg.message?.imageMessage ||
-    msg.message?.ephemeralMessage?.message?.imageMessage ||
-    msg.message?.viewOnceMessage?.message?.imageMessage ||
-    msg.message?.viewOnceMessageV2?.message?.imageMessage ||
-    null;
-}
-async function salvarImagemWhatsAppEmEsim(msg) {
-  const imageMessage = mensagemImagem(msg);
-  if (!imageMessage) return null;
-  const stream = await downloadContentFromMessage(imageMessage, 'image');
-  const buffer = await streamToBuffer(stream);
-  const fileName = `esim_manual_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
-  const filePath = path.join(ESIM_DIR, fileName);
-  fs.writeFileSync(filePath, buffer);
-  return { fileName, filePath, rel: `esim/${fileName}` };
 }
 function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
 async function enviarParaAdmins(texto) {
@@ -832,12 +706,6 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   }
 
   if (admin) {
-    // Entrega manual de eSIM agora é feita somente pelo painel.
-    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim') || ['/esimpendentes','esimpendentes','/pendentesesim','pendentesesim'].includes(texto)) {
-      await enviarTexto(from, '📱 A entrega manual de eSIM agora é feita somente pelo painel: Pedidos → 📤 Entregar QR.');
-      return;
-    }
-
     // Cadastro de revenda direto na conversa do WhatsApp
     if (await tratarCadastroRevendaConversa(from, textoOriginal, texto)) return;
 
@@ -1036,78 +904,23 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
 
 
 async function planosEsimDisponiveis() {
-  // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
-  return await all(`
-    SELECT
-      p.nome_plano,
-      p.preco_revenda,
-      p.preco_cliente,
-      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS qtd
-    FROM esim_planos p
-    LEFT JOIN esim_estoque e
-      ON e.nome_plano = p.nome_plano
-     AND e.preco_revenda = p.preco_revenda
-    WHERE p.ativo=1
-    GROUP BY p.nome_plano, p.preco_revenda, p.preco_cliente
-    ORDER BY p.nome_plano ASC
-  `);
+  return await all(`SELECT nome_plano, preco_revenda, preco_cliente, COUNT(*) qtd
+    FROM esim_estoque
+    WHERE status='DISPONIVEL'
+    GROUP BY nome_plano, preco_revenda, preco_cliente
+    ORDER BY nome_plano ASC`);
 }
 async function enviarListaEsim(from) {
   const planos = await planosEsimDisponiveis();
-  if (!planos.length) { await enviarTexto(from, '❌ Nenhum plano eSIM cadastrado no momento.'); return; }
+  if (!planos.length) { await enviarTexto(from, '❌ Nenhum eSIM disponível no momento.'); return; }
   let txt = '📱 *eSIM DISPONÍVEIS*\n\n';
-  planos.forEach((p, i) => {
-    const qtd = Number(p.qtd || 0);
-    const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '📦 Sem QR no estoque\n👨‍💻 Entrega manual pelo admin';
-    txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n${entrega}\n\n`;
-  });
+  planos.forEach((p, i) => { txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n📦 ${p.qtd} disponível${p.qtd > 1 ? 's' : ''}\n\n`; });
   txt += 'Digite o número do plano.';
   await enviarTexto(from, txt.trim());
 }
-
-async function criarPedidoEsimManualRevenda(from, revenda, plano) {
-  const valor = Number(plano.preco_revenda || 0);
-  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
-    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${plano.nome_plano}`));
-    return;
-  }
-
-  const ins = await run(`INSERT INTO pedidos
-    (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado)
-    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', 1)`,
-    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${plano.nome_plano}`, plano.nome_plano, valor]);
-
-  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
-  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
-  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
-
-  notificarPainel('esim', '📱 eSIM manual pendente', `${revenda.nome} - ${plano.nome_plano}`);
-  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nAcesse o painel em *Pedidos* e clique em *📤 Entregar QR* para finalizar.`);
-
-  await enviarTexto(from, `✅ Compra aprovada
-
-📱 ${plano.nome_plano}
-💰 Valor: ${brl(valor)}
-
-💳 Situação da conta:
-${textoSituacaoSaldo(revAtual?.saldo || 0)}
-
-👨‍💻 *Entrega manual*
-O estoque automático de QR acabou.
-Seu pedido ficou pendente para o admin enviar o QR.
-
-🆔 Pedido #${pedido.id}`);
-}
-
 async function entregarEsimRevenda(from, revenda, plano) {
   const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND preco_revenda=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, plano.preco_revenda]);
-
-  // Sem QR no estoque: cria pedido manual em vez de bloquear a venda.
-  if (!item) {
-    await criarPedidoEsimManualRevenda(from, revenda, plano);
-    return;
-  }
-
+  if (!item) { await enviarTexto(from, '❌ Esse eSIM acabou no estoque. Escolha outro plano.'); return; }
   const valor = Number(item.preco_revenda || 0);
   if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
     await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
@@ -1120,65 +933,10 @@ async function entregarEsimRevenda(from, revenda, plano) {
   await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
-  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+  const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
   await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
   if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
   await enviarTexto(from, mensagemInstrucaoEsim());
-}
-
-async function listarEsimManuaisAdmin(from) {
-  const rows = await all(`SELECT * FROM pedidos
-    WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO')
-    ORDER BY id ASC LIMIT 30`);
-  if (!rows.length) return enviarTexto(from, '✅ Nenhum eSIM manual pendente.');
-  let txt = '📱 *eSIM MANUAL PENDENTE*\n\n';
-  for (const p of rows) {
-    txt += `#${p.id}\n🏪 ${p.revenda_nome || '-'}\n📱 ${p.entrada_valor || p.servico_nome || '-'}\n💰 ${brl(p.valor)}\n➡️ /entregaresim ${p.id}\n\n`;
-  }
-  await enviarTexto(from, txt.trim());
-}
-
-async function iniciarEntregaEsimManualAdmin(from, pedidoId) {
-  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [pedidoId]);
-  if (!p) return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
-  if (p.status === 'FINALIZADO' || p.status === 'CANCELADO') return enviarTexto(from, `❌ Pedido #${p.id} está ${p.status}.`);
-  adminSessao.set(from, { etapa: 'entregar_esim_manual', pedido_id: p.id });
-  await enviarTexto(from, `📤 *Entregar eSIM manual*
-
-Pedido #${p.id}
-🏪 ${p.revenda_nome || '-'}
-📱 ${p.entrada_valor || p.servico_nome || '-'}
-📞 ${p.revenda_numero || '-'}
-
-Envie agora a foto do QR Code ou texto da entrega.
-Para cancelar, digite *cancelar*.`);
-}
-
-async function concluirEntregaEsimManualAdmin(from, msg, textoOriginal) {
-  const sess = adminSessao.get(from);
-  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [sess.pedido_id]);
-  if (!p) {
-    adminSessao.delete(from);
-    return enviarTexto(from, '❌ Pedido eSIM manual não encontrado.');
-  }
-
-  const destino = p.revenda_jid || numberToJid(p.revenda_numero);
-  if (!destino) return enviarTexto(from, '❌ Não encontrei o WhatsApp da revenda para entregar.');
-
-  const img = await salvarImagemWhatsAppEmEsim(msg);
-  const textoEntrega = String(textoOriginal || '').trim() || `📱 eSIM ${p.entrada_valor || p.servico_nome}\n⚠️ QR Code de uso único.`;
-
-  if (img?.filePath) {
-    await enviarImagem(destino, img.filePath, textoEntrega);
-  } else {
-    await enviarTexto(destino, textoEntrega);
-  }
-  await enviarTexto(destino, mensagemInstrucaoEsim());
-
-  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
-  adminSessao.delete(from);
-  notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
-  await enviarTexto(from, `✅ Pedido #${p.id} entregue para ${p.revenda_nome || p.revenda_numero}.`);
 }
 function mensagemInstrucaoEsim() {
   return `📋 *COMO INSTALAR O eSIM*\n\n*iPhone*\n1️⃣ Ajustes\n2️⃣ Celular\n3️⃣ Adicionar eSIM\n4️⃣ Usar QR Code\n5️⃣ Escaneie a imagem enviada\n\n*Android*\n1️⃣ Configurações\n2️⃣ Rede e Internet\n3️⃣ SIM Cards\n4️⃣ Adicionar eSIM\n5️⃣ Escaneie a imagem enviada\n\n⚠️ *IMPORTANTE*\n• QR Code de uso único\n• Necessário internet para ativação\n• Não compartilhe o QR Code\n\n🏢 CentralUnlocker`;
@@ -1384,9 +1142,7 @@ async function enviarMenuAdmin(from) {
 async function tratarOpcaoAdmin(from, opcao) {
   if (opcao === '0') { adminSessao.delete(from); await enviarTexto(from, '✅ Menu encerrado.'); return; }
   if (opcao === '1') { await enviarTexto(from, await textoDashboardAdmin()); return; }
-  if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo
-/esimpendentes
-/entregaresim ID`); return; }
+  if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo`); return; }
   if (opcao === '3') { await enviarTexto(from, `🏪 *REVENDAS*\n\nComandos:\nrevendas\nrevenda nome\naddrevenda Nome | 5575999999999\nbloquearrevenda ID\ndesbloquearrevenda ID\nremoverrevenda ID`); return; }
   if (opcao === '4') { await enviarTexto(from, `🛠 *SERVIÇOS*\n\nComandos:\nservicos\naddservico Nome | 100\neditarservico ID | Novo Nome | 100\ndesativarservico ID\nativarservico ID\nexcluirservico ID`); return; }
   if (opcao === '5') { await enviarTexto(from, await resumoFinanceiro()); return; }
@@ -1615,22 +1371,43 @@ app.all('/webhook/pixgo', async (req, res) => {
 app.use('/admin', basicAuth);
 
 app.get('/admin', async (req, res) => {
-  const pend = await get("SELECT COUNT(*) qtd FROM pedidos WHERE status='PENDENTE'");
-  const proc = await get("SELECT COUNT(*) qtd FROM pedidos WHERE status='EM_PROCESSO'");
-  const fin = await get("SELECT COUNT(*) qtd FROM pedidos WHERE status='FINALIZADO'");
-  const revendas = await get("SELECT COUNT(*) qtd FROM revendas WHERE status='ATIVA'");
-  const esim = await get("SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL'");
-  const faturamentoHoje = await get("SELECT COALESCE(SUM(valor),0) total FROM pedidos WHERE status='FINALIZADO' AND date(finalizado_em)=date('now')");
-  const faturamentoMes = await get("SELECT COALESCE(SUM(valor),0) total FROM pedidos WHERE status='FINALIZADO' AND strftime('%Y-%m', finalizado_em)=strftime('%Y-%m','now')");
-  const saldoSistema = await get("SELECT COALESCE(SUM(saldo),0) total FROM revendas");
-  const ultimos = await all("SELECT * FROM pedidos ORDER BY id DESC LIMIT 6");
-  const planos = await all(`SELECT nome_plano, COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' GROUP BY nome_plano ORDER BY qtd DESC LIMIT 5`);
-  const pedidosHtml = ultimos.map(p => `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.entrada_valor || p.imei || '-')}<br><span class="tag">${safeHtml(p.entrada_label || p.tipo_entrada || '')}</span></td><td>${safeHtml(p.revenda_nome || p.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(p.status || '')}</span></td><td>${dateBR(p.criado_em)}</td></tr>`).join('') || `<tr><td colspan="5" class="empty">Nenhum pedido ainda</td></tr>`;
-  const planosHtml = planos.map(p => `<div class="system-row"><span>📱 ${safeHtml(p.nome_plano)}</span><span class="online">${p.qtd}</span></div>`).join('') || `<div class="empty">Sem QR disponível</div>`;
-  const html = `<div data-live-dashboard></div><section class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code, eSIM e serviços manuais.</p><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px"><a class="btn" href="/admin/pedidos">📋 Ver pedidos</a><a class="btn purple" href="/admin/esim">📱 Gerenciar eSIM</a><a class="btn orange" href="/admin/financeiro">💰 Financeiro</a></div></div><div class="system-card"><b>Status do sistema</b><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot WhatsApp</span><span class="${conectado ? 'online' : ''}">${conectado ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></section><div class="grid"><div class="card metric"><h2>Revendas Ativas</h2><h1>${revendas.qtd || 0}</h1><small>+ sistema ativo</small></div><div class="card metric"><h2>Pedidos Pendentes</h2><h1>${pend.qtd || 0}</h1><small>Aguardando ação</small></div><div class="card metric"><h2>Em Processo</h2><h1>${proc.qtd || 0}</h1><small>Em andamento</small></div><div class="card metric"><h2>Finalizados</h2><h1>${fin.qtd || 0}</h1><small>Concluídos</small></div><div class="card metric"><h2>eSIM Estoque</h2><h1>${esim.qtd || 0}</h1><small>QR disponíveis</small></div><div class="card metric"><h2>Faturamento Hoje</h2><h1>${brl(faturamentoHoje.total || 0)}</h1><small>Receita do dia</small></div></div><div class="dash-grid"><div class="card"><h2>📋 Últimos Pedidos</h2><table><thead><tr><th>ID</th><th>Entrada</th><th>Cliente/Revenda</th><th>Status</th><th>Criado</th></tr></thead><tbody>${pedidosHtml}</tbody></table></div><div class="card"><h2>📱 Estoque eSIM</h2>${planosHtml}<br><a class="btn" href="/admin/esim">Ver todos</a></div><div class="card"><h2>📈 Faturamento</h2><div style="height:220px;display:flex;align-items:end;gap:12px;padding:18px 8px;border-bottom:1px solid var(--line)">${[35,70,48,55,82,50,63].map(h=>`<div style="flex:1;height:${h}%;background:linear-gradient(180deg,var(--accent),rgba(57,255,20,.15));border-radius:10px 10px 0 0;box-shadow:0 0 16px color-mix(in srgb,var(--accent) 25%,transparent)"></div>`).join('')}</div><p><b>Hoje:</b> ${brl(faturamentoHoje.total || 0)}</p><p><b>Mês:</b> ${brl(faturamentoMes.total || 0)}</p><p><b>Balanço revendas:</b> ${brl(saldoSistema.total || 0)}</p></div></div><div class="dash-grid"><div class="card"><h2>⚡ Atalhos Rápidos</h2><div class="grid"><a class="btn" href="/admin/pedidos">🛒 Novo Pedido</a><a class="btn purple" href="/admin/esim">📱 Novo eSIM</a><a class="btn" href="/admin/revendas">👥 Nova Revenda</a><a class="btn orange" href="/admin/financeiro">💰 Saldo</a><a class="btn" href="/admin/relatorios">📊 Relatórios</a><a class="btn" href="/admin/mensagens">✉️ Mensagem</a></div></div><div class="card"><h2>🛡 Status dos Serviços</h2><div class="system-row"><span>API PIXGO</span><span class="online">Online ●</span></div><div class="system-row"><span>WhatsApp</span><span class="${conectado ? 'online' : ''}">${conectado ? 'Conectado ●' : 'Offline ●'}</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">Online ●</span></div></div><div class="card"><h2>🔔 Atividades Recentes</h2><p>Pedido criado recentemente</p><p>Backup automático ativo</p><p>Tema premium aplicado</p><a class="btn gray" href="/admin/pedidos">Ver todas</a></div></div>`;
-  res.send(page('Dashboard', html));
+  const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
+  const ep = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="EM PROCESSO"');
+  const f = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="FINALIZADO"');
+  const c = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"');
+  const saldo = await get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"');
+  const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
+  const rev = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
+  const ult = await all('SELECT * FROM pedidos ORDER BY id DESC LIMIT 8');
+  let table = '<table><tr><th>ID</th><th>Entrada</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
+  for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
+  table += '</table>';
+  res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot WhatsApp</span><span class="online">${conectado ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
+  <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
+  </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
 
+function pedidoActions(o, back = '/admin/pedidos') {
+  return `<form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
+    <select name="acao" required>
+      <option value="">Escolher ação</option>
+      <option value="processo">🔄 Colocar em processo</option>
+      <option value="finalizar">✅ Finalizar</option>
+      <option value="cancelar">❌ Cancelar</option>
+    </select>
+    <input name="motivo" placeholder="Motivo do cancelamento" style="display:none;margin-top:6px" oninput="this.dataset.changed='1'">
+    <button class="btn green">Aplicar</button>
+  </form>
+  <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/apagar" onsubmit="return confirm('Apagar definitivamente o pedido #${o.id}?')">
+    <button class="btn red">🗑️ Apagar</button>
+  </form>`;
+}
+function pedidoTable(rows, showServico = true) {
+  let html = `<table><tr><th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
+  html += '</table>';
+  return html;
+}
 app.get('/admin/pedidos', async (req, res) => {
   const status = req.query.status || '';
   const q = String(req.query.q || '').trim();
@@ -1708,222 +1485,30 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
 });
 
 app.get('/admin/esim', async (req, res) => {
-  const planos = await all(`
-    SELECT p.*,
-      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END),0) AS qtd
-    FROM esim_planos p
-    LEFT JOIN esim_estoque e
-      ON e.nome_plano=p.nome_plano
-     AND e.preco_revenda=p.preco_revenda
-    WHERE p.ativo=1
-    GROUP BY p.id
-    ORDER BY p.nome_plano ASC
-  `);
-
+  const resumo = await all(`SELECT nome_plano, preco_revenda, COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' GROUP BY nome_plano, preco_revenda ORDER BY nome_plano ASC`);
   const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
-  const manuais = await all(`SELECT * FROM pedidos WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO') ORDER BY id DESC LIMIT 100`);
-
   let cards = '<div class="grid">';
-  for (const p of planos) {
-    const qtd = Number(p.qtd || 0);
-    const status = qtd > 0 ? `🟢 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '🔴 Sem QR · venda manual';
-    cards += `<div class="card metric">
-      <h2>📱 ${safeHtml(p.nome_plano)}</h2>
-      <h1>${qtd}</h1>
-      <p class="muted">${brl(p.preco_revenda)}<br>${status}</p>
-      <a class="btn" href="/admin/esim/plano/${p.id}/editar">✏️ Editar</a>
-      <form method="post" action="/admin/esim/plano/${p.id}/apagar" onsubmit="return confirm('Apagar este plano? Os QR Codes disponíveis desse plano também serão removidos. Pedidos antigos não serão apagados.')" style="display:inline">
-        <button class="btn red">🗑️ Apagar plano</button>
-      </form>
-    </div>`;
-  }
+  for (const r of resumo) cards += `<div class="card metric"><h2>📱 ${safeHtml(r.nome_plano)}</h2><h1>${r.qtd}</h1><p class="muted">${brl(r.preco_revenda)}</p></div>`;
   cards += '</div>';
-
-  let planosTable = '<table><tr><th>ID</th><th>Plano</th><th>Preço</th><th>QR Disponíveis</th><th>Ação</th></tr>';
-  for (const p of planos) {
-    planosTable += `<tr>
-      <td>#${p.id}</td>
-      <td>${safeHtml(p.nome_plano)}</td>
-      <td>${brl(p.preco_revenda)}</td>
-      <td>${Number(p.qtd || 0)}</td>
-      <td>
-        <a class="btn" href="/admin/esim/plano/${p.id}/editar">✏️ Editar</a>
-        <form method="post" action="/admin/esim/plano/${p.id}/apagar" onsubmit="return confirm('Apagar este plano? Os QR Codes disponíveis desse plano também serão removidos. Pedidos antigos não serão apagados.')" style="display:inline">
-          <button class="btn red">🗑️ Apagar plano</button>
-        </form>
-      </td>
-    </tr>`;
-  }
-  planosTable += '</table>';
-
-
-  const options = planos.map(p =>
-    `<option value="${p.id}">${safeHtml(p.nome_plano)} - ${brl(p.preco_revenda)} - ${Number(p.qtd || 0)} QR</option>`
-  ).join('');
-
-  const formPlano = `<div class="card">
-    <h2>➕ Cadastrar plano eSIM</h2>
-    <form method="post" action="/admin/esim/plano">
-      <div class="grid">
-        <input name="nome_plano" placeholder="Nome do plano. Ex: TIM 50GB" required>
-        <input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required>
-      </div>
-      <button class="btn green">Salvar plano</button>
-    </form>
-    <p class="muted">O plano fica disponível para venda manual mesmo sem QR no estoque.</p>
-  </div>`;
-
-  const formQr = `<div class="card">
-    <h2>📥 Adicionar QR Code ao plano</h2>
-    <form method="post" action="/admin/esim/qrcode" enctype="multipart/form-data">
-      <div class="grid">
-        <select name="plano_id" required>
-          <option value="">Selecione o plano</option>
-          ${options}
-        </select>
-        <input type="file" name="qr" accept="image/*" required>
-      </div>
-      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px">
-        <input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0">
-        Avisar revendas com mensagem simples
-      </label>
-      <br>
-      <button class="btn green">Salvar QR no estoque</button>
-    </form>
-    <p class="muted">Com QR disponível, entrega automática. Quando o estoque chegar a 0, a venda vira manual.</p>
-  </div>`;
-
-  let manualTable = '<table><tr><th>Pedido</th><th>Revenda</th><th>Plano</th><th>Valor</th><th>Status</th><th>Ação</th></tr>';
-  for (const p of manuais) {
-    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><a class=\"btn green\" href=\"/admin/pedido/${p.id}/entregar-esim\">📤 Entregar QR</a></td></tr>`;
-  }
-  manualTable += '</table>';
-
   let table = '<table><tr><th>ID</th><th>Plano</th><th>Preço Revenda</th><th>Status</th><th>Revenda/Pedido</th><th>QR</th><th>Ações</th></tr>';
   for (const i of itens) {
     const img = i.arquivo_qr ? `<a href="/${safeHtml(i.arquivo_qr)}" target="_blank">Visualizar</a>` : '-';
     table += `<tr><td>#${i.id}</td><td>${safeHtml(i.nome_plano)}</td><td>${brl(i.preco_revenda)}</td><td><span class="pill">${safeHtml(i.status)}</span></td><td>${safeHtml(i.revenda_nome || '-')}${i.pedido_id ? `<br><span class="muted">Pedido #${i.pedido_id}</span>` : ''}</td><td>${img}</td><td><form class="forms-inline" method="post" action="/admin/esim/${i.id}/apagar"><button class="btn red" onclick="return confirm('Apagar este QR do estoque?')">🗑️ Apagar</button></form></td></tr>`;
   }
   table += '</table>';
-
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Entrega manual agora é feita diretamente em Pedidos → 📤 Entregar QR.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+  const form = `<div class="card"><h2>➕ Adicionar QR Code eSIM</h2><form method="post" enctype="multipart/form-data"><div class="grid"><input name="nome_plano" placeholder="Nome do plano. Ex: TIM 70GB" required><input name="preco_revenda" placeholder="Preço revenda. Ex: 55" required><input type="file" name="qr" accept="image/*" required></div><br><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input type="checkbox" name="avisar_revendas" value="1" style="width:auto;min-width:0"> Avisar revendas com mensagem simples</label><br><button class="btn green">Salvar QR Code</button></form><p class="muted">Digite o plano manualmente e envie apenas a imagem do QR Code.</p></div>`;
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${form}${cards}<div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
-
-app.post('/admin/esim/plano', async (req, res) => {
+app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
   const nome = String(req.body.nome_plano || '').trim();
   const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
-  if (nome && preco > 0) {
-    await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
-    notificarPainel('esim', '📱 Plano eSIM cadastrado', `${nome} - disponível para venda manual`);
-  }
-  res.redirect('/admin/esim');
-});
-
-
-
-app.get('/admin/esim/plano/:id/editar', async (req, res) => {
-  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [req.params.id]);
-  if (!plano) return res.redirect('/admin/esim');
-
-  const qtd = await get(`SELECT COUNT(*) qtd FROM esim_estoque
-    WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
-    [plano.nome_plano, plano.preco_revenda]);
-
-  const html = `<h1>✏️ Editar plano eSIM</h1>
-  <div class="card">
-    <form method="post">
-      <label>Nome do plano</label>
-      <input name="nome_plano" value="${safeHtml(plano.nome_plano || '')}" required>
-
-      <label>Preço revenda</label>
-      <input name="preco_revenda" value="${Number(plano.preco_revenda || 0).toFixed(2).replace('.', ',')}" required>
-
-      <label>Preço cliente</label>
-      <input name="preco_cliente" value="${Number(plano.preco_cliente || plano.preco_revenda || 0).toFixed(2).replace('.', ',')}">
-
-      <label>Status</label>
-      <select name="ativo">
-        <option value="1" ${plano.ativo ? 'selected' : ''}>Ativo</option>
-        <option value="0" ${!plano.ativo ? 'selected' : ''}>Inativo</option>
-      </select>
-
-      <p class="muted">QR disponíveis neste plano: ${qtd?.qtd || 0}</p>
-
-      <button class="btn green">Salvar alterações</button>
-      <a class="btn" href="/admin/esim">Voltar</a>
-    </form>
-  </div>`;
-
-  res.send(page('Editar plano eSIM', html));
-});
-
-app.post('/admin/esim/plano/:id/editar', async (req, res) => {
-  const id = Number(req.params.id || 0);
-  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
-  if (!plano) return res.redirect('/admin/esim');
-
-  const nomeNovo = String(req.body.nome_plano || '').trim();
-  const precoNovo = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
-  const precoClienteNovo = Number(String(req.body.preco_cliente || req.body.preco_revenda || '0').replace(',', '.'));
-  const ativo = req.body.ativo === '1' ? 1 : 0;
-
-  if (nomeNovo && precoNovo > 0) {
-    // Atualiza o catálogo.
-    await run(`UPDATE esim_planos
-      SET nome_plano=?, preco_revenda=?, preco_cliente=?, ativo=?
-      WHERE id=?`,
-      [nomeNovo, precoNovo, precoClienteNovo || precoNovo, ativo, id]);
-
-    // Atualiza apenas QR disponíveis, para não alterar histórico de QR vendidos.
-    await run(`UPDATE esim_estoque
-      SET nome_plano=?, preco_revenda=?, preco_cliente=?
-      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
-      [nomeNovo, precoNovo, precoClienteNovo || precoNovo, plano.nome_plano, plano.preco_revenda]);
-
-    notificarPainel('esim', '✏️ Plano eSIM alterado', `${plano.nome_plano} → ${nomeNovo}`);
-  }
-
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/plano/:id/apagar', async (req, res) => {
-  const id = Number(req.params.id || 0);
-  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
-  if (plano) {
-    // Não apaga pedidos antigos. Apenas desativa o plano e remove QR disponíveis não vendidos.
-    const qrs = await all(`SELECT * FROM esim_estoque
-      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
-      [plano.nome_plano, plano.preco_revenda]);
-
-    for (const q of qrs) {
-      try {
-        if (q.arquivo_qr) fs.unlinkSync(caminhoArquivoEsim(q.arquivo_qr));
-      } catch(e) {}
-    }
-
-    await run(`DELETE FROM esim_estoque
-      WHERE nome_plano=? AND preco_revenda=? AND status='DISPONIVEL'`,
-      [plano.nome_plano, plano.preco_revenda]);
-
-    await run('UPDATE esim_planos SET ativo=0 WHERE id=?', [id]);
-
-    notificarPainel('esim', '🗑️ Plano eSIM apagado', plano.nome_plano);
-  }
-  res.redirect('/admin/esim');
-});
-
-app.post('/admin/esim/qrcode', uploadEsim.single('qr'), async (req, res) => {
-  const planoId = Number(req.body.plano_id || 0);
-  const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [planoId]);
-  if (plano && req.file) {
-    await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`,
-      [plano.nome_plano, plano.preco_revenda, plano.preco_cliente || plano.preco_revenda, `esim/${req.file.filename}`]);
-    notificarPainel('esim', '📱 QR eSIM adicionado', plano.nome_plano);
-
+  if (nome && preco > 0 && req.file) {
+    await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`, [nome, preco, preco, `esim/${req.file.filename}`]);
+    notificarPainel('esim', '📱 QR eSIM adicionado', nome);
     if (req.body.avisar_revendas === '1') {
-      const aviso = `🚀 QR Code eSIM disponível
+      const aviso = `🚀 Novo eSIM adicionado ao estoque
 
-📱 ${plano.nome_plano}
+📱 ${nome}
 
 Digite:
 
@@ -1938,23 +1523,10 @@ menu
   }
   res.redirect('/admin/esim');
 });
-
-app.post('/admin/esim', uploadEsim.single('qr'), async (req, res) => {
-  const nome = String(req.body.nome_plano || '').trim();
-  const preco = Number(String(req.body.preco_revenda || '0').replace(',', '.'));
-  if (nome && preco > 0) {
-    await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo) VALUES (?, ?, ?, 1)`, [nome, preco, preco]);
-    if (req.file) {
-      await run(`INSERT INTO esim_estoque (nome_plano, preco_revenda, preco_cliente, arquivo_qr, status) VALUES (?, ?, ?, ?, 'DISPONIVEL')`,
-        [nome, preco, preco, `esim/${req.file.filename}`]);
-    }
-  }
-  res.redirect('/admin/esim');
-});
 app.post('/admin/esim/:id/apagar', async (req, res) => {
   const item = await get('SELECT * FROM esim_estoque WHERE id=?', [req.params.id]);
   if (item) {
-    try { if (item.arquivo_qr) fs.unlinkSync(caminhoArquivoEsim(item.arquivo_qr)); } catch(e) {}
+    try { if (item.arquivo_qr) fs.unlinkSync(path.join(PUBLIC_DIR, item.arquivo_qr)); } catch(e) {}
     await run('DELETE FROM esim_estoque WHERE id=?', [item.id]);
   }
   res.redirect('/admin/esim');
@@ -1964,7 +1536,7 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
   if (item?.revenda_id) {
     const r = await get('SELECT * FROM revendas WHERE id=?', [item.revenda_id]);
     const jid = r?.jid || numberToJid(r?.whatsapp);
-    const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+    const qrPath = path.join(PUBLIC_DIR, item.arquivo_qr || '');
     if (jid && fs.existsSync(qrPath)) {
       await sock.sendMessage(jid, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ Reenvio do QR Code.` });
       await enviarTexto(jid, mensagemInstrucaoEsim());
@@ -2083,21 +1655,10 @@ app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('S
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 app.get('/admin/config', (req, res) => {
-  ensureHackerModelos();
-  const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview" style="background:linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.55)),url('${imagemTemaUrl(id)}')"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
+  const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
   res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status WhatsApp:</b> ${conectado ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
-app.post('/admin/config/theme', async (req, res) => {
-  const theme = String(req.body.theme || 'hacker-green');
-  if (TEMAS_PAINEL[theme]) {
-    PAINEL_TEMA = theme;
-    await setConfig('painel_tema', theme);
-    await setConfig('painel_tema_rev', String(Date.now()));
-    aplicarImagemTema(theme);
-    notificarPainel('tema', '🎨 Tema e foto alterados', TEMAS_PAINEL[theme].nome);
-  }
-  res.redirect('/admin/config');
-});
+app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/config'); });
 app.post('/admin/config/hacker-image', async (req, res) => {
   try {
     const data = String(req.body.imageData || '');
@@ -2105,10 +1666,7 @@ app.post('/admin/config/hacker-image', async (req, res) => {
     if (!m) return res.send(page('Erro', '<h1>❌ Imagem inválida</h1><p>Envie uma imagem PNG, JPG ou WEBP.</p><a class="btn" href="/admin/config">Voltar</a>'));
     if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
-if (!fs.existsSync(THEME_DIR)) fs.mkdirSync(THEME_DIR, { recursive: true });
-    const buff = Buffer.from(m[2], 'base64');
-    fs.writeFileSync(HACKER_IMAGE_PATH, buff);
-    fs.writeFileSync(path.join(THEME_DIR, `custom_hacker.${m[1].toLowerCase()==='jpeg'?'jpg':m[1].toLowerCase()}`), buff);
+    fs.writeFileSync(HACKER_IMAGE_PATH, Buffer.from(m[2], 'base64'));
     notificarPainel('banner', '🖼️ Banner atualizado', 'Foto do hacker alterada manualmente');
     res.redirect('/admin/config?ok=1');
   } catch (e) {
