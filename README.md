@@ -137,3 +137,7 @@ Agora:
 Na tela Configurações, os cards dos temas agora mostram a foto hacker de cada tema.
 Ao aplicar um tema, a imagem também é copiada para `/public/img/hacker.png`.
 Os modelos ficam salvos em `/data/themes`, então não perde ao reiniciar o Render.
+
+
+## Atualização: Layout Premium CentralUnlocker
+Dashboard remodelado no estilo do mockup: banner hacker grande, menu lateral premium, cards neon, status do sistema, atalhos rápidos e gráfico visual.
