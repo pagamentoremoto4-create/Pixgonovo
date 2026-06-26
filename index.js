@@ -28,9 +28,7 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 10000;
-const PIXGO_API = process.env.PIXGO_API || 'https://pixgo.org/api/v1';
-const PIXGO_API_KEY = process.env.PIXGO_API_KEY || '';
-const PIXGO_URL = process.env.PIXGO_URL || `${PIXGO_API}/payment/create`;
+const PIXGO_API = 'https://pixgo.org/api/v1';
 
 // Tudo que precisa sobreviver a restart/deploy do Render fica no Persistent Disk.
 // Configure DATA_DIR=/data no Render e crie o Disk com mount path /data.
@@ -735,91 +733,50 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
     return;
   }
 
-
-  const sessCpfPix = pedidoSessao.get(from);
-  if (sessCpfPix?.etapa === 'aguardando_cpf_pix') {
-    const doc = onlyDigits(textoOriginal);
-    if (!validarDocumentoPixGo(doc)) {
-      await enviarTexto(from, `❌ CPF/CNPJ inválido.
-
-Envie um CPF com 11 dígitos ou CNPJ com 14 dígitos, somente números.
-
-Digite cancelar para sair.`);
-      return;
-    }
-
-    const valor = Number(sessCpfPix.valorPix || 0);
+  // PIX livre para qualquer pessoa
+  if (texto.startsWith('pagar')) {
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 180'); return; }
     await enviarTexto(from, '⏳ Gerando PIX...');
-
-    const pix = await gerarPix(valor, from, doc, nomeContato || 'Cliente WhatsApp');
-    if (!pix || pix.success === false) {
-      await enviarTexto(from, `❌ Erro ao gerar Pix:
-${pix?.error || pix?.message || 'Tente novamente.'}`);
-      pedidoSessao.delete(from);
-      return;
-    }
-
-    const extraPix = extrairPixGo(pix);
-    const paymentId = extraPix.paymentId;
-    const qrCode = extraPix.copia;
-
-    if (!qrCode) {
-      await enviarTexto(from, '❌ A PixGo não retornou o copia e cola. Veja os logs do Render.');
-      pedidoSessao.delete(from);
-      return;
-    }
-
-    await enviarTexto(from, `✅ *PIX GERADO*
-
-💰 Valor: ${brl(valor)}
-🧾 Pagador: ${doc}
-
-Vou enviar o copia e cola na próxima mensagem.`);
-    await enviarTexto(from, qrCode);
-
+    const pix = await gerarPix(valor, from);
+    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
+    await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
+    await enviarTexto(from, qrCode || 'PIX indisponível');
     try {
       const revendaPix = await getRevendaByMsg(msg, from);
+
       if (paymentId) {
         await run(
           'INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',
           [paymentId, revendaPix?.id || null, revendaPix ? from : null, from, valor]
         );
+
         verificarPagamento(paymentId, revendaPix?.id || null, from, valor);
       }
     } catch (e) {
       console.log('⚠️ ERRO PÓS-PIX:', e.message);
     }
 
-    pedidoSessao.delete(from);
-    return;
-  }
-
-  // PIX livre para qualquer pessoa
-  if (texto.startsWith('pagar')) {
-    const valor = Number(String(partes[1] || '0').replace(',', '.'));
-    if (!valor || valor < 10) {
-      await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 100');
-      return;
-    }
-
-    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valorPix: valor });
-
-    await enviarTexto(from, `💰 Valor: ${brl(valor)}
-
-Agora informe o *CPF ou CNPJ de quem vai pagar o PIX*.
-
-⚠️ Envie somente números.
-⚠️ Pela nova regra da PixGo, somente esse CPF/CNPJ poderá pagar o QR Code.
-
-Exemplo:
-12345678901`);
     return;
   }
 
   if (admin) {
-    // Entrega manual de eSIM agora é feita somente pelo painel.
-    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim') || ['/esimpendentes','esimpendentes','/pendentesesim','pendentesesim'].includes(texto)) {
-      await enviarTexto(from, '📱 A entrega manual de eSIM agora é feita somente pelo painel: Pedidos → 📤 Entregar QR.');
+    // Entrega manual de eSIM pelo WhatsApp admin.
+    const sessAdmin = adminSessao.get(from);
+    if (sessAdmin?.etapa === 'entregar_esim_manual') {
+      await concluirEntregaEsimManualAdmin(from, msg, textoOriginal);
+      return;
+    }
+    if (['/esimpendentes', 'esimpendentes', '/pendentesesim', 'pendentesesim'].includes(texto)) {
+      await listarEsimManuaisAdmin(from);
+      return;
+    }
+    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim')) {
+      const id = partes[1];
+      if (!id) { await enviarTexto(from, 'Use assim: /entregaresim ID_DO_PEDIDO'); return; }
+      await iniciarEntregaEsimManualAdmin(from, Number(id));
       return;
     }
 
@@ -1067,7 +1024,7 @@ async function criarPedidoEsimManualRevenda(from, revenda, plano) {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
 
   notificarPainel('esim', '📱 eSIM manual pendente', `${revenda.nome} - ${plano.nome_plano}`);
-  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nAcesse o painel em *Pedidos* e clique em *📤 Entregar QR* para finalizar.`);
+  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nUse no WhatsApp admin:\n/entregaresim ${pedido.id}\n\nDepois envie a foto do QR Code ou texto da entrega.`);
 
   await enviarTexto(from, `✅ Compra aprovada
 
@@ -1509,99 +1466,18 @@ async function textoBackups() {
   return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
 }
 
-
-function validarCpf(cpf) {
-  cpf = onlyDigits(cpf);
-  if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
-  let soma = 0;
-  for (let i = 0; i < 9; i++) soma += Number(cpf[i]) * (10 - i);
-  let d1 = 11 - (soma % 11); d1 = d1 >= 10 ? 0 : d1;
-  if (d1 !== Number(cpf[9])) return false;
-  soma = 0;
-  for (let i = 0; i < 10; i++) soma += Number(cpf[i]) * (11 - i);
-  let d2 = 11 - (soma % 11); d2 = d2 >= 10 ? 0 : d2;
-  return d2 === Number(cpf[10]);
-}
-function validarCnpj(cnpj) {
-  cnpj = onlyDigits(cnpj);
-  if (cnpj.length !== 14 || /^(\d)\1{13}$/.test(cnpj)) return false;
-  const calc = (base) => {
-    const pesos = base.length === 12 ? [5,4,3,2,9,8,7,6,5,4,3,2] : [6,5,4,3,2,9,8,7,6,5,4,3,2];
-    const soma = base.split('').reduce((acc, n, i) => acc + Number(n) * pesos[i], 0);
-    const r = soma % 11;
-    return r < 2 ? 0 : 11 - r;
-  };
-  const d1 = calc(cnpj.slice(0,12));
-  const d2 = calc(cnpj.slice(0,12) + d1);
-  return d1 === Number(cnpj[12]) && d2 === Number(cnpj[13]);
-}
-function validarDocumentoPixGo(doc) {
-  const d = onlyDigits(doc);
-  return (d.length === 11 && validarCpf(d)) || (d.length === 14 && validarCnpj(d));
-}
-function extrairPixGo(resposta) {
-  const data = resposta?.data || resposta || {};
-  return {
-    data,
-    paymentId: data.payment_id || data.paymentId || data.id || data.transaction_id || resposta?.payment_id || resposta?.id || '',
-    copia: data.qr_code || data.qrcode || data.qrCode || data.pix_code || data.pix_copy_paste || data.copy_paste || data.brcode || data.payload || resposta?.qr_code || resposta?.copy_paste || ''
-  };
-}
-function headersPixGo() {
-  return { 'Content-Type': 'application/json', 'X-API-Key': PIXGO_API_KEY || process.env.PIXGO_API_KEY || '' };
-}
-
-async function gerarPix(valor, cliente, receiverCpf = '', receiverName = 'Cliente WhatsApp') {
+async function gerarPix(valor, cliente) {
   try {
-    if (!PIXGO_API_KEY && !process.env.PIXGO_API_KEY) throw new Error('PIXGO_API_KEY não configurada no Render');
-
-    const doc = onlyDigits(receiverCpf);
-    if (!validarDocumentoPixGo(doc)) {
-      throw new Error('CPF/CNPJ do pagador inválido. Envie somente números com dígito válido.');
-    }
-
-    const externalId = `pedido_${Date.now()}`;
-    const payload = {
-      amount: Number(valor),
-      description: 'Pagamento CentralUnlocker',
-      receiver_name: receiverName || 'Cliente WhatsApp',
-      receiver_cpf: doc,
-      external_id: externalId
-    };
-
-    const response = await axios.post(PIXGO_URL, payload, {
-      headers: headersPixGo(),
-      timeout: 30000,
-      validateStatus: s => s >= 200 && s < 500
-    });
-
-    console.log('PIXGO STATUS:', response.status);
-    console.log('PIXGO PAYLOAD:', payload);
-    console.log('PIXGO RESPOSTA:', response.data);
-
-    if (response.status >= 400 || response.data?.success === false) {
-      const msg = response.data?.message || response.data?.error || JSON.stringify(response.data);
-      throw new Error(msg);
-    }
-
+    const response = await axios.post(`${PIXGO_API}/payment/create`, {
+      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
+      customer_name: 'Cliente WhatsApp', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+    }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
-  } catch (e) {
-    console.log('ERRO PIXGO:', e.response?.data || e.message);
-    return { success: false, error: e.message };
-  }
+  } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
 }
 async function consultarStatus(paymentId) {
-  try {
-    const r = await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, {
-      headers: headersPixGo(),
-      timeout: 15000,
-      validateStatus: s => s >= 200 && s < 500
-    });
-    if (r.status < 400 && r.data) return r.data;
-  } catch (e) {
-    console.log('ERRO CONSULTAR PIXGO:', e.message);
-  }
-  return null;
+  try { return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, { headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000 })).data; }
+  catch (e) { return null; }
 }
 async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
   let tentativas = 0;
@@ -1698,10 +1574,7 @@ app.get('/admin', async (req, res) => {
 });
 
 function pedidoActions(o, back = '/admin/pedidos') {
-  const isEsimManual = String(o.entrada_label || '').toLowerCase().includes('esim') && !['FINALIZADO','CANCELADO'].includes(String(o.status || '').toUpperCase());
-  const entregarBtn = isEsimManual ? `<a class="btn green" href="/admin/pedido/${o.id}/entregar-esim">📤 Entregar QR</a>` : '';
-  return `${entregarBtn}
-  <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
+  return `<form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
     <select name="acao" required>
       <option value="">Escolher ação</option>
       <option value="processo">🔄 Colocar em processo</option>
@@ -1721,80 +1594,6 @@ function pedidoTable(rows, showServico = true) {
   html += '</table>';
   return html;
 }
-
-async function entregarEsimManualPeloPainel(pedidoId, textoEntrega='', arquivoPath='') {
-  const p = await get(`SELECT * FROM pedidos WHERE id=?`, [pedidoId]);
-  if (!p) throw new Error('Pedido não encontrado');
-
-  const isEsim = String(p.entrada_label || '').toLowerCase().includes('esim') || String(p.servico_nome || '').toLowerCase().includes('esim');
-  if (!isEsim) throw new Error('Esse pedido não é eSIM');
-
-  let jid = p.revenda_jid || p.cliente_jid;
-  if (!jid && p.revenda_numero) jid = numberToJid(p.revenda_numero);
-  if (!jid && p.cliente_whatsapp) jid = numberToJid(p.cliente_whatsapp);
-  if (!jid) throw new Error('WhatsApp do cliente/revenda não encontrado');
-
-  const plano = p.entrada_valor || p.servico_nome || 'eSIM';
-  const legenda = textoEntrega || `✅ Seu eSIM foi liberado!\n\n📱 Plano: ${plano}\n🆔 Pedido #${p.id}\n\n⚠️ QR Code de uso único.`;
-
-  if (arquivoPath && fs.existsSync(arquivoPath)) {
-    await enviarImagem(jid, arquivoPath, legenda);
-  } else {
-    await enviarTexto(jid, legenda);
-  }
-
-  await enviarTexto(jid, mensagemInstrucaoEsim());
-  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
-
-  const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [p.id]);
-  notificarPainel('esim', '✅ eSIM entregue pelo painel', `Pedido #${p.id} - ${plano}`);
-  await enviarParaAdmins(`✅ *eSIM entregue pelo painel*\n\nPedido: #${p.id}\nCliente/Revenda: ${atualizado.revenda_nome || atualizado.cliente_nome || '-'}\nPlano: ${plano}`);
-  return atualizado;
-}
-
-app.get('/admin/pedido/:id/entregar-esim', async (req, res) => {
-  const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
-  if (!p) return res.redirect('/admin/pedidos');
-
-  const isEsim = String(p.entrada_label || '').toLowerCase().includes('esim') || String(p.servico_nome || '').toLowerCase().includes('esim');
-  if (!isEsim) return res.send(page('Erro', `<div class="card"><h1>❌ Pedido não é eSIM</h1><a class="btn" href="/admin/pedidos">Voltar</a></div>`));
-
-  const textoPadrao = `✅ Seu eSIM foi liberado!\n\n📱 Plano: ${p.entrada_valor || p.servico_nome || 'eSIM'}\n🆔 Pedido #${p.id}\n\n⚠️ QR Code de uso único.`;
-
-  const html = `<h1>📤 Entregar eSIM pelo painel</h1>
-  <div class="card">
-    <h2>Pedido #${p.id}</h2>
-    <p><b>Revenda/Cliente:</b> ${safeHtml(p.revenda_nome || p.cliente_nome || '-')}</p>
-    <p><b>WhatsApp:</b> ${safeHtml(p.revenda_numero || p.cliente_whatsapp || '-')}</p>
-    <p><b>Plano:</b> ${safeHtml(p.entrada_valor || p.servico_nome || '-')}</p>
-    <p><b>Valor:</b> ${brl(p.valor)}</p>
-    <p><b>Status:</b> <span class="pill">${safeHtml(p.status)}</span></p>
-  </div>
-  <div class="card">
-    <h2>Enviar QR ou texto de entrega</h2>
-    <form method="post" enctype="multipart/form-data">
-      <label>Mensagem para enviar junto com o QR</label>
-      <textarea name="texto" rows="7">${safeHtml(textoPadrao)}</textarea>
-      <label>QR Code / imagem do eSIM</label>
-      <input type="file" name="qr" accept="image/*">
-      <button class="btn green" onclick="return confirm('Enviar e finalizar este pedido?')">📤 Enviar e finalizar</button>
-      <a class="btn" href="/admin/pedidos">Voltar</a>
-    </form>
-    <p class="muted">Se enviar imagem, ela será enviada ao WhatsApp da revenda/cliente. Se não enviar imagem, será enviada apenas a mensagem.</p>
-  </div>`;
-  res.send(page('Entregar eSIM', html));
-});
-
-app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr'), async (req, res) => {
-  try {
-    await entregarEsimManualPeloPainel(Number(req.params.id), String(req.body.texto || '').trim(), req.file ? path.join(ESIM_DIR, req.file.filename) : '');
-    res.redirect('/admin/pedidos?status=FINALIZADO');
-  } catch (e) {
-    console.log('❌ ERRO ENTREGAR ESIM PAINEL:', e.message);
-    res.send(page('Erro entrega eSIM', `<div class="card"><h1>❌ Erro ao entregar</h1><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/pedidos">Voltar</a></div>`));
-  }
-});
-
 app.get('/admin/pedidos', async (req, res) => {
   const status = req.query.status || '';
   const q = String(req.query.q || '').trim();
@@ -1959,7 +1758,7 @@ app.get('/admin/esim', async (req, res) => {
 
   let manualTable = '<table><tr><th>Pedido</th><th>Revenda</th><th>Plano</th><th>Valor</th><th>Status</th><th>Ação</th></tr>';
   for (const p of manuais) {
-    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><a class=\"btn green\" href=\"/admin/pedido/${p.id}/entregar-esim\">📤 Entregar QR</a></td></tr>`;
+    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><span class="muted">WhatsApp admin:<br>/entregaresim ${p.id}</span></td></tr>`;
   }
   manualTable += '</table>';
 
@@ -1970,7 +1769,7 @@ app.get('/admin/esim', async (req, res) => {
   }
   table += '</table>';
 
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Entrega manual agora é feita diretamente em Pedidos → 📤 Entregar QR.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
 
 app.post('/admin/esim/plano', async (req, res) => {
