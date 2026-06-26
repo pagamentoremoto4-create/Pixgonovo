@@ -203,68 +203,6 @@ function respostaPadraoBotzap(textos) {
 }
 
 
-
-function botzapJid(numero) {
-  const n = normalizarNumeroWhatsApp(numero);
-  return n ? `${n}@botzap` : '';
-}
-function isBotzapJid(jid) {
-  return String(jid || '').endsWith('@botzap');
-}
-function textoBotzapBody(body) {
-  return String(body?.mensagem || body?.message || body?.text || body?.body || body?.message_text || body?.messageText || '').trim();
-}
-function telefoneBotzapBody(body) {
-  return normalizarNumeroWhatsApp(body?.telefone || body?.phone || body?.senderPhone || body?.contact_phone || body?.from || body?.number || '');
-}
-function nomeBotzapBody(body) {
-  return String(body?.nome || body?.name || body?.contact_name || body?.pushName || 'Cliente').trim() || 'Cliente';
-}
-function criarMensagemBotzap({ telefone, mensagem, nome }) {
-  const jid = botzapJid(telefone);
-  return {
-    _botzap: true,
-    key: { remoteJid: jid, id: `botzap_${Date.now()}_${Math.random().toString(16).slice(2)}`, fromMe: false },
-    messageTimestamp: Math.floor(Date.now() / 1000),
-    message: { conversation: mensagem },
-    pushName: nome || 'Cliente'
-  };
-}
-function respostaPadraoBotzap(textos) {
-  const limpos = (textos || []).filter(Boolean).map(String);
-  return limpos.join('\n\n') || '✅ Recebido.';
-}
-function respostaApiBotzap(texto, extra = {}) {
-  const t = String(texto || '✅ Recebido.');
-  return { ok: true, success: true, resposta: t, text: t, message: t, data: { resposta: t, text: t, message: t }, ...extra };
-}
-function validarBotzap(req, res) {
-  if (!BOTZAP_ENABLED) { res.status(403).json(respostaApiBotzap('BotZap desativado.', { ok:false, success:false })); return false; }
-  if (BOTZAP_SECRET) {
-    const auth = req.headers.authorization || req.headers['x-botzap-secret'] || '';
-    const token = String(auth).replace(/^Bearer\s+/i, '');
-    if (token !== BOTZAP_SECRET) { res.status(401).json(respostaApiBotzap('Não autorizado.', { ok:false, success:false })); return false; }
-  }
-  return true;
-}
-async function processarMensagemBotzap(body) {
-  const telefone = telefoneBotzapBody(body);
-  const mensagem = textoBotzapBody(body);
-  const nome = nomeBotzapBody(body);
-  if (!telefone) return respostaApiBotzap('Telefone não recebido pelo BotZap.', { ok:false, success:false });
-  if (!mensagem) return respostaApiBotzap('Envie uma mensagem de texto. Digite menu para começar.', { telefone });
-
-  const from = botzapJid(telefone);
-  botzapRespostas.set(from, []);
-  const msg = criarMensagemBotzap({ telefone, mensagem, nome });
-  await tratarWhatsApp(msg, from, mensagem, mensagem.toLowerCase(), isAdminJid(from), nome);
-  const respostas = botzapRespostas.get(from) || [];
-  botzapRespostas.delete(from);
-  const resposta = respostaPadraoBotzap(respostas);
-  return respostaApiBotzap(resposta, { telefone, messages: respostas });
-}
-
-
 function numerosPossiveisDaMensagem(msg, fallbackJid) {
   const valores = [
     msg?.key?.remoteJid,
@@ -1730,87 +1668,66 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 }
 
 
-
-
-
 app.post('/webhook/botzap', async (req, res) => {
   try {
-    if (!validarBotzap(req, res)) return;
-    console.log('========== BOTZAP WEBHOOK ==========');
-    console.log(req.body);
-    const out = await processarMensagemBotzap(req.body);
-    return res.json(out);
+    if (!BOTZAP_ENABLED) return res.status(403).json({ ok: false, resposta: 'BotZap desativado.' });
+
+    if (BOTZAP_SECRET) {
+      const auth = req.headers.authorization || req.headers['x-botzap-secret'] || '';
+      const token = String(auth).replace(/^Bearer\s+/i, '');
+      if (token !== BOTZAP_SECRET) {
+        return res.status(401).json({ ok: false, resposta: 'Não autorizado.' });
+      }
+    }
+
+    const telefone = telefoneBotzapBody(req.body);
+    const mensagem = textoBotzapBody(req.body);
+    const nome = nomeBotzapBody(req.body);
+
+    console.log('========== BOTZAP ==========');
+    console.log({ telefone, nome, mensagem, body: req.body });
+
+    if (!telefone) {
+      return res.json({ ok: false, resposta: 'Telefone não recebido pelo BotZap.' });
+    }
+
+    if (!mensagem) {
+      return res.json({ ok: true, resposta: 'Envie uma mensagem de texto. Digite menu para começar.' });
+    }
+
+    const from = botzapJid(telefone);
+    botzapRespostas.set(from, []);
+
+    const msg = criarMensagemBotzap({ telefone, mensagem, nome });
+    await tratarWhatsApp(msg, from, mensagem, mensagem.toLowerCase(), isAdminJid(from), nome);
+
+    const respostas = botzapRespostas.get(from) || [];
+    botzapRespostas.delete(from);
+
+    const resposta = respostaPadraoBotzap(respostas);
+
+    return res.json({
+      ok: true,
+      success: true,
+      telefone,
+      resposta,
+      text: resposta,
+      message: resposta,
+      messages: respostas
+    });
   } catch (e) {
     console.log('❌ ERRO WEBHOOK BOTZAP:', e);
-    return res.status(500).json(respostaApiBotzap('❌ Erro interno na CentralUnlocker.', { ok:false, success:false, error:e.message }));
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      resposta: '❌ Erro interno na CentralUnlocker.',
+      error: e.message
+    });
   }
 });
 
 app.get('/webhook/botzap', (req, res) => {
-  res.json(respostaApiBotzap('Webhook BotZap CentralUnlocker online ✅'));
-});
-
-app.post('/api/botzap/menu', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const out = await processarMensagemBotzap({ ...req.body, mensagem: req.body?.mensagem || req.body?.message || 'menu' });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro no menu.', { ok:false, success:false, error:e.message }));
-  }
-});
-
-app.post('/api/botzap/message', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const out = await processarMensagemBotzap(req.body);
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro ao processar mensagem.', { ok:false, success:false, error:e.message }));
-  }
-});
-
-app.post('/api/menu', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const out = await processarMensagemBotzap({ ...req.body, mensagem: 'menu' });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro no menu.', { ok:false, success:false, error:e.message }));
-  }
-});
-
-app.post('/api/esim', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const out = await processarMensagemBotzap({ ...req.body, mensagem: req.body?.mensagem || req.body?.message || '1' });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro no eSIM.', { ok:false, success:false, error:e.message }));
-  }
-});
-
-app.post('/api/pix', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const valor = req.body?.valor || req.body?.amount || '';
-    const msg = valor ? `pagar ${valor}` : (req.body?.mensagem || req.body?.message || 'pagar');
-    const out = await processarMensagemBotzap({ ...req.body, mensagem: msg });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro no PIX.', { ok:false, success:false, error:e.message }));
-  }
-});
-
-app.post('/api/imei', async (req, res) => {
-  try {
-    if (!validarBotzap(req, res)) return;
-    const msg = req.body?.mensagem || req.body?.message || req.body?.imei || 'imei';
-    const out = await processarMensagemBotzap({ ...req.body, mensagem: msg });
-    return res.json(out);
-  } catch (e) {
-    return res.status(500).json(respostaApiBotzap('❌ Erro no IMEI.', { ok:false, success:false, error:e.message }));
-  }
+  res.json({ ok: true, resposta: 'Webhook BotZap CentralUnlocker online ✅' });
 });
 
 

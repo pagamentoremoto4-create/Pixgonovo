@@ -192,3 +192,45 @@ Se usar `BOTZAP_SECRET`, envie no header:
 ```
 
 Observação: esta versão mantém o WhatsApp antigo no código, mas permite testar o atendimento via BotZap sem depender de sessão/QR.
+
+
+# CentralUnlocker 3.0 — API limpa para BotZap
+
+Novas rotas:
+
+```txt
+POST /webhook/botzap
+POST /api/botzap/message
+POST /api/botzap/menu
+POST /api/menu
+POST /api/esim
+POST /api/pix
+POST /api/imei
+```
+
+Todas retornam:
+
+```json
+{
+  "ok": true,
+  "resposta": "texto para o cliente",
+  "text": "texto para o cliente",
+  "message": "texto para o cliente",
+  "data": {
+    "resposta": "texto para o cliente"
+  }
+}
+```
+
+No BotZap, no bloco HTTP, crie o mapeamento:
+
+```txt
+Variável: resposta
+Caminho: resposta
+```
+
+No bloco Mensagem use:
+
+```txt
+{{resposta}}
+```
