@@ -259,3 +259,8 @@ POST /api/botzap/debug
 ```
 
 Ela retorna o que o servidor conseguiu extrair do JSON.
+
+
+## Site público teste
+Rotas: `/loja`, `/loja/servico/:id`, `/loja/esim/:plano`, `/loja/pedidos`.
+Nesta primeira versão o pedido entra no painel sem gerar Pix automático. Próximo passo: PixGo no site.
