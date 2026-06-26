@@ -90,177 +90,28 @@ A edição permite alterar:
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
 
+## CentralUnlocker v4 - Cliente pelo Telegram
 
-## Correção temas
-Tema muda foto automaticamente e mantém iniciarWhatsApp intacto.
+Fluxo implementado:
+- Cliente entra no Telegram e usa `/start`.
+- Se não estiver cadastrado, o bot mostra o Telegram ID e avisa o admin.
+- Admin cadastra em `/admin/clientes-telegram`.
+- Cliente PRÉ-PAGO precisa ter saldo para comprar/solicitar.
+- Cliente PÓS-PAGO pode solicitar e o valor vira débito.
+- Menu cliente:
+  - Comprar eSIM
+  - Solicitar Serviço
+  - Meus Pedidos
+  - Financeiro
+  - Minha Conta
+  - Suporte
+- PixGo atualizado com `receiver_cpf`.
+- Pedidos do Telegram entram na tabela `pedidos`.
 
-
-## Atualização final: galeria hacker e temas extras
-
-Temas prontos:
-- Hacker Verde
-- Hacker Azul
-- Hacker Vermelho
-- Hacker Roxo
-- Gold VIP
-- Matrix Hacker
-- Cyber Security
-- Black Elite
-
-Cada tema muda automaticamente:
-- Cores
-- Fundo
-- Foto hacker
-- Cards
-- Botões
-- Menu lateral
-
-As fotos/modelos ficam salvos em `/data/themes`.
-
-
-## Atualização: entrega eSIM somente pelo painel
-
-A entrega manual pelo WhatsApp admin foi removida do fluxo principal.
-
-Agora:
-1. Revenda compra eSIM.
-2. Se não houver QR automático, o pedido fica PENDENTE.
-3. Admin recebe apenas aviso no WhatsApp.
-4. Admin entra no painel em Pedidos.
-5. Clica em **📤 Entregar QR**.
-6. Envia a imagem do QR ou texto.
-7. O sistema envia ao cliente/revenda e finaliza o pedido.
-
-
-## Correção: temas com fotos
-
-Na tela Configurações, os cards dos temas agora mostram a foto hacker de cada tema.
-Ao aplicar um tema, a imagem também é copiada para `/public/img/hacker.png`.
-Os modelos ficam salvos em `/data/themes`, então não perde ao reiniciar o Render.
-
-
-# CentralUnlocker 3.0 — Integração BotZap
-
-Esta versão adiciona o webhook:
-
+Variáveis:
 ```txt
-POST /webhook/botzap
-GET /webhook/botzap
+TELEGRAM_BOT_TOKEN=token_do_bot
+TELEGRAM_ADMIN_ID=seu_id_telegram
+TELEGRAM_AUTO_CADASTRO=0
+PIXGO_API_KEY=sua_chave
 ```
-
-Use no BotZap no bloco **HTTP (API JSON)**:
-
-```txt
-Método: POST
-URL: https://pixgonovo.onrender.com/webhook/botzap
-Headers: {"Content-Type":"application/json"}
-```
-
-Body JSON sugerido:
-
-```json
-{
-  "telefone": "{{contact_phone}}",
-  "nome": "{{contact_name}}",
-  "mensagem": "{{message_text}}",
-  "conversa": "{{conversation_id}}"
-}
-```
-
-A rota responde:
-
-```json
-{
-  "ok": true,
-  "resposta": "texto para enviar ao cliente",
-  "text": "texto para enviar ao cliente",
-  "message": "texto para enviar ao cliente",
-  "messages": []
-}
-```
-
-Variáveis opcionais:
-
-```txt
-BOTZAP_ENABLED=1
-BOTZAP_SECRET=
-```
-
-Se usar `BOTZAP_SECRET`, envie no header:
-```json
-{"Authorization":"Bearer SEU_TOKEN"}
-```
-
-Observação: esta versão mantém o WhatsApp antigo no código, mas permite testar o atendimento via BotZap sem depender de sessão/QR.
-
-
-# CentralUnlocker 3.0 — API limpa para BotZap
-
-Novas rotas:
-
-```txt
-POST /webhook/botzap
-POST /api/botzap/message
-POST /api/botzap/menu
-POST /api/menu
-POST /api/esim
-POST /api/pix
-POST /api/imei
-```
-
-Todas retornam:
-
-```json
-{
-  "ok": true,
-  "resposta": "texto para o cliente",
-  "text": "texto para o cliente",
-  "message": "texto para o cliente",
-  "data": {
-    "resposta": "texto para o cliente"
-  }
-}
-```
-
-No BotZap, no bloco HTTP, crie o mapeamento:
-
-```txt
-Variável: resposta
-Caminho: resposta
-```
-
-No bloco Mensagem use:
-
-```txt
-{{resposta}}
-```
-
-
-## Correção BotZap Universal
-
-O webhook agora aceita texto em vários campos:
-
-```txt
-mensagem, message, text, body, content, conversation,
-message_text, messageText, textMessage, caption
-```
-
-Também aceita telefone em:
-
-```txt
-telefone, phone, senderPhone, sender_phone, contact_phone,
-contactPhone, from, number, whatsapp, celular, mobile
-```
-
-Nova rota de debug:
-
-```txt
-POST /api/botzap/debug
-```
-
-Ela retorna o que o servidor conseguiu extrair do JSON.
-
-
-## Site público teste
-Rotas: `/loja`, `/loja/servico/:id`, `/loja/esim/:plano`, `/loja/pedidos`.
-Nesta primeira versão o pedido entra no painel sem gerar Pix automático. Próximo passo: PixGo no site.
