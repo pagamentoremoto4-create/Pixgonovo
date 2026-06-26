@@ -89,3 +89,80 @@ A edição permite alterar:
 - Ativo/Inativo
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
+
+
+## Correção temas
+Tema muda foto automaticamente e mantém iniciarWhatsApp intacto.
+
+
+## Atualização final: galeria hacker e temas extras
+
+Temas prontos:
+- Hacker Verde
+- Hacker Azul
+- Hacker Vermelho
+- Hacker Roxo
+- Gold VIP
+- Matrix Hacker
+- Cyber Security
+- Black Elite
+
+Cada tema muda automaticamente:
+- Cores
+- Fundo
+- Foto hacker
+- Cards
+- Botões
+- Menu lateral
+
+As fotos/modelos ficam salvos em `/data/themes`.
+
+
+## Atualização: entrega eSIM somente pelo painel
+
+A entrega manual pelo WhatsApp admin foi removida do fluxo principal.
+
+Agora:
+1. Revenda compra eSIM.
+2. Se não houver QR automático, o pedido fica PENDENTE.
+3. Admin recebe apenas aviso no WhatsApp.
+4. Admin entra no painel em Pedidos.
+5. Clica em **📤 Entregar QR**.
+6. Envia a imagem do QR ou texto.
+7. O sistema envia ao cliente/revenda e finaliza o pedido.
+
+
+## Correção PixGo 2026: receiver_cpf obrigatório
+
+Fluxo corrigido:
+
+```txt
+pagar 100
+↓
+Bot pede CPF/CNPJ do pagador
+↓
+Cliente envia CPF/CNPJ
+↓
+Bot gera PIX com receiver_cpf
+```
+
+Payload enviado:
+
+```json
+{
+  "amount": 100,
+  "description": "Pagamento CentralUnlocker",
+  "receiver_name": "Nome do cliente",
+  "receiver_cpf": "12345678901",
+  "external_id": "pedido_123"
+}
+```
+
+Variáveis no Render:
+
+```txt
+PIXGO_API_KEY=sua_chave_pixgo
+PIXGO_API=https://pixgo.org/api/v1
+PIXGO_URL=https://pixgo.org/api/v1/payment/create
+BASE_URL=https://pixgonovo.onrender.com
+```
