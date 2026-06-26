@@ -158,49 +158,30 @@ function botzapJid(numero) {
 function isBotzapJid(jid) {
   return String(jid || '').endsWith('@botzap');
 }
-function pickDeepValue(obj, keys) {
-  if (!obj || typeof obj !== 'object') return '';
-  for (const key of keys) {
-    if (obj[key] !== undefined && obj[key] !== null && String(obj[key]).trim() !== '') return obj[key];
-  }
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === 'object') {
-      const found = pickDeepValue(value, keys);
-      if (found !== undefined && found !== null && String(found).trim() !== '') return found;
-    }
-  }
-  return '';
-}
-
 function textoBotzapBody(body) {
-  const raw = pickDeepValue(body, [
-    'mensagem', 'message', 'text', 'body', 'content', 'conversation',
-    'message_text', 'messageText', 'textMessage', 'caption',
-    'last_message', 'lastMessage', 'input', 'query', 'utterance'
-  ]);
-
-  const txt = String(raw || '').trim();
-
-  // Se o BotZap enviar a variável literal no botão "Testar requisição", não trate como mensagem real.
-  if (/^\{\{.*\}\}$/.test(txt)) return '';
-
-  return txt;
+  return String(
+    body?.mensagem ||
+    body?.message ||
+    body?.text ||
+    body?.body ||
+    body?.message_text ||
+    body?.messageText ||
+    ''
+  ).trim();
 }
 function telefoneBotzapBody(body) {
-  const raw = pickDeepValue(body, [
-    'telefone', 'phone', 'senderPhone', 'sender_phone', 'contact_phone',
-    'contactPhone', 'from', 'number', 'whatsapp', 'celular', 'mobile'
-  ]);
-  return normalizarNumeroWhatsApp(raw);
+  return normalizarNumeroWhatsApp(
+    body?.telefone ||
+    body?.phone ||
+    body?.senderPhone ||
+    body?.contact_phone ||
+    body?.from ||
+    body?.number ||
+    ''
+  );
 }
 function nomeBotzapBody(body) {
-  const raw = pickDeepValue(body, [
-    'nome', 'name', 'contact_name', 'contactName', 'pushName',
-    'senderName', 'sender_name', 'profileName'
-  ]);
-  const nome = String(raw || '').trim();
-  if (!nome || /^\{\{.*\}\}$/.test(nome)) return 'Cliente';
-  return nome;
+  return String(body?.nome || body?.name || body?.contact_name || body?.pushName || 'Cliente').trim() || 'Cliente';
 }
 function criarMensagemBotzap({ telefone, mensagem, nome }) {
   const jid = botzapJid(telefone);
@@ -271,12 +252,7 @@ async function processarMensagemBotzap(body) {
   const mensagem = textoBotzapBody(body);
   const nome = nomeBotzapBody(body);
   if (!telefone) return respostaApiBotzap('Telefone não recebido pelo BotZap.', { ok:false, success:false });
-  if (!mensagem) {
-    return respostaApiBotzap(
-      'Envie uma mensagem de texto. Digite menu para começar.\n\n⚠️ Debug: o BotZap não enviou o texto da mensagem no JSON. Verifique a variável usada no corpo HTTP.',
-      { telefone, debug_body_keys: Object.keys(body || {}) }
-    );
-  }
+  if (!mensagem) return respostaApiBotzap('Envie uma mensagem de texto. Digite menu para começar.', { telefone });
 
   const from = botzapJid(telefone);
   botzapRespostas.set(from, []);
@@ -1761,11 +1737,7 @@ app.post('/webhook/botzap', async (req, res) => {
   try {
     if (!validarBotzap(req, res)) return;
     console.log('========== BOTZAP WEBHOOK ==========');
-    console.log('BODY:', req.body);
-    console.log('TELEFONE:', telefoneBotzapBody(req.body));
-    console.log('NOME:', nomeBotzapBody(req.body));
-    console.log('MENSAGEM:', textoBotzapBody(req.body));
-    console.log('====================================');
+    console.log(req.body);
     const out = await processarMensagemBotzap(req.body);
     return res.json(out);
   } catch (e) {
@@ -1776,20 +1748,6 @@ app.post('/webhook/botzap', async (req, res) => {
 
 app.get('/webhook/botzap', (req, res) => {
   res.json(respostaApiBotzap('Webhook BotZap CentralUnlocker online ✅'));
-});
-
-
-app.post('/api/botzap/debug', async (req, res) => {
-  res.json({
-    ok: true,
-    recebido: req.body,
-    extraido: {
-      telefone: telefoneBotzapBody(req.body),
-      nome: nomeBotzapBody(req.body),
-      mensagem: textoBotzapBody(req.body)
-    },
-    dica: 'Se mensagem vier vazia, a variável do BotZap no bodyJson está errada.'
-  });
 });
 
 app.post('/api/botzap/menu', async (req, res) => {

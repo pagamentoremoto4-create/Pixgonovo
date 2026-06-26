@@ -234,3 +234,28 @@ No bloco Mensagem use:
 ```txt
 {{resposta}}
 ```
+
+
+## Correção BotZap Universal
+
+O webhook agora aceita texto em vários campos:
+
+```txt
+mensagem, message, text, body, content, conversation,
+message_text, messageText, textMessage, caption
+```
+
+Também aceita telefone em:
+
+```txt
+telefone, phone, senderPhone, sender_phone, contact_phone,
+contactPhone, from, number, whatsapp, celular, mobile
+```
+
+Nova rota de debug:
+
+```txt
+POST /api/botzap/debug
+```
+
+Ela retorna o que o servidor conseguiu extrair do JSON.
