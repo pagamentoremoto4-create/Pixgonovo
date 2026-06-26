@@ -89,3 +89,106 @@ A edição permite alterar:
 - Ativo/Inativo
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
+
+
+## Correção temas
+Tema muda foto automaticamente e mantém iniciarWhatsApp intacto.
+
+
+## Atualização final: galeria hacker e temas extras
+
+Temas prontos:
+- Hacker Verde
+- Hacker Azul
+- Hacker Vermelho
+- Hacker Roxo
+- Gold VIP
+- Matrix Hacker
+- Cyber Security
+- Black Elite
+
+Cada tema muda automaticamente:
+- Cores
+- Fundo
+- Foto hacker
+- Cards
+- Botões
+- Menu lateral
+
+As fotos/modelos ficam salvos em `/data/themes`.
+
+
+## Atualização: entrega eSIM somente pelo painel
+
+A entrega manual pelo WhatsApp admin foi removida do fluxo principal.
+
+Agora:
+1. Revenda compra eSIM.
+2. Se não houver QR automático, o pedido fica PENDENTE.
+3. Admin recebe apenas aviso no WhatsApp.
+4. Admin entra no painel em Pedidos.
+5. Clica em **📤 Entregar QR**.
+6. Envia a imagem do QR ou texto.
+7. O sistema envia ao cliente/revenda e finaliza o pedido.
+
+
+## Correção: temas com fotos
+
+Na tela Configurações, os cards dos temas agora mostram a foto hacker de cada tema.
+Ao aplicar um tema, a imagem também é copiada para `/public/img/hacker.png`.
+Os modelos ficam salvos em `/data/themes`, então não perde ao reiniciar o Render.
+
+
+# CentralUnlocker 3.0 — Integração BotZap
+
+Esta versão adiciona o webhook:
+
+```txt
+POST /webhook/botzap
+GET /webhook/botzap
+```
+
+Use no BotZap no bloco **HTTP (API JSON)**:
+
+```txt
+Método: POST
+URL: https://pixgonovo.onrender.com/webhook/botzap
+Headers: {"Content-Type":"application/json"}
+```
+
+Body JSON sugerido:
+
+```json
+{
+  "telefone": "{{contact_phone}}",
+  "nome": "{{contact_name}}",
+  "mensagem": "{{message_text}}",
+  "conversa": "{{conversation_id}}"
+}
+```
+
+A rota responde:
+
+```json
+{
+  "ok": true,
+  "resposta": "texto para enviar ao cliente",
+  "text": "texto para enviar ao cliente",
+  "message": "texto para enviar ao cliente",
+  "messages": []
+}
+```
+
+Variáveis opcionais:
+
+```txt
+BOTZAP_ENABLED=1
+BOTZAP_SECRET=
+```
+
+Se usar `BOTZAP_SECRET`, envie no header:
+```json
+{"Authorization":"Bearer SEU_TOKEN"}
+```
+
+Observação: esta versão mantém o WhatsApp antigo no código, mas permite testar o atendimento via BotZap sem depender de sessão/QR.
