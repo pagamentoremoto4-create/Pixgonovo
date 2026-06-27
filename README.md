@@ -1,7 +1,11 @@
-# Pixgonovo Telegram v14
+# Pixgonovo Telegram v15
 
-Correção financeira pós-pago/pré-pago:
-- Pré-pago: desconta saldo na solicitação e estorna ao cancelar.
-- Pós-pago: não desconta na solicitação; cria débito quando o pedido é finalizado.
-- A mensagem de serviço concluído mostra débito em aberto para pós-pago quando houver valor devido.
-- Conta quitada só aparece quando o saldo/debito realmente estiver zerado.
+Correção:
+- Avisos de novos serviços agora chegam também no Telegram do admin (`ADMIN_TELEGRAM_ID`).
+- Mantém aviso no painel admin.
+- Pedidos individuais e lotes enviam notificação ao admin.
+
+Variáveis necessárias:
+- TELEGRAM_BOT_TOKEN
+- ADMIN_TELEGRAM_ID=5319809013
+- BASE_URL=https://pixgonovo.onrender.com

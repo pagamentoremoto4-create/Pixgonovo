@@ -725,8 +725,13 @@ async function salvarImagemWhatsAppEmEsim(msg) {
 }
 function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
 async function enviarParaAdmins(texto) {
+  // Envia avisos administrativos tanto para WhatsApp legado quanto para o Telegram do admin.
   for (const jid of adminsJids()) {
     try { await enviarTexto(jid, texto); } catch (e) { console.log('⚠️ Falha ao avisar admin:', jid, e.message); }
+  }
+  if (ADMIN_TELEGRAM_ID && tgBot) {
+    try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); }
+    catch (e) { console.log('⚠️ Falha ao avisar admin Telegram:', e.message); }
   }
 }
 async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null }) {
@@ -1341,11 +1346,13 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
 
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
+      await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
       await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
       return;
     }
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
+    await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
     await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
     return;
   }
