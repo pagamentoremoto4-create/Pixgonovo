@@ -543,8 +543,50 @@ async function clienteAuth(req, res, next) {
 }
 function clientePage(title, body, cliente=null) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
-  body{margin:0;background:#020617;color:#e5e7eb;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:0 auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.brand{font-weight:900;color:#00ff66;font-size:22px}.card{background:#07111f;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 8px 28px rgba(0,0,0,.3)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.btn{display:inline-block;background:#111827;color:white;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:11px 14px;text-decoration:none;font-weight:800;cursor:pointer}.btn.green{background:linear-gradient(135deg,#00ff66,#28d7ff);color:#020617}.btn.red{background:#7f1d1d}input,select,textarea{width:100%;box-sizing:border-box;border-radius:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.15);padding:12px;margin:6px 0 12px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.pill{padding:5px 9px;border-radius:999px;background:#0f172a;border:1px solid rgba(255,255,255,.12)}.muted{color:#94a3b8}.menu{display:flex;gap:8px;flex-wrap:wrap}.hero{background:radial-gradient(circle at top right,#064e3b,transparent 30%),linear-gradient(135deg,#06111f,#020617);border:1px solid rgba(0,255,102,.25);border-radius:22px;padding:22px}h1,h2{margin-top:0}@media(max-width:700px){.top{display:block}.menu .btn{display:block;width:100%;box-sizing:border-box;margin:6px 0}table{font-size:13px;display:block;overflow-x:auto}}
-  </style></head><body><div class="wrap"><div class="top"><div class="brand">CentralUnlocker</div>${cliente?`<div class="menu"><a class="btn" href="/cliente/dashboard">🏠 Início</a><a class="btn" href="/cliente/servicos">1️⃣ Serviços</a><a class="btn" href="/cliente/esim">2️⃣ Comprar eSIM</a><a class="btn" href="/cliente/historico">3️⃣ Histórico</a><a class="btn" href="/cliente/conta">4️⃣ Conta</a><a class="btn green" href="/cliente/pagamentos">💳 Pagar</a><a class="btn red" href="/cliente/logout">Sair</a></div>`:''}</div>${body}</div></body></html>`;
+  body{margin:0;background:#020617;color:#e5e7eb;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:0 auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.brand{font-weight:900;color:#00ff66;font-size:22px}.card{background:#07111f;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 8px 28px rgba(0,0,0,.3)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.btn{display:inline-block;background:#111827;color:white;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:11px 14px;text-decoration:none;font-weight:800;cursor:pointer}.btn.green{background:linear-gradient(135deg,#00ff66,#28d7ff);color:#020617}.btn.red{background:#7f1d1d}input,select,textarea{width:100%;box-sizing:border-box;border-radius:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.15);padding:12px;margin:6px 0 12px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.pill{padding:5px 9px;border-radius:999px;background:#0f172a;border:1px solid rgba(255,255,255,.12)}.muted{color:#94a3b8}.menu{display:flex;gap:8px;flex-wrap:wrap}.hero{background:radial-gradient(circle at top right,#064e3b,transparent 30%),linear-gradient(135deg,#06111f,#020617);border:1px solid rgba(0,255,102,.25);border-radius:22px;padding:22px}h1,h2{margin-top:0}.imei-list{display:grid;gap:10px;margin:8px 0 12px}.imei-row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center}.imei-label{color:#94a3b8;font-weight:800;font-size:12px}.imei-field{width:15ch!important;max-width:100%;font-family:Consolas,monospace;font-size:20px;letter-spacing:2px;text-align:center;padding:11px 10px!important;border-radius:10px!important}.imei-field.ok{border-color:#22c55e!important;box-shadow:0 0 0 3px rgba(34,197,94,.12)}.imei-field.bad{border-color:#ef4444!important}.imei-help{font-size:12px;color:#94a3b8;margin-top:-6px;margin-bottom:12px}.mini-btn{background:#111827;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:9px 12px;font-weight:800;cursor:pointer}@media(max-width:700px){.top{display:block}.menu .btn{display:block;width:100%;box-sizing:border-box;margin:6px 0}table{font-size:13px;display:block;overflow-x:auto}.imei-field{font-size:18px}}
+  </style><script>
+  function limparImeiCampo(el){
+    el.value = (el.value || '').replace(/\D/g,'').slice(0,15);
+    el.classList.remove('ok','bad');
+    if(el.value.length === 15) el.classList.add('ok');
+    else if(el.value.length > 0) el.classList.add('bad');
+    juntarImeis(el.closest('form'));
+  }
+  function juntarImeis(form){
+    if(!form) return;
+    const hidden = form.querySelector('input[name="entrada"]');
+    if(!hidden) return;
+    const valores = Array.from(form.querySelectorAll('.imei-field')).map(i => (i.value||'').replace(/\D/g,'')).filter(Boolean);
+    hidden.value = valores.join('\n');
+  }
+  function adicionarImei(btn){
+    const form = btn.closest('form');
+    const lista = form.querySelector('.imei-list');
+    const total = lista.querySelectorAll('.imei-row').length;
+    if(total >= 10){ alert('Limite máximo de 10 IMEIs.'); return; }
+    const div = document.createElement('div');
+    div.className = 'imei-row';
+    div.innerHTML = '<span class="imei-label">IMEI '+(total+1)+'</span><input class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)">';
+    lista.appendChild(div);
+    div.querySelector('input').focus();
+    juntarImeis(form);
+  }
+  </script></head><body><div class="wrap"><div class="top"><div class="brand">CentralUnlocker</div>${cliente?`<div class="menu"><a class="btn" href="/cliente/dashboard">🏠 Início</a><a class="btn" href="/cliente/servicos">1️⃣ Serviços</a><a class="btn" href="/cliente/esim">2️⃣ Comprar eSIM</a><a class="btn" href="/cliente/historico">3️⃣ Histórico</a><a class="btn" href="/cliente/conta">4️⃣ Conta</a><a class="btn green" href="/cliente/pagamentos">💳 Pagar</a><a class="btn red" href="/cliente/logout">Sair</a></div>`:''}</div>${body}</div></body></html>`;
+}
+
+function clienteEntradaHtml(s) {
+  const tipo = normalizarTipoEntrada(s.tipo_entrada);
+  const label = safeHtml(labelEntradaServico(s));
+  if (tipo === 'IMEI') {
+    return `<label>${label}</label>
+      <div class="imei-list">
+        <div class="imei-row"><span class="imei-label">IMEI 1</span><input class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)"></div>
+      </div>
+      <input type="hidden" name="entrada" required>
+      <div class="imei-help">Campo com espaço para 15 dígitos. Use “Adicionar IMEI” para enviar até 10.</div>
+      <button type="button" class="mini-btn" onclick="adicionarImei(this)">➕ Adicionar IMEI</button>`;
+  }
+  return `<label>${label}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui."></textarea>`;
 }
 
 function page(title, body) {
@@ -1780,7 +1822,7 @@ app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
   let cards='<h1>1️⃣ Serviços</h1><div class="grid">';
   for(const s of rows){
     const preco = await precoDaRevenda(c.id, s.id);
-    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui. Para IMEI, envie de 1 até 10."></textarea><button class="btn green">Solicitar</button></form></div>`;
+    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}" onsubmit="juntarImeis(this)">${clienteEntradaHtml(s)}<br><button class="btn green">Solicitar</button></form></div>`;
   }
   cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>';
   res.send(clientePage('Serviços', cards, c));
