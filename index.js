@@ -374,6 +374,7 @@ async function initDB() {
     status TEXT DEFAULT 'PENDENTE',
     motivo_cancelamento TEXT,
     cobrado INTEGER DEFAULT 0,
+    estornado INTEGER DEFAULT 0,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     finalizado_em TEXT
@@ -384,6 +385,7 @@ async function initDB() {
   await addColumnIfMissing('pedidos', 'cliente_jid', 'TEXT');
   await addColumnIfMissing('pedidos', 'motivo_cancelamento', 'TEXT');
   await addColumnIfMissing('pedidos', 'cobrado', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('pedidos', 'estornado', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('pedidos', 'finalizado_em', 'TEXT');
   await addColumnIfMissing('pedidos', 'entrada_valor', 'TEXT');
   await addColumnIfMissing('pedidos', 'tipo_entrada', "TEXT DEFAULT 'IMEI'");
@@ -1538,14 +1540,40 @@ async function adminFinalizarPedido(from, id) {
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${id}`);
   await enviarTexto(from, `✅ Pedido #${id} finalizado.`);
 }
-async function adminCancelarPedido(from, id, motivo) {
+async function cancelarPedidoComEstorno(id, motivo = 'Não informado') {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
-  if (!pedido) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
-  await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, id]);
-  const atual = await get('SELECT * FROM pedidos WHERE id=?', [id]);
+  if (!pedido) return { ok:false, erro:'Pedido não encontrado' };
+
+  if (pedido.status === 'CANCELADO') {
+    return { ok:true, pedido, jaCancelado:true, estornou:false };
+  }
+
+  const valor = Number(pedido.valor || 0);
+  const precisaEstornar = Number(pedido.cobrado || 0) === 1 && Number(pedido.estornado || 0) !== 1 && pedido.revenda_id && valor > 0;
+
+  if (precisaEstornar) {
+    await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, pedido.revenda_id]);
+    const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
+    await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [
+      pedido.revenda_id, pedido.revenda_nome || rev?.nome || '', pedido.revenda_jid || pedido.cliente_jid || '', pedido.revenda_numero || pedido.cliente_whatsapp || '', valor, `ESTORNO PEDIDO #${pedido.id}`
+    ]);
+  }
+
+  await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, estornado=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, precisaEstornar ? 1 : (pedido.estornado || 0), pedido.id]);
+  const atual = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
   await notificarPedido(atual, 'cancelar', motivo);
-  notificarPainel('cancelado', '❌ Pedido cancelado', `Pedido #${id}`);
-  await enviarTexto(from, `❌ Pedido #${id} cancelado.`);
+  if (precisaEstornar && atual.revenda_jid) {
+    const rev = await get('SELECT * FROM revendas WHERE id=?', [atual.revenda_id]);
+    await enviarTexto(atual.revenda_jid, `💰 Estorno realizado\n\nPedido #${atual.id}\nValor estornado: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}`);
+  }
+  notificarPainel('cancelado', '❌ Pedido cancelado', `Pedido #${pedido.id}${precisaEstornar ? ' - estornado ' + brl(valor) : ''}`);
+  return { ok:true, pedido:atual, estornou:precisaEstornar, valor };
+}
+
+async function adminCancelarPedido(from, id, motivo) {
+  const r = await cancelarPedidoComEstorno(id, motivo || 'Não informado');
+  if (!r.ok) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
+  await enviarTexto(from, `❌ Pedido #${id} cancelado.${r.estornou ? `\n💰 Estorno: ${brl(r.valor)}` : ''}`);
 }
 async function adminAddRevenda(from, texto) {
   const [nome, whats] = texto.split('|').map(s => s?.trim());
@@ -1773,8 +1801,21 @@ app.get('/admin', async (req, res) => {
   </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
 
+function isPedidoEsimManual(o) {
+  const servico = String(o?.servico_nome || '').toLowerCase();
+  const label = String(o?.entrada_label || '').toLowerCase();
+  const status = String(o?.status || '').toUpperCase();
+  return (
+    (label.includes('esim') || servico.includes('esim')) &&
+    !['FINALIZADO', 'CANCELADO'].includes(status)
+  );
+}
 function pedidoActions(o, back = '/admin/pedidos') {
-  return `<form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
+  const botaoQr = isPedidoEsimManual(o)
+    ? `<a class="btn purple" href="/admin/pedido/${o.id}/entregar-esim">📤 Enviar QR Code</a>`
+    : '';
+  return `${botaoQr}
+  <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
     <select name="acao" required>
       <option value="">Escolher ação</option>
       <option value="processo">🔄 Colocar em processo</option>
@@ -1789,8 +1830,8 @@ function pedidoActions(o, back = '/admin/pedidos') {
   </form>`;
 }
 function pedidoTable(rows, showServico = true) {
-  let html = `<table><tr><th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>WhatsApp</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
-  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
+  let html = `<table><tr><th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
+  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
   html += '</table>';
   return html;
 }
@@ -1824,13 +1865,62 @@ app.post('/admin/pedido/:id/acao', async (req, res) => {
   }
 
   if (acao === 'cancelar') {
-    await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, p.id]);
-    const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]);
-    await notificarPedido(a, 'cancelar', motivo);
+    await cancelarPedidoComEstorno(p.id, motivo || 'Não informado');
   }
 
   res.redirect(req.get('referer') || '/admin/pedidos');
 });
+
+app.get('/admin/pedido/:id/entregar-esim', async (req, res) => {
+  const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
+  if (!p) return res.send(page('Pedido não encontrado', '<h1>❌ Pedido não encontrado</h1><a class="btn" href="/admin/pedidos">Voltar</a>'));
+  if (!isPedidoEsimManual(p)) return res.send(page('Não é entrega manual', '<h1>❌ Este pedido não está disponível para entrega manual de eSIM.</h1><a class="btn" href="/admin/pedidos">Voltar</a>'));
+  const html = `<h1>📤 Enviar QR Code eSIM</h1>
+  <div class="card">
+    <h2>Pedido #${p.id}</h2>
+    <p><b>Cliente/Revenda:</b> ${safeHtml(p.revenda_nome || p.cliente_nome || '-')}</p>
+    <p><b>Plano:</b> ${safeHtml(p.entrada_valor || p.servico_nome || '-')}</p>
+    <p><b>Valor:</b> ${brl(p.valor)}</p>
+    <p><b>Status:</b> <span class="pill">${safeHtml(p.status)}</span></p>
+  </div>
+  <div class="card">
+    <form method="post" action="/admin/pedido/${p.id}/entregar-esim" enctype="multipart/form-data">
+      <label>Imagem do QR Code</label>
+      <input type="file" name="qr" accept="image/*">
+      <label>Texto/instruções da entrega</label>
+      <textarea name="texto" rows="7" placeholder="Opcional. Ex: instruções, código manual ou observação para o cliente."></textarea>
+      <p class="muted">Você pode enviar imagem, texto, ou os dois. Ao enviar, o pedido será finalizado e o cliente receberá no Telegram.</p>
+      <button class="btn green">✅ Enviar e finalizar pedido</button>
+      <a class="btn gray" href="/admin/pedidos">Voltar</a>
+    </form>
+  </div>`;
+  res.send(page('Enviar QR eSIM', html));
+});
+
+app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr'), async (req, res) => {
+  const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
+  if (!p || !isPedidoEsimManual(p)) return res.redirect('/admin/pedidos');
+  const destino = p.revenda_jid || p.cliente_jid || (p.revenda_numero ? numberToJid(p.revenda_numero) : '') || (p.cliente_whatsapp ? numberToJid(p.cliente_whatsapp) : '');
+  const textoExtra = String(req.body.texto || '').trim();
+  const plano = p.entrada_valor || p.servico_nome || 'eSIM';
+  const caption = `✅ eSIM entregue com sucesso!\n\n📦 Pedido #${p.id}\n📱 Plano: ${plano}\n\n${textoExtra ? textoExtra + '\n\n' : ''}⚠️ QR Code de uso único.\n🏢 CentralUnlocker`;
+
+  if (destino) {
+    if (req.file?.path) await enviarImagem(destino, req.file.path, caption);
+    else await enviarTexto(destino, caption);
+    await enviarTexto(destino, instrucoesEsim());
+  }
+
+  await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]);
+  notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || p.cliente_nome || '-'}`);
+  await avisarAdminTelegram(`✅ eSIM manual entregue
+
+Pedido #${p.id}
+Cliente: ${p.revenda_nome || p.cliente_nome || '-'}
+Plano: ${plano}`);
+  res.redirect('/admin/pedidos');
+});
+
 app.post('/admin/pedido/:id/apagar', async (req, res) => {
   const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (p) {
@@ -1841,7 +1931,7 @@ app.post('/admin/pedido/:id/apagar', async (req, res) => {
 });
 app.post('/admin/pedido/:id/processo', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="EM PROCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'processo'); } res.redirect(req.get('referer') || '/admin/pedidos'); });
 app.post('/admin/pedido/:id/finalizar', async (req, res) => { const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) await finalizarPedido(p); res.redirect(req.get('referer') || '/admin/pedidos'); });
-app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]); if (p) { await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, p.id]); const a = await get('SELECT * FROM pedidos WHERE id=?', [p.id]); await notificarPedido(a, 'cancelar', motivo); } res.redirect(req.get('referer') || '/admin/pedidos'); });
+app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; await cancelarPedidoComEstorno(req.params.id, motivo); res.redirect(req.get('referer') || '/admin/pedidos'); });
 
 
 
@@ -1884,7 +1974,7 @@ app.get('/admin/esim', async (req, res) => {
   `);
 
   const itens = await all('SELECT * FROM esim_estoque ORDER BY id DESC LIMIT 300');
-  const manuais = await all(`SELECT * FROM pedidos WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO') ORDER BY id DESC LIMIT 100`);
+  const manuais = await all(`SELECT * FROM pedidos WHERE (entrada_label='eSIM Manual' OR servico_nome LIKE '%eSIM%') AND status NOT IN ('FINALIZADO','CANCELADO') ORDER BY id DESC LIMIT 100`);
 
   let cards = '<div class="grid">';
   for (const p of planos) {
