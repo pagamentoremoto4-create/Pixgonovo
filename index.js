@@ -777,7 +777,7 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 async function cadastrarClienteTelegram(user) {
   const telegramId = String(user.id);
   const jid = tgJid(telegramId);
-  let cliente = await get('SELECT * FROM revendas WHERE jid=? OR telegram_id=?', [jid, telegramId]);
+  let cliente = await get('SELECT * FROM revendas WHERE (jid=? OR telegram_id=?) AND status != "REMOVIDA"', [jid, telegramId]);
   if (cliente) return { cliente, novo:false };
   const nome = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || `Cliente ${telegramId}`;
   let login = gerarLogin(user.username || user.first_name || 'cliente', telegramId);
@@ -994,9 +994,10 @@ async function iniciarTelegram() {
   tgBot.onText(/\/start/, async (msg) => {
     try {
       const { cliente, novo } = await cadastrarClienteTelegram(msg.from);
-      const texto = `${novo ? '🎉 Bem-vindo à Centralunlocker' : '✅ Seu cadastro já existe'}
+      if (novo) {
+        const texto = `🎉 Bem-vindo à Centralunlocker
 
-Seu cadastro foi vinculado ao Telegram.
+Seu cadastro foi criado e vinculado ao Telegram.
 
 🆔 ID Telegram: ${cliente.telegram_id || msg.from.id}
 👤 Nome: ${cliente.nome}
@@ -1006,7 +1007,12 @@ Seu cadastro foi vinculado ao Telegram.
 Use o menu abaixo para solicitar serviços, comprar eSIM, consultar histórico, ver sua conta ou gerar PIX.
 
 Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
-      await tgBot.sendMessage(msg.chat.id, texto);
+        await tgBot.sendMessage(msg.chat.id, texto);
+      } else {
+        await tgBot.sendMessage(msg.chat.id, `👋 Bem-vindo de volta, ${cliente.nome}!
+
+Escolha uma opção abaixo.`);
+      }
       await enviarMenuTelegram(msg.chat.id, cliente);
     } catch(e) { console.log('❌ /start TG:', e); }
   });
@@ -2465,7 +2471,7 @@ app.get('/admin/revendas', async (req, res) => {
     <p class="muted">Agora o cadastro principal é pelo <b>ID do Telegram</b>. O WhatsApp fica opcional e não é necessário para a revenda usar o sistema.</p>
   </div>
   <table><tr><th>ID</th><th>Nome</th><th>Telegram ID</th><th>Login</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.login || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Enviar acesso</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
+  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.login || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Enviar acesso</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico de pedidos será mantido, mas o vínculo do Telegram será apagado.')">🗑️ Remover</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/excluir-permanente"><button class="btn red" onclick="return confirm('Excluir permanentemente este cliente e todos os pedidos/pagamentos dele?')">💥 Excluir tudo</button></form></td></tr>`;
   html += '</table>';
   res.send(page('Revendas', html));
 });
@@ -2505,6 +2511,37 @@ app.post('/admin/revenda/:id/status', async (req, res) => {
     if (req.body.status === 'BLOQUEADA') await enviarTexto(jidAviso, '🔒 Sua revenda foi bloqueada. Entre em contato com a CentralUnlocker.');
     if (req.body.status === 'ATIVA') await enviarTexto(jidAviso, '🔓 Sua revenda foi reativada. Digite menu para continuar.');
   }
+  res.redirect('/admin/revendas');
+});
+
+app.post('/admin/revenda/:id/remover', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (!r) return res.redirect('/admin/revendas');
+
+  // Remove o vínculo do Telegram para permitir novo cadastro com /start.
+  // Mantém pedidos, pagamentos e histórico financeiro pelo revenda_id antigo.
+  const sufixo = `removido_${r.id}_${Date.now()}`;
+  await run(`UPDATE revendas SET
+    status='REMOVIDA',
+    telegram_id=NULL,
+    jid=NULL,
+    whatsapp=NULL,
+    login=?,
+    senha=NULL,
+    atualizado_em=CURRENT_TIMESTAMP
+    WHERE id=?`, [sufixo, r.id]);
+
+  pedidoSessao.delete(tgJid(r.telegram_id || ''));
+  pedidoSessao.delete(String(r.telegram_id || ''));
+  res.redirect('/admin/revendas');
+});
+
+app.post('/admin/revenda/:id/excluir-permanente', async (req, res) => {
+  const id = req.params.id;
+  await run('DELETE FROM precos_revenda WHERE revenda_id=?', [id]);
+  await run('DELETE FROM pagamentos WHERE revenda_id=?', [id]);
+  await run('DELETE FROM pedidos WHERE revenda_id=?', [id]);
+  await run('DELETE FROM revendas WHERE id=?', [id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/editar', async (req, res) => {
