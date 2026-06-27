@@ -795,6 +795,195 @@ Telegram ID: ${telegramId}
 Usuário: ${login}`);
   return { cliente, novo:true };
 }
+
+function menuTelegramTexto(cliente) {
+  return `🏠 MENU PRINCIPAL
+
+Olá, ${cliente?.nome || 'cliente'}!
+
+1️⃣ Serviços
+2️⃣ Comprar eSIM
+3️⃣ Histórico
+4️⃣ Conta
+5️⃣ Pagar
+6️⃣ Suporte
+
+Digite o número da opção.`;
+}
+function tecladoTelegramMenu() {
+  return {
+    reply_markup: {
+      keyboard: [
+        ['1️⃣ Serviços', '2️⃣ Comprar eSIM'],
+        ['3️⃣ Histórico', '4️⃣ Conta'],
+        ['5️⃣ Pagar', '6️⃣ Suporte']
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false
+    }
+  };
+}
+async function enviarMenuTelegram(chatId, cliente) {
+  if (!tgBot) return;
+  await tgBot.sendMessage(chatId, menuTelegramTexto(cliente), tecladoTelegramMenu());
+}
+function normalizarOpcaoTelegram(texto) {
+  const t = String(texto || '').trim().toLowerCase();
+  if (t.includes('serviço') || t.includes('servico')) return '1';
+  if (t.includes('esim')) return '2';
+  if (t.includes('histórico') || t.includes('historico')) return '3';
+  if (t.includes('conta')) return '4';
+  if (t.includes('pagar') || t.includes('pagamento') || t.includes('pix')) return '5';
+  if (t.includes('suporte')) return '6';
+  return t.replace(/[️⃣\s]/g, '').slice(0, 20);
+}
+async function processarMensagemTelegram(msg) {
+  if (!msg?.from?.id || !msg?.chat?.id || !msg.text) return;
+  const textoOriginal = String(msg.text || '').trim();
+  const texto = textoOriginal.toLowerCase().trim();
+  if (!textoOriginal) return;
+  if (texto === '/start' || texto === '/senha') return;
+
+  const { cliente } = await cadastrarClienteTelegram(msg.from);
+  const from = tgJid(msg.from.id);
+  const opcao = normalizarOpcaoTelegram(textoOriginal);
+
+  if (['cancelar', 'sair', 'voltar'].includes(texto)) {
+    pedidoSessao.delete(from);
+    await tgBot.sendMessage(msg.chat.id, '✅ Operação cancelada.');
+    await enviarMenuTelegram(msg.chat.id, cliente);
+    return;
+  }
+
+  if (texto === '/menu' || texto === 'menu' || texto === 'início' || texto === 'inicio') {
+    pedidoSessao.delete(from);
+    await enviarMenuTelegram(msg.chat.id, cliente);
+    return;
+  }
+
+  if (texto.startsWith('pagar') || texto.startsWith('/pagar')) {
+    const partes = textoOriginal.trim().split(/\s+/);
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50');
+      return;
+    }
+    await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
+    const pix = await gerarPix(valor, `Telegram ${cliente.nome}`);
+    if (!pix) { await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.'); return; }
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+    if (paymentId) {
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
+      verificarPagamento(paymentId, cliente.id, from, valor);
+    }
+    await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
+    await tgBot.sendMessage(msg.chat.id, qrCode || 'PIX indisponível');
+    return;
+  }
+
+  const sess = pedidoSessao.get(from);
+
+  if (sess?.etapa === 'menu') {
+    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '5') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
+    if (opcao === '6') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '🆘 Suporte: fale com o administrador da Centralunlocker.'); return; }
+  }
+
+  if (!sess) {
+    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '3') { await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '5') { await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
+    if (opcao === '6') { await tgBot.sendMessage(msg.chat.id, '🆘 Suporte: fale com o administrador da Centralunlocker.'); return; }
+    pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarMenuTelegram(msg.chat.id, cliente);
+    return;
+  }
+
+  if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
+    const planos = await planosEsimDisponiveis();
+    const plano = planos[Number(opcao) - 1];
+    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
+    return;
+  }
+
+  if (sess?.etapa === 'esim_confirmar') {
+    if (opcao === '2' || texto === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
+    pedidoSessao.delete(from);
+    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+    await entregarEsimRevenda(from, revAtual || cliente, sess.plano);
+    return;
+  }
+
+  if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
+    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+    const servico = servicos[Number(opcao) - 1];
+    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
+    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    if (tipoEntrada === 'IMEI') {
+      await enviarTexto(from, `📱 Envie os IMEIs\n\n• Máximo 5 IMEIs\n• 1 IMEI por linha\n• Cada IMEI precisa ter 15 números\n\nExemplo:\n353625361425365\n353625361425366`);
+    } else {
+      await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+    }
+    return;
+  }
+
+  if (sess?.etapa === 'entrada') {
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
+    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    const validacao = validarEntradaServico(servico, textoOriginal);
+    if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
+
+    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+    const valor = await precoDaRevenda(cliente.id, servico.id);
+    const totalPedido = valor * validacao.entradas.length;
+    if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
+      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      return;
+    }
+
+    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+    const entradaLabel = labelEntradaServico(servico);
+    const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+    let criados = [];
+    let duplicados = [];
+    for (const entrada of validacao.entradas) {
+      const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
+      if (tipoEntrada === 'IMEI') {
+        const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada]);
+        if (duplicado) { duplicados.push(entrada); continue; }
+      }
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado)
+        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 1)`, [cliente.id, cliente.nome, from, cliente.telegram_id || String(msg.from.id), servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor]);
+      criados.push({ id: ins.lastID, entrada });
+    }
+
+    pedidoSessao.delete(from);
+    if (!criados.length) { await enviarTexto(from, `⚠️ Nenhum pedido novo foi criado.${duplicados.length ? `\n\nJá estavam em andamento:\n${duplicados.join('\n')}` : ''}`); return; }
+    if (criados.length === 1) {
+      notificarPainel('pedido', '🔔 Novo pedido Telegram', `${cliente.nome} - ${servico.nome}`);
+      await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
+      await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+      return;
+    }
+    notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
+    await avisarNovoLoteAdmins(cliente, servico, criados.length, valor * criados.length);
+    await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
+    return;
+  }
+
+  await enviarMenuTelegram(msg.chat.id, cliente);
+}
+
 async function iniciarTelegram() {
   await initDB();
   if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
@@ -822,6 +1011,7 @@ Menu do site:
 
 Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
       await tgBot.sendMessage(msg.chat.id, texto);
+      await enviarMenuTelegram(msg.chat.id, cliente);
     } catch(e) { console.log('❌ /start TG:', e); }
   });
   tgBot.onText(/\/senha/, async (msg) => {
@@ -834,10 +1024,15 @@ Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
 🌐 Painel: ${CLIENTE_PANEL_URL}`);
   });
   tgBot.onText(/\/menu/, async (msg) => {
-    await tgBot.sendMessage(msg.chat.id, `🌐 Acesse seu painel:
-${CLIENTE_PANEL_URL}
-
-Use /senha para recuperar login e senha.`);
+    const { cliente } = await cadastrarClienteTelegram(msg.from);
+    await enviarMenuTelegram(msg.chat.id, cliente);
+  });
+  tgBot.on('message', async (msg) => {
+    try { await processarMensagemTelegram(msg); }
+    catch (e) {
+      console.log('❌ ERRO FLUXO TG:', e);
+      try { await tgBot.sendMessage(msg.chat.id, '❌ Erro interno. Tente novamente ou digite /menu.'); } catch (_) {}
+    }
   });
 }
 
@@ -1274,7 +1469,7 @@ async function entregarEsimRevenda(from, revenda, plano) {
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
   const qrPath = caminhoArquivoEsim(item.arquivo_qr);
   await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
-  if (fs.existsSync(qrPath)) await sock.sendMessage(from, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.` });
+  if (fs.existsSync(qrPath)) await enviarImagem(from, qrPath, `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.`);
   await enviarTexto(from, mensagemInstrucaoEsim());
 }
 
