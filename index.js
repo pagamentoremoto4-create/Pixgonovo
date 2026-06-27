@@ -2012,7 +2012,7 @@ app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr'), async (req,
   if (destino) {
     if (req.file?.path) await enviarImagem(destino, req.file.path, caption);
     else await enviarTexto(destino, caption);
-    await enviarTexto(destino, instrucoesEsim());
+    await enviarTexto(destino, mensagemInstrucaoEsim());
   }
 
   await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [p.id]);
