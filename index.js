@@ -184,6 +184,7 @@ function normalizarTipoRevenda(v) {
 }
 function labelTipoRevenda(v) { return normalizarTipoRevenda(v) === 'PRE_PAGO' ? 'Pré-pago' : 'Pós-pago'; }
 function isRevendaPrePaga(revenda) { return normalizarTipoRevenda(revenda?.tipo_revenda) === 'PRE_PAGO'; }
+function isRevendaPosPaga(revenda) { return normalizarTipoRevenda(revenda?.tipo_revenda) === 'POS_PAGO'; }
 function textoSaldoInsuficiente(revenda, valor, item='serviço') {
   const saldo = Number(revenda?.saldo || 0);
   const falta = Math.max(0, Number(valor || 0) - saldo);
