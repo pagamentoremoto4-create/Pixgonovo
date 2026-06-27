@@ -239,17 +239,49 @@ function iconeEntradaServico(servico) {
   return '📱';
 }
 function extrairImeisEmLote(texto) {
-  const matches = String(texto || '').match(/\d{15}/g) || [];
-  return [...new Set(matches)];
+  const bruto = String(texto || '').trim();
+  if (!bruto) return [];
+
+  // Correção automática: remove tudo que não for número.
+  // Aceita 1 IMEI por linha, separado por espaço, vírgula, ponto, traço etc.
+  const partes = bruto
+    .split(/[\n,;]+/)
+    .map(linha => linha.replace(/\D/g, '').trim())
+    .filter(Boolean);
+
+  let imeis = [];
+  if (partes.length <= 1) {
+    const todos = bruto.replace(/\D/g, '');
+    if (todos.length > 15 && todos.length % 15 === 0) {
+      imeis = todos.match(/.{15}/g) || [];
+    } else if (todos) {
+      imeis = [todos];
+    }
+  } else {
+    for (const item of partes) {
+      if (item.length > 15 && item.length % 15 === 0) {
+        imeis.push(...(item.match(/.{15}/g) || []));
+      } else {
+        imeis.push(item);
+      }
+    }
+  }
+
+  return [...new Set(imeis)];
 }
 function validarEntradaServico(servico, textoOriginal) {
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   const bruto = String(textoOriginal || '').trim();
   if (tipo === 'IMEI') {
     const imeis = extrairImeisEmLote(bruto);
-    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie 1 IMEI com 15 dígitos ou vários IMEIs, um por linha.\n\nExemplo:\n356789123456789\n356789123456780\n\nDigite cancelar para sair.` };
-    const sobras = bruto.replace(/\d{15}/g, '').replace(/[\s,;.\-_/]+/g, '');
-    if (sobras) return { ok: false, erro: `❌ Envio em lote aceito somente com IMEIs de 15 dígitos.\n\nEnvie um IMEI por linha ou separados por espaço.\n\nDigite cancelar para sair.` };
+    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie de 1 até 10 IMEIs.\nCada IMEI precisa ter 15 números.\n\nExemplo:\n356789123456789\n356789123456780` };
+    if (imeis.length > 10) return { ok: false, erro: `❌ Limite excedido.\n\nVocê pode enviar no máximo 10 IMEIs por pedido.\nVocê enviou: ${imeis.length}` };
+
+    const invalidos = imeis.filter(i => !/^\d{15}$/.test(i));
+    if (invalidos.length) {
+      return { ok: false, erro: `❌ IMEI inválido.\n\nOs IMEIs abaixo foram corrigidos automaticamente, mas não ficaram com 15 dígitos:\n${invalidos.join('\n')}\n\nCorrija e tente novamente.` };
+    }
+
     return { ok: true, entradas: imeis };
   }
   if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
@@ -999,7 +1031,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
     if (tipoEntrada === 'IMEI') {
       await enviarTexto(from, `📱 Informe o IMEI:
 
-Pode enviar 1 IMEI ou vários em lote, um por linha.`);
+Pode enviar de 1 até 10 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
     } else {
       await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
     }
@@ -1748,7 +1780,7 @@ app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
   let cards='<h1>1️⃣ Serviços</h1><div class="grid">';
   for(const s of rows){
     const preco = await precoDaRevenda(c.id, s.id);
-    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui"></textarea><button class="btn green">Solicitar</button></form></div>`;
+    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui. Para IMEI, envie de 1 até 10."></textarea><button class="btn green">Solicitar</button></form></div>`;
   }
   cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>';
   res.send(clientePage('Serviços', cards, c));
@@ -1758,12 +1790,27 @@ app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{
   const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);
   if(!s) return res.redirect('/cliente/servicos');
   const valor=await precoDaRevenda(c.id, s.id);
-  if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c));
-  const entrada=String(req.body.entrada||'').trim();
-  const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE', 1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,entrada,entrada,normalizarTipoEntrada(s.tipo_entrada),labelEntradaServico(s),valor]);
-  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]);
-  await enviarTexto(c.jid, `📦 Pedido recebido\n\nPedido #${ins.lastID}\nServiço: ${s.nome}\nValor: ${brl(valor)}\nStatus: PENDENTE`);
-  await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nServiço: ${s.nome}\nValor: ${brl(valor)}\nEntrada: ${entrada}`);
+  const validacao = validarEntradaServico(s, req.body.entrada || '');
+  if(!validacao.ok) {
+    return res.send(clientePage('Entrada inválida', `<div class="card"><h1>❌ Entrada inválida</h1><pre style="white-space:pre-wrap">${safeHtml(validacao.erro)}</pre><a class="btn" href="/cliente/servicos">Voltar</a></div>`, c));
+  }
+  const totalPedido = valor * validacao.entradas.length;
+  if(isRevendaPrePaga(c) && Number(c.saldo||0) < totalPedido) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor total: ${brl(totalPedido)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c));
+
+  const tipoEntrada = normalizarTipoEntrada(s.tipo_entrada);
+  const entradaLabel = labelEntradaServico(s);
+  const loteId = validacao.entradas.length > 1 ? `SITE-LOTE-${Date.now()}` : null;
+  const criados = [];
+
+  for (const entrada of validacao.entradas) {
+    const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
+    const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDENTE',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,imeiBanco,entrada,tipoEntrada,entradaLabel,loteId,valor]);
+    criados.push({ id: ins.lastID, entrada });
+  }
+
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[totalPedido,c.id]);
+  await enviarTexto(c.jid, `📦 Pedido recebido\n\nServiço: ${s.nome}\nQuantidade: ${criados.length}\nValor total: ${brl(totalPedido)}\nStatus: PENDENTE\n\nPedidos: ${criados.map(x => '#'+x.id).join(', ')}`);
+  await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nCliente: ${c.nome}\nServiço: ${s.nome}\nQuantidade: ${criados.length}\nValor total: ${brl(totalPedido)}\nEntradas:\n${criados.map(x => x.entrada).join('\n')}`);
   notificarPainel('pedido','🔔 Novo pedido site',`${c.nome} - ${s.nome}`);
   res.redirect('/cliente/historico');
 });
