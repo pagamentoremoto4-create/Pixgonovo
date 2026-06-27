@@ -11,6 +11,9 @@ const path = require('path');
 const cron = require('node-cron');
 const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
+const crypto = require('crypto');
+let TelegramBot = null;
+try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
 
 const {
   default: makeWASocket,
@@ -52,6 +55,9 @@ const ADMIN_NUMBERS = Array.from(new Set([
 const ADMIN_PANEL_USER = process.env.ADMIN_PANEL_USER || 'admin';
 const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || '';
+const ADMIN_TELEGRAM_ID = String(process.env.ADMIN_TELEGRAM_ID || process.env.ADMIN_ID || '').trim();
+const CLIENTE_PANEL_URL = process.env.CLIENTE_PANEL_URL || (BASE_URL ? `${BASE_URL}/cliente` : '/cliente');
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -59,6 +65,7 @@ if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: tr
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
 
 let sock = null;
+let tgBot = null;
 let qrCodeBase64 = null;
 let conectado = false;
 let db = new sqlite3.Database(DB_PATH);
@@ -73,6 +80,7 @@ const TEMAS_PAINEL = {
 
 const pedidoSessao = new Map();
 const adminSessao = new Map();
+const clienteSessoes = new Map();
 
 const uploadEsim = multer({
   storage: multer.diskStorage({
@@ -140,6 +148,11 @@ function jidToNumber(jid) {
   return normalizarNumeroWhatsApp(raw);
 }
 function numberToJid(n) { const d = normalizarNumeroWhatsApp(n); return d ? `${d}@s.whatsapp.net` : ''; }
+function tgJid(id) { return id ? `tg:${String(id).replace(/^tg:/,'')}` : ''; }
+function isTgJid(jid) { return String(jid || '').startsWith('tg:'); }
+function tgIdFromJid(jid) { return String(jid || '').replace(/^tg:/, ''); }
+function gerarSenha(tam=8) { return crypto.randomBytes(12).toString('base64url').replace(/[^a-zA-Z0-9]/g,'').slice(0,tam); }
+function gerarLogin(nome, id) { const base = String(nome || 'cliente').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'').slice(0,10) || 'cliente'; return `${base}${String(id).slice(-4)}`; }
 function numerosPossiveisDaMensagem(msg, fallbackJid) {
   const valores = [
     msg?.key?.remoteJid,
@@ -317,6 +330,9 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'status', "TEXT DEFAULT 'ATIVA'");
   await addColumnIfMissing('revendas', 'saldo', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'POS_PAGO'");
+  await addColumnIfMissing('revendas', 'telegram_id', 'TEXT');
+  await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
+  await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
 
   await run(`CREATE TABLE IF NOT EXISTS servicos_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,6 +492,27 @@ function basicAuth(req, res, next) {
   return res.status(401).send('Login necessário');
 }
 
+
+function getClienteToken(req) {
+  const cookie = req.headers.cookie || '';
+  const m = cookie.match(/(?:^|; )cliente_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+async function clienteAuth(req, res, next) {
+  const token = getClienteToken(req);
+  const id = clienteSessoes.get(token);
+  if (!id) return res.redirect('/cliente');
+  const cliente = await get('SELECT * FROM revendas WHERE id=? AND status != "BLOQUEADA"', [id]);
+  if (!cliente) return res.redirect('/cliente?sair=1');
+  req.cliente = cliente;
+  next();
+}
+function clientePage(title, body, cliente=null) {
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
+  body{margin:0;background:#020617;color:#e5e7eb;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1100px;margin:0 auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.brand{font-weight:900;color:#00ff66;font-size:22px}.card{background:#07111f;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 8px 28px rgba(0,0,0,.3)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.btn{display:inline-block;background:#111827;color:white;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:11px 14px;text-decoration:none;font-weight:800;cursor:pointer}.btn.green{background:linear-gradient(135deg,#00ff66,#28d7ff);color:#020617}.btn.red{background:#7f1d1d}input,select,textarea{width:100%;box-sizing:border-box;border-radius:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.15);padding:12px;margin:6px 0 12px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.pill{padding:5px 9px;border-radius:999px;background:#0f172a;border:1px solid rgba(255,255,255,.12)}.muted{color:#94a3b8}.menu{display:flex;gap:8px;flex-wrap:wrap}.hero{background:radial-gradient(circle at top right,#064e3b,transparent 30%),linear-gradient(135deg,#06111f,#020617);border:1px solid rgba(0,255,102,.25);border-radius:22px;padding:22px}h1,h2{margin-top:0}@media(max-width:700px){.top{display:block}.menu .btn{display:block;width:100%;box-sizing:border-box;margin:6px 0}table{font-size:13px;display:block;overflow-x:auto}}
+  </style></head><body><div class="wrap"><div class="top"><div class="brand">CentralUnlocker</div>${cliente?`<div class="menu"><a class="btn" href="/cliente/dashboard">🏠 Início</a><a class="btn" href="/cliente/servicos">1️⃣ Serviços</a><a class="btn" href="/cliente/esim">2️⃣ Comprar eSIM</a><a class="btn" href="/cliente/historico">3️⃣ Histórico</a><a class="btn" href="/cliente/conta">4️⃣ Conta</a><a class="btn green" href="/cliente/pagamentos">💳 Pagar</a><a class="btn red" href="/cliente/logout">Sair</a></div>`:''}</div>${body}</div></body></html>`;
+}
+
 function page(title, body) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -483,7 +520,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:20px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:31px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:12px 14px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:32px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:9px 13px;border-radius:12px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{padding:12px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:12px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:18px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:42px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:18px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:24px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:30px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">🏪 Revendas</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -552,11 +589,33 @@ async function listarServicosTexto(revenda) {
   texto += '\nDigite o número do serviço.';
   return texto;
 }
-async function enviarTexto(to, text) { if (sock && to) await sock.sendMessage(to, { text }); }
+async function enviarTexto(to, text) {
+  try {
+    if (isTgJid(to)) {
+      if (!tgBot) return false;
+      await tgBot.sendMessage(tgIdFromJid(to), String(text || ''));
+      return true;
+    }
+    if (sock && to) { await sock.sendMessage(to, { text }); return true; }
+  } catch (e) { console.log('❌ ERRO ENVIAR TEXTO:', e.message); }
+  return false;
+}
 async function enviarImagem(to, filePath, caption='') {
-  if (!sock || !to || !filePath || !fs.existsSync(filePath)) return false;
-  await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption });
-  return true;
+  try {
+    if (!to || !filePath || !fs.existsSync(filePath)) return false;
+    if (isTgJid(to)) {
+      if (!tgBot) return false;
+      await tgBot.sendPhoto(tgIdFromJid(to), fs.createReadStream(filePath), { caption: String(caption || '') });
+      return true;
+    }
+    if (sock) { await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption }); return true; }
+  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM:', e.message); }
+  return false;
+}
+async function avisarAdminTelegram(texto) {
+  if (ADMIN_TELEGRAM_ID && tgBot) {
+    try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); } catch(e) { console.log('❌ ADMIN TG:', e.message); }
+  }
 }
 
 async function streamToBuffer(stream) {
@@ -629,6 +688,73 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 📍 Status: PENDENTE
 
 🏢 Centralunlocker`);
+}
+
+
+async function cadastrarClienteTelegram(user) {
+  const telegramId = String(user.id);
+  const jid = tgJid(telegramId);
+  let cliente = await get('SELECT * FROM revendas WHERE jid=? OR telegram_id=?', [jid, telegramId]);
+  if (cliente) return { cliente, novo:false };
+  const nome = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || `Cliente ${telegramId}`;
+  let login = gerarLogin(user.username || user.first_name || 'cliente', telegramId);
+  const existe = await get('SELECT id FROM revendas WHERE login=?', [login]);
+  if (existe) login = `${login}${Date.now().toString().slice(-3)}`;
+  const senha = gerarSenha(8);
+  const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda, telegram_id, limite_credito) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, "PRE_PAGO", ?, 0)', [nome, telegramId, jid, login, senha, telegramId]);
+  cliente = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+  notificarPainel('cliente', '👤 Novo cliente Telegram', `${nome} - ${telegramId}`);
+  await avisarAdminTelegram(`👤 Novo cliente cadastrado
+
+Nome: ${nome}
+Telegram ID: ${telegramId}
+Usuário: ${login}`);
+  return { cliente, novo:true };
+}
+async function iniciarTelegram() {
+  await initDB();
+  if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
+    console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
+    return;
+  }
+  tgBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+  console.log('✅ BOT TELEGRAM INICIADO');
+  tgBot.onText(/\/start/, async (msg) => {
+    try {
+      const { cliente, novo } = await cadastrarClienteTelegram(msg.from);
+      const texto = `${novo ? '🎉 Bem-vindo à Centralunlocker' : '✅ Seu cadastro já existe'}
+
+👤 Usuário: ${cliente.login}
+🔑 Senha: ${cliente.senha}
+🌐 Painel do cliente:
+${CLIENTE_PANEL_URL}
+
+Menu do site:
+1️⃣ Serviços
+2️⃣ Comprar eSIM
+3️⃣ Histórico
+4️⃣ Conta
+💳 Pagamentos
+
+Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
+      await tgBot.sendMessage(msg.chat.id, texto);
+    } catch(e) { console.log('❌ /start TG:', e); }
+  });
+  tgBot.onText(/\/senha/, async (msg) => {
+    const cliente = await get('SELECT * FROM revendas WHERE telegram_id=? OR jid=?', [String(msg.from.id), tgJid(msg.from.id)]);
+    if (!cliente) return tgBot.sendMessage(msg.chat.id, 'Envie /start para criar seu cadastro.');
+    await tgBot.sendMessage(msg.chat.id, `🔐 Seus dados de acesso
+
+👤 Usuário: ${cliente.login}
+🔑 Senha: ${cliente.senha}
+🌐 Painel: ${CLIENTE_PANEL_URL}`);
+  });
+  tgBot.onText(/\/menu/, async (msg) => {
+    await tgBot.sendMessage(msg.chat.id, `🌐 Acesse seu painel:
+${CLIENTE_PANEL_URL}
+
+Use /senha para recuperar login e senha.`);
+  });
 }
 
 async function iniciarWhatsApp() {
@@ -1536,14 +1662,50 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 }
 
 app.get('/', (req, res) => {
-  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 ESCANEIE O QR</h1><img src="${qrCodeBase64}" width="300"><p>WhatsApp > Aparelhos conectados</p></div>`));
-  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${conectado ? 'WhatsApp conectado ✅' : 'Aguardando QR...'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
+  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 WhatsApp desativado</h1><p>Este projeto agora usa Telegram.</p></div>`));
+  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
 });
 
 
 // Webhook PixGo - responde HTTP 200 para evitar alerta de falha.
 // O sistema já confirma pagamento por consulta automática, então este endpoint
 // serve para receber notificações da PixGo sem quebrar o fluxo atual.
+
+app.get('/cliente', (req, res) => {
+  const token = getClienteToken(req);
+  if (clienteSessoes.has(token)) return res.redirect('/cliente/dashboard');
+  const erro = req.query.erro ? '<p style="color:#fca5a5">Login ou senha inválidos.</p>' : '';
+  res.send(clientePage('Cliente', `<div class="hero"><h1>🌐 Painel do Cliente</h1><p>Acesse sua conta CentralUnlocker.</p></div><div class="card" style="max-width:430px;margin:22px auto"><h2>Entrar</h2>${erro}<form method="post" action="/cliente/login"><label>Usuário</label><input name="login" required><label>Senha</label><input name="senha" type="password" required><button class="btn green" style="width:100%">Entrar</button></form><p class="muted">Ainda não tem conta? Envie /start no bot do Telegram.</p></div>`));
+});
+app.post('/cliente/login', async (req, res) => {
+  const login = String(req.body.login || '').trim();
+  const senha = String(req.body.senha || '').trim();
+  const cliente = await get('SELECT * FROM revendas WHERE login=? AND senha=? AND status != "BLOQUEADA"', [login, senha]);
+  if (!cliente) return res.redirect('/cliente?erro=1');
+  const token = crypto.randomBytes(24).toString('hex');
+  clienteSessoes.set(token, cliente.id);
+  await run('UPDATE revendas SET ultimo_acesso=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
+  res.setHeader('Set-Cookie', `cliente_token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+  res.redirect('/cliente/dashboard');
+});
+app.get('/cliente/logout', (req, res) => { const t=getClienteToken(req); if(t) clienteSessoes.delete(t); res.setHeader('Set-Cookie','cliente_token=; Path=/; Max-Age=0'); res.redirect('/cliente'); });
+app.get('/cliente/dashboard', clienteAuth, async (req, res) => {
+  const c=req.cliente;
+  const pend = await get('SELECT COUNT(*) qtd FROM pedidos WHERE (revenda_id=? OR cliente_jid=?) AND status NOT IN ("FINALIZADO","CANCELADO")', [c.id, c.jid]);
+  const fin = await get('SELECT COUNT(*) qtd FROM pedidos WHERE (revenda_id=? OR cliente_jid=?) AND status="FINALIZADO"', [c.id, c.jid]);
+  const pags = await all('SELECT * FROM pagamentos WHERE revenda_id=? ORDER BY id DESC LIMIT 5', [c.id]);
+  let pg=''; for(const p of pags) pg += `<tr><td>${dateBR(p.criado_em)}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem||'pixgo')}</td></tr>`;
+  res.send(clientePage('Dashboard', `<div class="hero"><h1>👋 Bem-vindo, ${safeHtml(c.nome)}</h1><p>Escolha uma opção no menu para solicitar serviços, comprar eSIM ou pagar saldo.</p></div><div class="grid"><div class="card"><h2>💰 Saldo</h2><h1>${brl(c.saldo)}</h1><p class="muted">Tipo: ${safeHtml(labelTipoRevenda(c.tipo_revenda))}</p></div><div class="card"><h2>📦 Em andamento</h2><h1>${pend.qtd}</h1></div><div class="card"><h2>✅ Finalizados</h2><h1>${fin.qtd}</h1></div></div><div class="card"><h2>💳 Últimos pagamentos</h2><table><tr><th>Data</th><th>Valor</th><th>Origem</th></tr>${pg || '<tr><td colspan="3">Nenhum pagamento ainda.</td></tr>'}</table></div>`, c));
+});
+app.get('/cliente/conta', clienteAuth, async (req,res)=>{ const c=req.cliente; res.send(clientePage('Conta', `<h1>4️⃣ Conta</h1><div class="card"><p><b>Nome:</b> ${safeHtml(c.nome)}</p><p><b>Usuário:</b> ${safeHtml(c.login)}</p><p><b>Telegram ID:</b> ${safeHtml(c.telegram_id || c.whatsapp || '')}</p><p><b>Tipo:</b> ${safeHtml(labelTipoRevenda(c.tipo_revenda))}</p><p><b>Saldo:</b> ${brl(c.saldo)}</p><p><b>Status:</b> ${safeHtml(c.status)}</p></div>`, c)); });
+app.get('/cliente/historico', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pedidos WHERE revenda_id=? OR cliente_jid=? ORDER BY id DESC LIMIT 100',[c.id,c.jid]); let html='<h1>3️⃣ Histórico</h1><div class="card"><table><tr><th>Pedido</th><th>Serviço</th><th>Entrada</th><th>Valor</th><th>Status</th></tr>'; for(const o of rows) html+=`<tr><td>#${o.id}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.entrada_valor||o.imei||'-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`; html += rows.length ? '</table></div>' : '<tr><td colspan="5">Nenhum pedido ainda.</td></tr></table></div>'; res.send(clientePage('Histórico', html, c)); });
+app.get('/cliente/servicos', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY nome ASC'); let cards='<h1>1️⃣ Serviços</h1><div class="grid">'; for(const s of rows){ cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(s.preco_padrao)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui"></textarea><button class="btn green">Solicitar</button></form></div>`;} cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>'; res.send(clientePage('Serviços', cards, c)); });
+app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{ const c=req.cliente; const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]); if(!s) return res.redirect('/cliente/servicos'); const valor=Number(s.preco_padrao||0); if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c)); const entrada=String(req.body.entrada||'').trim(); const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE', 1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,entrada,entrada,normalizarTipoEntrada(s.tipo_entrada),labelEntradaServico(s),valor]); await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]); await enviarTexto(c.jid, `📦 Pedido recebido\n\nPedido #${ins.lastID}\nServiço: ${s.nome}\nStatus: PENDENTE`); await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nServiço: ${s.nome}\nEntrada: ${entrada}`); notificarPainel('pedido','🔔 Novo pedido site',`${c.nome} - ${s.nome}`); res.redirect('/cliente/historico'); });
+app.get('/cliente/esim', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all(`SELECT p.*, (SELECT COUNT(*) FROM esim_estoque e WHERE e.nome_plano=p.nome_plano AND e.status='DISPONIVEL') estoque FROM esim_planos p WHERE p.ativo=1 ORDER BY p.nome_plano ASC`); let html='<h1>2️⃣ Comprar eSIM</h1><div class="grid">'; for(const p of rows){ html+=`<div class="card"><h2>📱 ${safeHtml(p.nome_plano)}</h2><p>Estoque automático: ${p.estoque||0}</p><h2>${brl(p.preco_cliente || p.preco_revenda)}</h2><form method="post" action="/cliente/esim/${p.id}/comprar"><button class="btn green">Comprar</button></form></div>`;} html += rows.length ? '</div>' : '<div class="card">Nenhum plano cadastrado.</div>'; res.send(clientePage('Comprar eSIM', html, c)); });
+app.post('/cliente/esim/:id/comprar', clienteAuth, async (req,res)=>{ const c=req.cliente; const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[req.params.id]); if(!plano) return res.redirect('/cliente/esim'); const valor=Number(plano.preco_cliente || plano.preco_revenda || 0); if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c)); const item=await get('SELECT * FROM esim_estoque WHERE nome_plano=? AND status="DISPONIVEL" ORDER BY id ASC LIMIT 1',[plano.nome_plano]); await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]); if(item){ const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado, finalizado_em) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'FINALIZADO',1,CURRENT_TIMESTAMP)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${item.nome_plano}`,item.nome_plano,valor]); await run('UPDATE esim_estoque SET status="VENDIDO", revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?',[c.id,c.nome,ins.lastID,item.id]); await enviarImagem(c.jid, caminhoArquivoEsim(item.arquivo_qr), `✅ eSIM entregue\n\nPlano: ${item.nome_plano}\nPedido #${ins.lastID}\n⚠️ QR Code de uso único.`); } else { const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'AGUARDANDO_ENTREGA',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${plano.nome_plano}`,plano.nome_plano,valor]); await enviarTexto(c.jid, `🟡 Pedido recebido\n\nPedido #${ins.lastID}\nPlano: ${plano.nome_plano}\nStatus: aguardando entrega manual.`); await avisarAdminTelegram(`📱 eSIM sem estoque automático\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nPlano: ${plano.nome_plano}`); } res.redirect('/cliente/historico'); });
+app.get('/cliente/pagamentos', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pagamentos WHERE revenda_id=? ORDER BY id DESC LIMIT 50',[c.id]); let hist=''; for(const p of rows) hist+=`<tr><td>${dateBR(p.criado_em)}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem||'pixgo')}</td></tr>`; res.send(clientePage('Pagamentos', `<h1>💳 Pagamentos</h1><div class="card"><h2>Adicionar saldo</h2><form method="post" action="/cliente/pagamentos/pix"><label>Valor</label><input name="valor" placeholder="Ex: 50" required><button class="btn green">Gerar PIX</button></form></div><div class="card"><h2>Histórico</h2><table><tr><th>Data</th><th>Valor</th><th>Origem</th></tr>${hist || '<tr><td colspan="3">Nenhum pagamento.</td></tr>'}</table></div>`, c)); });
+app.post('/cliente/pagamentos/pix', clienteAuth, async (req,res)=>{ const c=req.cliente; const valor=Number(String(req.body.valor||'0').replace(',','.')); if(!valor || valor<=0) return res.redirect('/cliente/pagamentos'); const pix=await gerarPix(valor, c.nome); const paymentId=pix?.data?.payment_id || pix?.payment_id || pix?.id || pix?.data?.id || pix?.transaction_id; const copia=pix?.data?.pix_copy_paste || pix?.data?.qr_code || pix?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode || ''; if(paymentId){ await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',[paymentId,c.id,c.jid,c.jid,valor]); verificarPagamento(paymentId,c.id,c.jid,valor); } await enviarTexto(c.jid, `💳 PIX gerado\n\nValor: ${brl(valor)}\n\n${copia || 'Abra o painel para copiar o código PIX.'}`); res.send(clientePage('PIX gerado', `<div class="card"><h1>💳 PIX gerado</h1><p>Valor: <b>${brl(valor)}</b></p><label>Copia e cola</label><textarea rows="6" onclick="this.select()">${safeHtml(copia || '')}</textarea><p class="muted">Quando o pagamento for aprovado, seu saldo será atualizado automaticamente.</p><a class="btn" href="/cliente/pagamentos">Voltar</a></div>`, c)); });
+
 app.all('/webhook/pixgo', async (req, res) => {
   try {
     console.log('📩 WEBHOOK PIXGO:', req.method, req.body || {});
@@ -1568,7 +1730,7 @@ app.get('/admin', async (req, res) => {
   let table = '<table><tr><th>ID</th><th>Entrada</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
   for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
   table += '</table>';
-  res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot WhatsApp</span><span class="online">${conectado ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
+  res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot Telegram</span><span class="online">${tgBot ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
   <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
   </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
@@ -2047,7 +2209,7 @@ app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELEC
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 app.get('/admin/config', (req, res) => {
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
-  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status WhatsApp:</b> ${conectado ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/config'); });
 app.post('/admin/config/hacker-image', async (req, res) => {
@@ -2077,8 +2239,4 @@ app.post('/admin/backup/restaurar', async (req, res) => { const file = path.base
 cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) { console.log('❌ BACKUP AUTOMÁTICO:', e); } }, { timezone: 'America/Sao_Paulo' });
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
-iniciarWhatsApp();
-
-
-// CENTRALUNLOCKER_V3_PLACEHOLDER
-// Future implementation scaffold for customer portal.
+iniciarTelegram();

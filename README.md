@@ -1,96 +1,42 @@
-# CentralUnlocker - Cadastro de revenda pela conversa
+# CentralUnlocker - versão Telegram
 
-## Como usar
+Esta versão usa Telegram para cadastro automático e notificações.
 
-Abra a conversa privada da revenda no WhatsApp conectado ao bot e envie:
+## Variáveis no Render
 
-```txt
-cadastrar revenda Nome da Revenda
+```env
+DATA_DIR=/data
+BASE_URL=https://SEU-APP.onrender.com
+CLIENTE_PANEL_URL=https://SEU-APP.onrender.com/cliente
+TELEGRAM_BOT_TOKEN=TOKEN_DO_BOT_TELEGRAM
+ADMIN_TELEGRAM_ID=5319809013
+PIXGO_API_KEY=SUA_CHAVE_PIXGO
+ADMIN_PANEL_USER=admin
+ADMIN_PANEL_PASS=123456
 ```
 
-Exemplo:
+## Rotas principais
 
-```txt
-cadastrar revenda Central Bahia
-```
+- `/` status do sistema
+- `/admin` painel admin
+- `/cliente` painel do cliente
+- `/webhook/pixgo` webhook PixGo
 
-O bot vai usar automaticamente o número daquela conversa como WhatsApp da revenda.
+## Fluxo
 
-Depois a revenda pode enviar:
-
-```txt
-menu
-```
+1. Cliente envia `/start` no bot do Telegram.
+2. Sistema cria cadastro automático.
+3. Bot envia usuário, senha e link `/cliente`.
+4. Cliente entra no site.
+5. Menu do cliente:
+   - Serviços
+   - Comprar eSIM
+   - Histórico
+   - Conta
+   - Pagamentos
+6. Admin acompanha pedidos no painel.
+7. Cliente recebe avisos no Telegram.
 
 ## Observação
 
-O bot continua ignorando mensagens enviadas pelo próprio WhatsApp, exceto comandos seguros de cadastro/ativação de revenda.
-
-
-## Persistência dos QR Codes eSIM no Render
-
-Para não perder os QR Codes dos eSIM quando reiniciar ou fazer deploy no Render, crie um Persistent Disk com mount path `/data` e configure as variáveis:
-
-```txt
-DATA_DIR=/data
-DB_PATH=/data/database.db
-ESIM_DIR=/data/esim
-BACKUP_DIR=/data/backups
-```
-
-Agora os arquivos enviados em **eSIM** são salvos em `/data/esim` e continuam disponíveis pela URL `/esim/nome-do-arquivo.png`.
-
-
-## Atualização: eSIM manual quando o estoque automático acabar
-
-Agora é possível cadastrar apenas o plano eSIM sem QR Code. Quando a revenda comprar um plano sem QR disponível no estoque, o sistema:
-
-1. Aprova a compra.
-2. Debita o saldo da revenda.
-3. Cria pedido pendente com `entrada_label = eSIM Manual`.
-4. Avisa os admins pelo WhatsApp.
-5. Permite entregar pelo WhatsApp admin com:
-   - `/esimpendentes`
-   - `/entregaresim ID_DO_PEDIDO`
-
-Depois de `/entregaresim ID`, envie a foto do QR Code ou texto da entrega.
-
-
-## Atualização: plano e QR separados
-
-- Cadastre o plano eSIM primeiro, por exemplo TIM 50GB.
-- O plano fica disponível para venda manual mesmo sem QR.
-- Para adicionar QR, selecione o plano cadastrado e envie a imagem do QR.
-- Com QR disponível: entrega automática.
-- Com estoque zerado: venda manual.
-
-
-## Atualização: apagar plano eSIM
-
-Na aba eSIM agora existe a opção **Apagar plano**.
-
-Ao apagar:
-- O plano fica inativo.
-- QR Codes disponíveis desse plano são removidos.
-- Pedidos antigos não são apagados.
-- QR Codes já vendidos não são alterados.
-
-
-## Atualização: editar plano eSIM
-
-Na aba eSIM agora existem as opções:
-- ✏️ Editar plano
-- 🗑️ Apagar plano
-
-A edição permite alterar:
-- Nome do plano
-- Preço revenda
-- Preço cliente
-- Ativo/Inativo
-
-Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
-
-
-## Centralunlocker v3 Roadmap (placeholder)
-- Cliente panel
-- Telegram auto registration
+Esta é a primeira versão convertida para Telegram. O WhatsApp/Baileys foi mantido no código para compatibilidade, mas não é iniciado automaticamente.
