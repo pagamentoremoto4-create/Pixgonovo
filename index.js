@@ -723,6 +723,34 @@ async function salvarImagemWhatsAppEmEsim(msg) {
   fs.writeFileSync(filePath, buffer);
   return { fileName, filePath, rel: `esim/${fileName}` };
 }
+
+async function salvarArquivoTelegramEmEsim(msg) {
+  if (!tgBot || !msg) return null;
+  try {
+    let fileId = null;
+    let ext = '.jpg';
+    if (Array.isArray(msg.photo) && msg.photo.length) {
+      fileId = msg.photo[msg.photo.length - 1].file_id;
+      ext = '.jpg';
+    } else if (msg.document?.file_id) {
+      fileId = msg.document.file_id;
+      const nome = String(msg.document.file_name || '').toLowerCase();
+      if (nome.endsWith('.png')) ext = '.png';
+      else if (nome.endsWith('.webp')) ext = '.webp';
+      else if (nome.endsWith('.pdf')) ext = '.pdf';
+      else if (nome.endsWith('.jpg') || nome.endsWith('.jpeg')) ext = '.jpg';
+    }
+    if (!fileId) return null;
+    const baixado = await tgBot.downloadFile(fileId, ESIM_DIR);
+    const fileName = `esim_manual_tg_${Date.now()}_${Math.random().toString(16).slice(2)}${ext}`;
+    const destino = path.join(ESIM_DIR, fileName);
+    fs.renameSync(baixado, destino);
+    return { fileName, filePath: destino, rel: `esim/${fileName}` };
+  } catch (e) {
+    console.log('❌ ERRO SALVAR ARQUIVO TELEGRAM:', e.message);
+    return null;
+  }
+}
 function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
 async function enviarParaAdmins(texto) {
   // Envia avisos administrativos tanto para WhatsApp legado quanto para o Telegram do admin.
@@ -766,6 +794,32 @@ ${extra}` : ''}
 
 🏢 Centralunlocker`);
 }
+
+async function avisarEsimManualAdminTelegram(pedido) {
+  if (!ADMIN_TELEGRAM_ID || !tgBot || !pedido) return;
+  const texto = `🔔 Novo pedido de eSIM
+
+👤 Cliente: ${pedido.revenda_nome || pedido.cliente_nome || '-'}
+📦 Plano: ${pedido.entrada_valor || pedido.servico_nome || '-'}
+💰 Valor: ${brl(pedido.valor)}
+🆔 Pedido: #${pedido.id}
+📌 Status: Aguardando entrega manual
+
+➡️ Você pode entregar o QR Code direto por aqui ou abrir o painel admin.`;
+  try {
+    await tgBot.sendMessage(ADMIN_TELEGRAM_ID, texto, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📤 Enviar QR Code', callback_data: `esim_entregar_${pedido.id}` }],
+          [{ text: '✅ Finalizar', callback_data: `esim_finalizar_${pedido.id}` }, { text: '❌ Cancelar', callback_data: `esim_cancelar_${pedido.id}` }]
+        ]
+      }
+    });
+  } catch (e) {
+    console.log('⚠️ Falha aviso eSIM manual Telegram:', e.message);
+  }
+}
+
 async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
   await enviarParaAdmins(`📦 *Novo lote recebido*
 
@@ -842,7 +896,20 @@ function normalizarOpcaoTelegram(texto) {
   return t.replace(/[️⃣\s]/g, '').slice(0, 20);
 }
 async function processarMensagemTelegram(msg) {
-  if (!msg?.from?.id || !msg?.chat?.id || !msg.text) return;
+  if (!msg?.from?.id || !msg?.chat?.id) return;
+  const fromAdmin = tgJid(msg.from.id);
+  const sessAdmin = adminSessao.get(fromAdmin);
+  if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '') && sessAdmin?.etapa === 'entregar_esim_manual_tg') {
+    const txtAdmin = String(msg.text || '').trim().toLowerCase();
+    if (['cancelar', 'sair', 'voltar'].includes(txtAdmin)) {
+      adminSessao.delete(fromAdmin);
+      await tgBot.sendMessage(msg.chat.id, '✅ Entrega cancelada.');
+      return;
+    }
+    await concluirEntregaEsimManualTelegram(msg.chat.id, msg);
+    return;
+  }
+  if (!msg.text) return;
   const textoOriginal = String(msg.text || '').trim();
   const texto = textoOriginal.toLowerCase().trim();
   if (!textoOriginal) return;
@@ -1037,6 +1104,32 @@ Digite /menu para solicitar serviços pelo Telegram.`);
   tgBot.onText(/\/menu/, async (msg) => {
     const { cliente } = await cadastrarClienteTelegram(msg.from);
     await enviarMenuTelegram(msg.chat.id, cliente);
+  });
+  tgBot.on('callback_query', async (q) => {
+    try {
+      const chatId = q.message?.chat?.id;
+      const data = String(q.data || '');
+      if (!chatId) return;
+      if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
+        await tgBot.answerCallbackQuery(q.id, { text: 'Apenas o admin pode usar este botão.', show_alert: true });
+        return;
+      }
+      const m = data.match(/^esim_(entregar|finalizar|cancelar)_(\d+)$/);
+      if (!m) return;
+      const acao = m[1];
+      const id = Number(m[2]);
+      await tgBot.answerCallbackQuery(q.id);
+      if (acao === 'entregar') return iniciarEntregaEsimManualTelegram(chatId, id);
+      if (acao === 'finalizar') return finalizarEsimManualSemArquivoTelegram(chatId, id);
+      if (acao === 'cancelar') {
+        const r = await cancelarPedidoComEstorno(id, 'Cancelado pelo admin no Telegram');
+        return tgBot.sendMessage(chatId, r.ok ? `❌ Pedido #${id} cancelado.${r.estornou ? `
+💰 Estorno: ${brl(r.valor)}` : ''}` : `❌ ${r.erro || 'Erro ao cancelar.'}`);
+      }
+    } catch (e) {
+      console.log('❌ CALLBACK TG:', e);
+      try { await tgBot.answerCallbackQuery(q.id, { text: 'Erro interno.' }); } catch (_) {}
+    }
   });
   tgBot.on('message', async (msg) => {
     try { await processarMensagemTelegram(msg); }
@@ -1491,6 +1584,58 @@ async function entregarEsimRevenda(from, revenda, plano) {
   await enviarTexto(from, mensagemInstrucaoEsim());
 }
 
+
+async function iniciarEntregaEsimManualTelegram(chatId, pedidoId) {
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [pedidoId]);
+  if (!p) return tgBot.sendMessage(chatId, '❌ Pedido eSIM manual não encontrado.');
+  if (p.status === 'FINALIZADO' || p.status === 'CANCELADO') return tgBot.sendMessage(chatId, `❌ Pedido #${p.id} está ${p.status}.`);
+  adminSessao.set(tgJid(chatId), { etapa: 'entregar_esim_manual_tg', pedido_id: p.id });
+  await tgBot.sendMessage(chatId, `📤 Entregar eSIM manual
+
+Pedido #${p.id}
+👤 ${p.revenda_nome || p.cliente_nome || '-'}
+📱 ${p.entrada_valor || p.servico_nome || '-'}
+
+Envie agora a foto do QR Code, documento ou texto da entrega.
+
+Para cancelar, digite cancelar.`);
+}
+
+async function concluirEntregaEsimManualTelegram(chatId, msg) {
+  const from = tgJid(chatId);
+  const sess = adminSessao.get(from);
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [sess?.pedido_id]);
+  if (!p) {
+    adminSessao.delete(from);
+    return tgBot.sendMessage(chatId, '❌ Pedido eSIM manual não encontrado.');
+  }
+  const destino = p.revenda_jid || p.cliente_jid || (p.revenda_numero ? numberToJid(p.revenda_numero) : null);
+  if (!destino) return tgBot.sendMessage(chatId, '❌ Não encontrei o Telegram/contato do cliente para entregar.');
+
+  const textoMsg = String(msg.caption || msg.text || '').trim();
+  const textoEntrega = textoMsg || `📱 eSIM ${p.entrada_valor || p.servico_nome}
+⚠️ QR Code de uso único.`;
+  const arq = await salvarArquivoTelegramEmEsim(msg);
+
+  if (arq?.filePath) await enviarImagem(destino, arq.filePath, textoEntrega);
+  else await enviarTexto(destino, textoEntrega);
+  await enviarTexto(destino, mensagemInstrucaoEsim());
+
+  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
+  adminSessao.delete(from);
+  notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
+  await tgBot.sendMessage(chatId, `✅ Pedido #${p.id} entregue e finalizado.`);
+}
+
+async function finalizarEsimManualSemArquivoTelegram(chatId, pedidoId) {
+  const p = await get(`SELECT * FROM pedidos WHERE id=? AND entrada_label='eSIM Manual'`, [pedidoId]);
+  if (!p) return tgBot.sendMessage(chatId, '❌ Pedido eSIM manual não encontrado.');
+  if (p.status === 'FINALIZADO' || p.status === 'CANCELADO') return tgBot.sendMessage(chatId, `❌ Pedido #${p.id} está ${p.status}.`);
+  await finalizarPedido(p);
+  notificarPainel('esim', '✅ eSIM manual finalizado', `Pedido #${p.id}`);
+  await tgBot.sendMessage(chatId, `✅ Pedido #${p.id} finalizado.`);
+}
+
 async function listarEsimManuaisAdmin(from) {
   const rows = await all(`SELECT * FROM pedidos
     WHERE entrada_label='eSIM Manual' AND status IN ('PENDENTE','PROCESSO')
@@ -1498,7 +1643,7 @@ async function listarEsimManuaisAdmin(from) {
   if (!rows.length) return enviarTexto(from, '✅ Nenhum eSIM manual pendente.');
   let txt = '📱 *eSIM MANUAL PENDENTE*\n\n';
   for (const p of rows) {
-    txt += `#${p.id}\n🏪 ${p.revenda_nome || '-'}\n📱 ${p.entrada_valor || p.servico_nome || '-'}\n💰 ${brl(p.valor)}\n➡️ /entregaresim ${p.id}\n\n`;
+    txt += `#${p.id}\n🏪 ${p.revenda_nome || '-'}\n📱 ${p.entrada_valor || p.servico_nome || '-'}\n💰 ${brl(p.valor)}\n➡️ Entregar pelo painel ou Telegram admin\n\n`;
   }
   await enviarTexto(from, txt.trim());
 }
@@ -2288,7 +2433,7 @@ app.get('/admin/esim', async (req, res) => {
 
   let manualTable = '<table><tr><th>Pedido</th><th>Revenda</th><th>Plano</th><th>Valor</th><th>Status</th><th>Ação</th></tr>';
   for (const p of manuais) {
-    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><span class="muted">WhatsApp admin:<br>/entregaresim ${p.id}</span></td></tr>`;
+    manualTable += `<tr><td>#${p.id}</td><td>${safeHtml(p.revenda_nome || '-')}<br><span class="muted">${safeHtml(p.revenda_numero || '-')}</span></td><td>${safeHtml(p.entrada_valor || p.servico_nome || '-')}</td><td>${brl(p.valor)}</td><td><span class="pill">${safeHtml(p.status)}</span></td><td><span class="muted">Entregue pelo painel<br>ou botão no Telegram admin</span></td></tr>`;
   }
   manualTable += '</table>';
 
@@ -2299,7 +2444,7 @@ app.get('/admin/esim', async (req, res) => {
   }
   table += '</table>';
 
-  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use /esimpendentes ou /entregaresim ID no WhatsApp admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
+  res.send(page('eSIM', `<h1>📱 eSIM</h1>${formPlano}${formQr}${cards}<div class="card"><h2>📋 Planos cadastrados</h2>${planosTable}</div><div class="card"><h2>👨‍💻 Entregas manuais pendentes</h2><p class="muted">Use o botão Enviar QR Code no pedido ou o aviso recebido no Telegram admin.</p>${manualTable}</div><div class="card"><h2>📦 Estoque QR Codes</h2>${table}</div>`));
 });
 
 app.post('/admin/esim/plano', async (req, res) => {
