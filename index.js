@@ -5,7 +5,6 @@ const http = require('http');
 const { Server } = require('socket.io');
 const axios = require('axios');
 const QRCode = require('qrcode');
-const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
@@ -15,13 +14,7 @@ const crypto = require('crypto');
 let TelegramBot = null;
 try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
 
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  downloadContentFromMessage
-} = require('@whiskeysockets/baileys');
+// Operação 100% Telegram: integração WhatsApp/Baileys removida.
 
 const app = express();
 const server = http.createServer(app);
@@ -64,7 +57,6 @@ if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
 
-let sock = null;
 let tgBot = null;
 let qrCodeBase64 = null;
 let conectado = false;
@@ -93,7 +85,7 @@ const uploadEsim = multer({
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype || ''))
 });
 
-// Travas anti-loop/anti-mensagens antigas do Baileys
+// Controle de sessões/mensagens do Telegram
 const mensagensProcessadas = new Set();
 const ultimoErroImei = new Map();
 const BOT_START_TIME = Date.now();
@@ -674,25 +666,22 @@ async function listarServicosTexto(revenda) {
 }
 async function enviarTexto(to, text) {
   try {
-    if (isTgJid(to)) {
-      if (!tgBot) return false;
-      await tgBot.sendMessage(tgIdFromJid(to), String(text || ''));
-      return true;
-    }
-    if (sock && to) { await sock.sendMessage(to, { text }); return true; }
-  } catch (e) { console.log('❌ ERRO ENVIAR TEXTO:', e.message); }
+    if (!tgBot || !to) return false;
+    const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
+    if (!/^\d+$/.test(chatId)) return false;
+    await tgBot.sendMessage(chatId, String(text || ''));
+    return true;
+  } catch (e) { console.log('❌ ERRO ENVIAR TEXTO TELEGRAM:', e.message); }
   return false;
 }
 async function enviarImagem(to, filePath, caption='') {
   try {
-    if (!to || !filePath || !fs.existsSync(filePath)) return false;
-    if (isTgJid(to)) {
-      if (!tgBot) return false;
-      await tgBot.sendPhoto(tgIdFromJid(to), fs.createReadStream(filePath), { caption: String(caption || '') });
-      return true;
-    }
-    if (sock) { await sock.sendMessage(to, { image: fs.readFileSync(filePath), caption }); return true; }
-  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM:', e.message); }
+    if (!tgBot || !to || !filePath || !fs.existsSync(filePath)) return false;
+    const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
+    if (!/^\d+$/.test(chatId)) return false;
+    await tgBot.sendPhoto(chatId, fs.createReadStream(filePath), { caption: String(caption || '') });
+    return true;
+  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM TELEGRAM:', e.message); }
   return false;
 }
 async function avisarAdminTelegram(texto) {
@@ -714,15 +703,10 @@ function mensagemImagem(msg) {
     null;
 }
 async function salvarImagemWhatsAppEmEsim(msg) {
-  const imageMessage = mensagemImagem(msg);
-  if (!imageMessage) return null;
-  const stream = await downloadContentFromMessage(imageMessage, 'image');
-  const buffer = await streamToBuffer(stream);
-  const fileName = `esim_manual_${Date.now()}_${Math.random().toString(16).slice(2)}.jpg`;
-  const filePath = path.join(ESIM_DIR, fileName);
-  fs.writeFileSync(filePath, buffer);
-  return { fileName, filePath, rel: `esim/${fileName}` };
+  // Função legada desativada. A entrega manual usa salvarArquivoTelegramEmEsim().
+  return null;
 }
+
 
 async function salvarArquivoTelegramEmEsim(msg) {
   if (!tgBot || !msg) return null;
@@ -751,12 +735,8 @@ async function salvarArquivoTelegramEmEsim(msg) {
     return null;
   }
 }
-function adminsJids() { return ADMIN_NUMBERS.map(numberToJid).filter(Boolean); }
+function adminsJids() { return ADMIN_TELEGRAM_ID ? [tgJid(ADMIN_TELEGRAM_ID)] : []; }
 async function enviarParaAdmins(texto) {
-  // Envia avisos administrativos tanto para WhatsApp legado quanto para o Telegram do admin.
-  for (const jid of adminsJids()) {
-    try { await enviarTexto(jid, texto); } catch (e) { console.log('⚠️ Falha ao avisar admin:', jid, e.message); }
-  }
   if (ADMIN_TELEGRAM_ID && tgBot) {
     try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); }
     catch (e) { console.log('⚠️ Falha ao avisar admin Telegram:', e.message); }
@@ -1140,97 +1120,12 @@ Digite /menu para solicitar serviços pelo Telegram.`);
   });
 }
 
-async function iniciarWhatsApp() {
-  await initDB();
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
-  const { version } = await fetchLatestBaileysVersion();
-  sock = makeWASocket({ version, auth: state, logger: pino({ level: 'silent' }), browser: ['Ubuntu', 'Chrome', '20.0.04'] });
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr) { console.log('✅ QR CODE GERADO'); qrCodeBase64 = await QRCode.toDataURL(qr); conectado = false; }
-    if (connection === 'open') { console.log('✅ WHATSAPP CONECTADO'); qrCodeBase64 = null; conectado = true; }
-    if (connection === 'close') {
-      conectado = false;
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      console.log('❌ WHATSAPP DESCONECTOU:', statusCode);
-      if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => iniciarWhatsApp(), 5000);
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    const msg = messages[0];
-    if (!msg || !msg.message) return;
-
-    // TRAVA CRÍTICA: por padrão não processa mensagens enviadas pelo próprio WhatsApp/bot.
-    // Exceção segura: quando o administrador digita na conversa da revenda:
-    // cadastrar revenda Nome da Revenda
-    // Assim o bot usa o número daquela conversa como WhatsApp da revenda.
-    if (msg.key?.fromMe) {
-      if (type && type !== 'notify') return;
-      if (msg.key?.remoteJid === 'status@broadcast') return;
-      if (isGroup(msg.key?.remoteJid)) return;
-
-      const textoFromMe = getText(msg).trim();
-
-      if (/^(cadastrar|ativar)\s+revenda(\s+.+)?$/i.test(textoFromMe)) {
-        try {
-          await cadastrarRevendaPelaConversaAdmin(msg.key.remoteJid, textoFromMe);
-        } catch (e) {
-          console.log('❌ ERRO CADASTRO FROMME:', e);
-          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar revenda.');
-        }
-        return;
-      }
-
-      // Permite que o admin cadastre serviço para cliente final direto na conversa do cliente.
-      // Exemplo: servico desbloqueio tim 180 356789123456789
-      if (/^servico\s+/i.test(textoFromMe)) {
-        try {
-          await tratarServicoClienteFinal(
-            msg,
-            msg.key.remoteJid,
-            textoFromMe,
-            textoFromMe.toLowerCase(),
-            'Cliente'
-          );
-        } catch (e) {
-          console.log('❌ ERRO SERVIÇO CLIENTE FROMME:', e);
-          await enviarTexto(msg.key.remoteJid, '❌ Erro ao cadastrar serviço do cliente.');
-        }
-        return;
-      }
-
-      return;
-    }
-
-    if (type && type !== 'notify') return;
-    if (msg.key?.remoteJid === 'status@broadcast') return;
-
-    // Evita processar histórico antigo quando reconecta/reinicia no Render
-    const tsRaw = Number(msg.messageTimestamp || 0);
-    const msgTime = tsRaw > 9999999999 ? tsRaw : tsRaw * 1000;
-    if (msgTime && msgTime < BOT_START_TIME - 60000) return;
-
-    // Evita processar a mesma mensagem várias vezes
-    const msgId = `${msg.key?.remoteJid || ''}:${msg.key?.id || ''}:${msg.key?.fromMe ? 'me' : 'in'}`;
-    if (msg.key?.id && mensagensProcessadas.has(msgId)) return;
-    if (msg.key?.id) mensagensProcessadas.add(msgId);
-    if (mensagensProcessadas.size > 5000) mensagensProcessadas.clear();
-
-    const from = msg.key.remoteJid;
-    if (isGroup(from)) return;
-    const textoOriginal = getText(msg).trim();
-    if (!textoOriginal) return;
-    const texto = textoOriginal.toLowerCase();
-    const admin = msg.key.fromMe || isAdminJid(from);
-    const nomeContato = nomeContatoSeguro(msg);
-    console.log('📩', from, msg.key.fromMe ? 'FROMME' : '', textoOriginal);
-    try { await tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato); }
-    catch (e) { console.log('❌ ERRO WA:', e); await enviarTexto(from, '❌ Erro interno. Tente novamente.'); }
-  });
+async function iniciarWhatsAppRemovido() {
+  console.log('ℹ️ WhatsApp/Baileys removido. Sistema operando somente via Telegram.');
 }
 
-async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContato) {
+
+async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, admin, nomeContato) {
   const numero = jidToNumber(from);
   const partes = textoOriginal.trim().split(/\s+/);
 
@@ -1272,7 +1167,7 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
   }
 
   if (admin) {
-    // Entrega manual de eSIM pelo WhatsApp admin.
+    // Entrega manual de eSIM pelo Telegram admin.
     const sessAdmin = adminSessao.get(from);
     if (sessAdmin?.etapa === 'entregar_esim_manual') {
       await concluirEntregaEsimManualAdmin(from, msg, textoOriginal);
@@ -1282,17 +1177,17 @@ async function tratarWhatsApp(msg, from, textoOriginal, texto, admin, nomeContat
       await listarEsimManuaisAdmin(from);
       return;
     }
-    if (texto.startsWith('/entregaresim') || texto.startsWith('entregaresim')) {
+    if (texto.startsWith('botão 📤 Enviar QR Code') || texto.startsWith('entregaresim')) {
       const id = partes[1];
-      if (!id) { await enviarTexto(from, 'Use assim: /entregaresim ID_DO_PEDIDO'); return; }
+      if (!id) { await enviarTexto(from, 'Use o botão 📤 Enviar QR Code no Telegram do admin.'); return; }
       await iniciarEntregaEsimManualAdmin(from, Number(id));
       return;
     }
 
-    // Cadastro de revenda direto na conversa do WhatsApp
+    // Cadastro de cliente/revenda pelo Telegram
     if (await tratarCadastroRevendaConversa(from, textoOriginal, texto)) return;
 
-    // Painel admin pelo WhatsApp removido. Mantém apenas backup manual e cadastro rápido de serviço em conversas de clientes.
+    // Fluxo antigo por WhatsApp removido. Use o Telegram e o painel administrativo.
     if (texto === 'backup') {
       const arq = await criarBackup();
       await enviarTexto(from, `✅ BACKUP GERADO
@@ -1486,7 +1381,7 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
 💰 ${brl(valor)}
 
 👤 Cliente: ${clienteNome || 'Cliente'}
-📞 WhatsApp: ${clienteNumero || '-'}
+🆔 Telegram: ${clienteNumero || '-'}
 
 📍 Pendente`);
   return true;
@@ -1540,7 +1435,8 @@ async function criarPedidoEsimManualRevenda(from, revenda, plano) {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
 
   notificarPainel('esim', '📱 eSIM manual pendente', `${revenda.nome} - ${plano.nome_plano}`);
-  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nUse no WhatsApp admin:\n/entregaresim ${pedido.id}\n\nDepois envie a foto do QR Code ou texto da entrega.`);
+  await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nPedido aguardando QR Code. Use os botões enviados no Telegram do admin ou abra o painel administrativo.`);
+  await avisarEsimManualAdminTelegram(pedido);
 
   await enviarTexto(from, `✅ Compra aprovada
 
@@ -1658,7 +1554,7 @@ async function iniciarEntregaEsimManualAdmin(from, pedidoId) {
 Pedido #${p.id}
 🏪 ${p.revenda_nome || '-'}
 📱 ${p.entrada_valor || p.servico_nome || '-'}
-📞 ${p.revenda_numero || '-'}
+🆔 ${p.revenda_jid || '-'}
 
 Envie agora a foto do QR Code ou texto da entrega.
 Para cancelar, digite *cancelar*.`);
@@ -1673,7 +1569,7 @@ async function concluirEntregaEsimManualAdmin(from, msg, textoOriginal) {
   }
 
   const destino = p.revenda_jid || numberToJid(p.revenda_numero);
-  if (!destino) return enviarTexto(from, '❌ Não encontrei o WhatsApp da revenda para entregar.');
+  if (!destino) return enviarTexto(from, '❌ Não encontrei o Telegram do cliente para entregar.');
 
   const img = await salvarImagemWhatsAppEmEsim(msg);
   const textoEntrega = String(textoOriginal || '').trim() || `📱 eSIM ${p.entrada_valor || p.servico_nome}\n⚠️ QR Code de uso único.`;
@@ -1827,7 +1723,7 @@ async function cadastrarRevendaDireto(from, nome, whatsapp) {
   }
 
   notificarPainel('revenda', '🏪 Revenda cadastrada', revenda.nome);
-  await enviarTexto(from, `✅ *REVENDA CADASTRADA*\n\n🏪 Nome: ${revenda.nome}\n📞 WhatsApp: ${revenda.whatsapp}\n🆔 ID: #${revenda.id}\n📍 Status: ${revenda.status}\n\nO bot vai enviar as boas-vindas para a revenda agora.`);
+  await enviarTexto(from, `✅ *REVENDA CADASTRADA*\n\n🏪 Nome: ${revenda.nome}\n🆔 Telegram: ${revenda.whatsapp}\n🆔 ID: #${revenda.id}\n📍 Status: ${revenda.status}\n\nO bot vai enviar as boas-vindas para a revenda agora.`);
   const enviado = await enviarBoasVindasTutorialRevenda(revenda);
   if (!enviado) await enviarTexto(from, '⚠️ Revenda salva, mas não consegui enviar mensagem para ela. Peça para ela mandar uma mensagem para o bot primeiro e reenvie as boas-vindas pelo painel.');
   return revenda;
@@ -1860,7 +1756,7 @@ async function tratarCadastroRevendaConversa(from, textoOriginal, texto) {
       return true;
     }
     adminSessao.set(from, { etapa: 'cadastro_revenda_numero', nome });
-    await enviarTexto(from, `✅ Nome salvo: *${nome}*\n\nAgora envie o WhatsApp da revenda com DDD.\n\nExemplo:\n75999999999\nou\n5575999999999`);
+    await enviarTexto(from, `✅ Nome salvo: *${nome}*\n\nAgora envie o ID do Telegram do cliente/revenda.\n\nExemplo:\n5319809013`);
     return true;
   }
 
@@ -1873,7 +1769,7 @@ async function tratarCadastroRevendaConversa(from, textoOriginal, texto) {
   return false;
 }
 
-async function tratarAdminWhatsApp(from, textoOriginal, texto, nomeContato) {
+async function tratarAdminTelegramLegado(from, textoOriginal, texto, nomeContato) {
   const partes = textoOriginal.trim().split(/\s+/);
   const cmd = partes[0].toLowerCase();
   if (cmd === '/admin' || cmd === 'admin') { await enviarMenuAdmin(from); return true; }
@@ -1915,13 +1811,13 @@ async function tratarOpcaoAdmin(from, opcao) {
   if (opcao === '1') { await enviarTexto(from, await textoDashboardAdmin()); return; }
   if (opcao === '2') { await enviarTexto(from, `📋 *PEDIDOS*\n\nComandos:\npendentes\nprocesso\nfinalizados\ncancelados\nimei 356789123456789\nprocessar ID\nfinalizar ID\ncancelar ID motivo
 /esimpendentes
-/entregaresim ID`); return; }
+Botão 📤 Enviar QR Code`); return; }
   if (opcao === '3') { await enviarTexto(from, `🏪 *REVENDAS*\n\nComandos:\nrevendas\nrevenda nome\naddrevenda Nome | 5575999999999\nbloquearrevenda ID\ndesbloquearrevenda ID\nremoverrevenda ID`); return; }
   if (opcao === '4') { await enviarTexto(from, `🛠 *SERVIÇOS*\n\nComandos:\nservicos\naddservico Nome | 100\neditarservico ID | Novo Nome | 100\ndesativarservico ID\nativarservico ID\nexcluirservico ID`); return; }
   if (opcao === '5') { await enviarTexto(from, await resumoFinanceiro()); return; }
   if (opcao === '6') { await enviarTexto(from, `📈 *RELATÓRIOS*\n\nrelatorio diario\nrelatorio mensal\nrelatorio anual\nhoje`); return; }
   if (opcao === '7') { await enviarTexto(from, `💾 *BACKUP*\n\nbackup\nbackups\n\nNo painel você também pode baixar/restaurar.`); return; }
-  if (opcao === '8') { await enviarTexto(from, `⚙️ *CONFIGURAÇÕES*\n\nAdmin: ${ADMIN_NUMBER}\nDB: ${DB_PATH}\nStatus WhatsApp: ${conectado ? 'Conectado' : 'Desconectado'}`); return; }
+  if (opcao === '8') { await enviarTexto(from, `⚙️ *CONFIGURAÇÕES*\n\nAdmin: ${ADMIN_NUMBER}\nDB: ${DB_PATH}\nStatus Telegram: ${conectado ? 'Conectado' : 'Desconectado'}`); return; }
   if (opcao === '9') { await enviarTexto(from, `🌐 Painel Web:\n${BASE_URL ? BASE_URL + '/admin' : '/admin'}`); return; }
 }
 
@@ -1949,7 +1845,7 @@ async function enviarBuscaIMEI(from, imei) {
   const rows = await all('SELECT * FROM pedidos WHERE imei LIKE ? ORDER BY id DESC LIMIT 10', [`%${imei}%`]);
   if (!rows.length) { await enviarTexto(from, '❌ IMEI não encontrado.'); return; }
   let txt = '🔍 *RESULTADO IMEI*\n\n';
-  for (const p of rows) txt += `#${p.id}\n📱 ${p.imei}\n🛠 ${p.servico_nome}\n👤 ${p.revenda_nome || p.cliente_nome || '-'}\n📞 ${p.revenda_numero || p.cliente_whatsapp || '-'}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
+  for (const p of rows) txt += `#${p.id}\n📱 ${p.imei}\n🛠 ${p.servico_nome}\n👤 ${p.revenda_nome || p.cliente_nome || '-'}\n🆔 ${p.revenda_jid || p.cliente_jid || '-'}\n💰 ${brl(p.valor)}\n📍 ${p.status}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function enviarBuscaPessoa(from, termo) {
@@ -1966,7 +1862,7 @@ async function enviarBuscaRevenda(from, termo) {
   const rows = await all('SELECT * FROM revendas WHERE nome LIKE ? OR whatsapp LIKE ? ORDER BY id DESC LIMIT 10', [`%${termo}%`, `%${onlyDigits(termo)}%`]);
   if (!rows.length) { await enviarTexto(from, '❌ Revenda não encontrada.'); return; }
   let txt = '🏪 *REVENDAS*\n\n';
-  for (const r of rows) txt += `#${r.id}\n${r.nome}\n📞 ${r.whatsapp || '-'}\n📍 ${r.status}\n💰 ${textoSaldoCurto(r.saldo)}\n\n`;
+  for (const r of rows) txt += `#${r.id}\n${r.nome}\n🆔 ${r.telegram_id || r.jid || '-'}\n📍 ${r.status}\n💰 ${textoSaldoCurto(r.saldo)}\n\n`;
   await enviarTexto(from, txt.trim());
 }
 async function adminMudarStatus(from, id, status) {
@@ -2083,7 +1979,7 @@ async function gerarPix(valor, cliente) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
       amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
-      customer_name: 'Cliente WhatsApp', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+      customer_name: 'Cliente Telegram', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
     }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
@@ -2149,7 +2045,7 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 }
 
 app.get('/', (req, res) => {
-  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 WhatsApp desativado</h1><p>Este projeto agora usa Telegram.</p></div>`));
+  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 Telegram ativo</h1><p>Este projeto usa somente Telegram.</p></div>`));
   res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
 });
 
@@ -2230,7 +2126,7 @@ app.get('/admin/pedidos', async (req, res) => {
   const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`;
   const rows = await all(sql, params);
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
-  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, WhatsApp ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
+  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, Telegram ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
   res.send(page('Pedidos', html));
 });
 app.post('/admin/pedido/:id/acao', async (req, res) => {
@@ -2285,7 +2181,7 @@ app.get('/admin/pedido/:id/entregar-esim', async (req, res) => {
 app.post('/admin/pedido/:id/entregar-esim', uploadEsim.single('qr'), async (req, res) => {
   const p = await get('SELECT * FROM pedidos WHERE id=?', [req.params.id]);
   if (!p || !isPedidoEsimManual(p)) return res.redirect('/admin/pedidos');
-  const destino = p.revenda_jid || p.cliente_jid || (p.revenda_numero ? numberToJid(p.revenda_numero) : '') || (p.cliente_whatsapp ? numberToJid(p.cliente_whatsapp) : '');
+  const destino = p.revenda_jid || p.cliente_jid || '';
   const textoExtra = String(req.body.texto || '').trim();
   const plano = p.entrada_valor || p.servico_nome || 'eSIM';
   const caption = `✅ eSIM entregue com sucesso!\n\n📦 Pedido #${p.id}\n📱 Plano: ${plano}\n\n${textoExtra ? textoExtra + '\n\n' : ''}⚠️ QR Code de uso único.\n🏢 CentralUnlocker`;
@@ -2601,10 +2497,10 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
   const item = await get('SELECT * FROM esim_estoque WHERE id=?', [req.params.id]);
   if (item?.revenda_id) {
     const r = await get('SELECT * FROM revendas WHERE id=?', [item.revenda_id]);
-    const jid = r?.jid || numberToJid(r?.whatsapp);
+    const jid = r?.jid || (r?.telegram_id ? tgJid(r.telegram_id) : '');
     const qrPath = caminhoArquivoEsim(item.arquivo_qr);
     if (jid && fs.existsSync(qrPath)) {
-      await sock.sendMessage(jid, { image: fs.readFileSync(qrPath), caption: `📱 eSIM ${item.nome_plano}\n⚠️ Reenvio do QR Code.` });
+      await enviarImagem(jid, qrPath, `📱 eSIM ${item.nome_plano}\n⚠️ Reenvio do QR Code.`);
       await enviarTexto(jid, mensagemInstrucaoEsim());
     }
   }
@@ -2626,7 +2522,7 @@ app.get('/admin/revendas', async (req, res) => {
       </div>
       <button class="btn green">Adicionar / Atualizar</button>
     </form>
-    <p class="muted">Agora o cadastro principal é pelo <b>ID do Telegram</b>. O WhatsApp fica opcional e não é necessário para a revenda usar o sistema.</p>
+    <p class="muted">Agora o cadastro principal é pelo <b>ID do Telegram</b>. O O acesso do cliente/revenda é feito somente pelo Telegram.</p>
   </div>
   <table><tr><th>ID</th><th>Nome</th><th>Telegram ID</th><th>Login</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
   for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.login || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Enviar acesso</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico de pedidos será mantido, mas o vínculo do Telegram será apagado.')">🗑️ Remover</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/excluir-permanente"><button class="btn red" onclick="return confirm('Excluir permanentemente este cliente e todos os pedidos/pagamentos dele?')">💥 Excluir tudo</button></form></td></tr>`;
@@ -2665,7 +2561,7 @@ app.post('/admin/revenda/:id/status', async (req, res) => {
   await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]);
   const rStatus = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
   if (rStatus?.jid || rStatus?.whatsapp) {
-    const jidAviso = rStatus.jid || numberToJid(rStatus.whatsapp);
+    const jidAviso = rStatus.jid || (rStatus.telegram_id ? tgJid(rStatus.telegram_id) : '');
     if (req.body.status === 'BLOQUEADA') await enviarTexto(jidAviso, '🔒 Sua revenda foi bloqueada. Entre em contato com a CentralUnlocker.');
     if (req.body.status === 'ATIVA') await enviarTexto(jidAviso, '🔓 Sua revenda foi reativada. Digite menu para continuar.');
   }
@@ -2709,7 +2605,7 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>ID do Telegram</label><input name="telegram_id" value="${safeHtml(r.telegram_id || '')}" placeholder="Ex: 5319809013" required><br><br>
     <label>Usuário de login</label><input name="login" value="${safeHtml(r.login || '')}"><br><br>
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
-    <label>WhatsApp opcional</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
+    <label>Telegram ID</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <button class="btn green">Salvar</button>
@@ -2777,7 +2673,7 @@ app.post('/admin/revenda/:id/pagamento', async (req, res) => {
 
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
-  let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O WhatsApp muda a pergunta automaticamente conforme o tipo escolhido.</p></div>
+  let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O Telegram solicita a entrada conforme o tipo escolhido.</p></div>
   <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Samsung FRP, iCloud FMI OFF" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 25"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
   html += `<div class="topbar"><h1>Serviços cadastrados</h1><span class="muted">${rows.length} serviço(s)</span></div>`;
   if (!rows.length) html += `<div class="card empty">Nenhum serviço cadastrado ainda.</div>`;
