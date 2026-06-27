@@ -57,7 +57,7 @@ const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || '';
 const ADMIN_TELEGRAM_ID = String(process.env.ADMIN_TELEGRAM_ID || process.env.ADMIN_ID || '').trim();
-const CLIENTE_PANEL_URL = process.env.CLIENTE_PANEL_URL || (BASE_URL ? `${BASE_URL}/cliente` : '/cliente');
+// Site do cliente removido: clientes usam apenas o Telegram.
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -80,7 +80,6 @@ const TEMAS_PAINEL = {
 
 const pedidoSessao = new Map();
 const adminSessao = new Map();
-const clienteSessoes = new Map();
 
 const uploadEsim = multer({
   storage: multer.diskStorage({
@@ -997,17 +996,14 @@ async function iniciarTelegram() {
       const { cliente, novo } = await cadastrarClienteTelegram(msg.from);
       const texto = `${novo ? '🎉 Bem-vindo à Centralunlocker' : '✅ Seu cadastro já existe'}
 
-👤 Usuário: ${cliente.login}
-🔑 Senha: ${cliente.senha}
-🌐 Painel do cliente:
-${CLIENTE_PANEL_URL}
+Seu cadastro foi vinculado ao Telegram.
 
-Menu do site:
-1️⃣ Serviços
-2️⃣ Comprar eSIM
-3️⃣ Histórico
-4️⃣ Conta
-💳 Pagamentos
+🆔 ID Telegram: ${cliente.telegram_id || msg.from.id}
+👤 Nome: ${cliente.nome}
+🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+💰 Saldo: ${brl(cliente.saldo)}
+
+Use o menu abaixo para solicitar serviços, comprar eSIM, consultar histórico, ver sua conta ou gerar PIX.
 
 Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
       await tgBot.sendMessage(msg.chat.id, texto);
@@ -1017,11 +1013,14 @@ Todos os avisos dos seus pedidos chegarão aqui no Telegram.`;
   tgBot.onText(/\/senha/, async (msg) => {
     const cliente = await get('SELECT * FROM revendas WHERE telegram_id=? OR jid=?', [String(msg.from.id), tgJid(msg.from.id)]);
     if (!cliente) return tgBot.sendMessage(msg.chat.id, 'Envie /start para criar seu cadastro.');
-    await tgBot.sendMessage(msg.chat.id, `🔐 Seus dados de acesso
+    await tgBot.sendMessage(msg.chat.id, `👤 Sua conta
 
-👤 Usuário: ${cliente.login}
-🔑 Senha: ${cliente.senha}
-🌐 Painel: ${CLIENTE_PANEL_URL}`);
+🆔 ID Telegram: ${cliente.telegram_id || msg.from.id}
+👤 Nome: ${cliente.nome}
+🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+💰 Saldo: ${brl(cliente.saldo)}
+
+Digite /menu para solicitar serviços pelo Telegram.`);
   });
   tgBot.onText(/\/menu/, async (msg) => {
     const { cliente } = await cadastrarClienteTelegram(msg.from);
@@ -1603,11 +1602,15 @@ async function enviarBoasVindasTutorialRevenda(revenda) {
   const jid = destinoRevenda(revenda);
   if (!jid) return false;
   try {
-    const acesso = `🔐 *ACESSO AO PAINEL*
+    const acesso = `✅ *CADASTRO ATIVO*
 
-👤 Usuário: ${revenda.login || '-'}
-🔑 Senha: ${revenda.senha || '-'}
-🌐 Painel: ${CLIENTE_PANEL_URL}
+🆔 ID Telegram: ${revenda.telegram_id || '-'}
+👤 Nome: ${revenda.nome || '-'}
+🏷 Tipo: ${labelTipoRevenda(revenda.tipo_revenda)}
+💰 Saldo: ${brl(revenda.saldo || 0)}
+
+Agora os serviços são solicitados diretamente pelo Telegram.
+Digite /menu para começar.
 
 Todos os avisos serão enviados aqui no Telegram.`;
     await enviarTexto(jid, await mensagemBoasVindasRevenda(revenda));
@@ -1991,97 +1994,16 @@ app.get('/', (req, res) => {
 // O sistema já confirma pagamento por consulta automática, então este endpoint
 // serve para receber notificações da PixGo sem quebrar o fluxo atual.
 
+
+// =========================
+// SITE DO CLIENTE REMOVIDO
+// =========================
+// O cliente agora solicita tudo pelo Telegram.
+// Mantemos esta rota apenas para evitar 404 e orientar quem tentar acessar.
 app.get('/cliente', (req, res) => {
-  const token = getClienteToken(req);
-  if (clienteSessoes.has(token)) return res.redirect('/cliente/dashboard');
-  const erro = req.query.erro ? '<p style="color:#fca5a5">Login ou senha inválidos.</p>' : '';
-  res.send(clientePage('Cliente', `<div class="hero"><h1>🌐 Painel do Cliente</h1><p>Acesse sua conta CentralUnlocker.</p></div><div class="card" style="max-width:430px;margin:22px auto"><h2>Entrar</h2>${erro}<form method="post" action="/cliente/login"><label>Usuário</label><input name="login" required><label>Senha</label><input name="senha" type="password" required><button class="btn green" style="width:100%">Entrar</button></form><p class="muted">Ainda não tem conta? Envie /start no bot do Telegram.</p></div>`));
+  res.send(adminPage('Cliente via Telegram', `<div class="card"><h1>🤖 Atendimento pelo Telegram</h1><p>O painel do cliente foi removido.</p><p>Agora os clientes solicitam serviços, compram eSIM, consultam histórico, veem conta e geram PIX diretamente pelo bot do Telegram.</p><p>Digite <b>/start</b> ou <b>/menu</b> no bot.</p></div>`));
 });
-app.post('/cliente/login', async (req, res) => {
-  const login = String(req.body.login || '').trim();
-  const senha = String(req.body.senha || '').trim();
-  const cliente = await get('SELECT * FROM revendas WHERE login=? AND senha=? AND status != "BLOQUEADA"', [login, senha]);
-  if (!cliente) return res.redirect('/cliente?erro=1');
-  const token = crypto.randomBytes(24).toString('hex');
-  clienteSessoes.set(token, cliente.id);
-  await run('UPDATE revendas SET ultimo_acesso=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
-  res.setHeader('Set-Cookie', `cliente_token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
-  res.redirect('/cliente/dashboard');
-});
-app.get('/cliente/logout', (req, res) => { const t=getClienteToken(req); if(t) clienteSessoes.delete(t); res.setHeader('Set-Cookie','cliente_token=; Path=/; Max-Age=0'); res.redirect('/cliente'); });
-app.get('/cliente/dashboard', clienteAuth, async (req, res) => {
-  const c=req.cliente;
-  const pend = await get('SELECT COUNT(*) qtd FROM pedidos WHERE (revenda_id=? OR cliente_jid=?) AND status NOT IN ("FINALIZADO","CANCELADO")', [c.id, c.jid]);
-  const fin = await get('SELECT COUNT(*) qtd FROM pedidos WHERE (revenda_id=? OR cliente_jid=?) AND status="FINALIZADO"', [c.id, c.jid]);
-  const pags = await all('SELECT * FROM pagamentos WHERE revenda_id=? ORDER BY id DESC LIMIT 5', [c.id]);
-  let pg=''; for(const p of pags) pg += `<tr><td>${dateBR(p.criado_em)}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem||'pixgo')}</td></tr>`;
-  res.send(clientePage('Dashboard', `<div class="hero"><h1>👋 Bem-vindo, ${safeHtml(c.nome)}</h1><p>Escolha uma opção no menu para solicitar serviços, comprar eSIM ou pagar saldo.</p></div><div class="grid"><div class="card"><h2>💰 Saldo</h2><h1>${brl(c.saldo)}</h1><p class="muted">Tipo: ${safeHtml(labelTipoRevenda(c.tipo_revenda))}</p></div><div class="card"><h2>📦 Em andamento</h2><h1>${pend.qtd}</h1></div><div class="card"><h2>✅ Finalizados</h2><h1>${fin.qtd}</h1></div></div><div class="card"><h2>💳 Últimos pagamentos</h2><table><tr><th>Data</th><th>Valor</th><th>Origem</th></tr>${pg || '<tr><td colspan="3">Nenhum pagamento ainda.</td></tr>'}</table></div>`, c));
-});
-app.get('/cliente/conta', clienteAuth, async (req,res)=>{ const c=req.cliente; res.send(clientePage('Conta', `<h1>4️⃣ Conta</h1><div class="card"><p><b>Nome:</b> ${safeHtml(c.nome)}</p><p><b>Usuário:</b> ${safeHtml(c.login)}</p><p><b>Telegram ID:</b> ${safeHtml(c.telegram_id || c.whatsapp || '')}</p><p><b>Tipo:</b> ${safeHtml(labelTipoRevenda(c.tipo_revenda))}</p><p><b>Saldo:</b> ${brl(c.saldo)}</p><p><b>Status:</b> ${safeHtml(c.status)}</p></div>`, c)); });
-app.get('/cliente/historico', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pedidos WHERE revenda_id=? OR cliente_jid=? ORDER BY id DESC LIMIT 100',[c.id,c.jid]); let html='<h1>3️⃣ Histórico</h1><div class="card"><table><tr><th>Pedido</th><th>Serviço</th><th>Entrada</th><th>Valor</th><th>Status</th></tr>'; for(const o of rows) html+=`<tr><td>#${o.id}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.entrada_valor||o.imei||'-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`; html += rows.length ? '</table></div>' : '<tr><td colspan="5">Nenhum pedido ainda.</td></tr></table></div>'; res.send(clientePage('Histórico', html, c)); });
-app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
-  const c=req.cliente;
-  const rows=await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY nome ASC');
-  let cards='<h1>1️⃣ Serviços</h1><div class="grid">';
-  for(const s of rows){
-    const preco = await precoDaRevenda(c.id, s.id);
-    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}" onsubmit="return validarFormularioImei(this)">${clienteEntradaHtml(s)}<br><button class="btn green">Solicitar</button></form></div>`;
-  }
-  cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>';
-  res.send(clientePage('Serviços', cards, c));
-});
-app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{
-  const c=req.cliente;
-  const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);
-  if(!s) return res.redirect('/cliente/servicos');
-  const valor=await precoDaRevenda(c.id, s.id);
-  const entradasBody = req.body.imeis || req.body['imeis[]'];
-  let entradaTexto = req.body.entrada || '';
-  if (Array.isArray(entradasBody)) {
-    entradaTexto = entradasBody.map(x => String(x || '').replace(/\D/g,'').slice(0,15)).filter(Boolean).join('\n');
-  } else if (entradasBody) {
-    entradaTexto = String(entradasBody || '').replace(/\D/g,'').slice(0,15);
-  }
-  const validacao = validarEntradaServico(s, entradaTexto);
-  if(!validacao.ok) {
-    return res.send(clientePage('Entrada inválida', `<div class="card"><h1>❌ Entrada inválida</h1><pre style="white-space:pre-wrap">${safeHtml(validacao.erro)}</pre><a class="btn" href="/cliente/servicos">Voltar</a></div>`, c));
-  }
-  const totalPedido = valor * validacao.entradas.length;
-  if(isRevendaPrePaga(c) && Number(c.saldo||0) < totalPedido) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor total: ${brl(totalPedido)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c));
-
-  const tipoEntrada = normalizarTipoEntrada(s.tipo_entrada);
-  const entradaLabel = labelEntradaServico(s);
-  const loteId = validacao.entradas.length > 1 ? `SITE-LOTE-${Date.now()}` : null;
-  const criados = [];
-
-  for (const entrada of validacao.entradas) {
-    const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
-    const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDENTE',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,imeiBanco,entrada,tipoEntrada,entradaLabel,loteId,valor]);
-    criados.push({ id: ins.lastID, entrada });
-  }
-
-  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[totalPedido,c.id]);
-  await enviarTexto(c.jid, `📦 Pedido recebido\n\nServiço: ${s.nome}\nQuantidade: ${criados.length}\nValor total: ${brl(totalPedido)}\nStatus: PENDENTE\n\nPedidos: ${criados.map(x => '#'+x.id).join(', ')}`);
-  await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nCliente: ${c.nome}\nServiço: ${s.nome}\nQuantidade: ${criados.length}\nValor total: ${brl(totalPedido)}\nEntradas:\n${criados.map(x => x.entrada).join('\n')}`);
-  notificarPainel('pedido','🔔 Novo pedido site',`${c.nome} - ${s.nome}`);
-  res.redirect('/cliente/historico');
-});
-app.get('/cliente/esim', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all(`SELECT p.*, (SELECT COUNT(*) FROM esim_estoque e WHERE e.nome_plano=p.nome_plano AND e.status='DISPONIVEL') estoque FROM esim_planos p WHERE p.ativo=1 ORDER BY p.nome_plano ASC`); let html='<h1>2️⃣ Comprar eSIM</h1><div class="grid">'; for(const p of rows){ html+=`<div class="card"><h2>📱 ${safeHtml(p.nome_plano)}</h2><p>Estoque automático: ${p.estoque||0}</p><h2>${brl(p.preco_cliente || p.preco_revenda)}</h2><form method="post" action="/cliente/esim/${p.id}/comprar"><button class="btn green">Comprar</button></form></div>`;} html += rows.length ? '</div>' : '<div class="card">Nenhum plano cadastrado.</div>'; res.send(clientePage('Comprar eSIM', html, c)); });
-app.post('/cliente/esim/:id/comprar', clienteAuth, async (req,res)=>{ const c=req.cliente; const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[req.params.id]); if(!plano) return res.redirect('/cliente/esim'); const valor=Number(plano.preco_cliente || plano.preco_revenda || 0); if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c)); const item=await get('SELECT * FROM esim_estoque WHERE nome_plano=? AND status="DISPONIVEL" ORDER BY id ASC LIMIT 1',[plano.nome_plano]); await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]); if(item){ const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado, finalizado_em) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'FINALIZADO',1,CURRENT_TIMESTAMP)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${item.nome_plano}`,item.nome_plano,valor]); await run('UPDATE esim_estoque SET status="VENDIDO", revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?',[c.id,c.nome,ins.lastID,item.id]); await enviarImagem(c.jid, caminhoArquivoEsim(item.arquivo_qr), `✅ eSIM entregue\n\nPlano: ${item.nome_plano}\nPedido #${ins.lastID}\n⚠️ QR Code de uso único.`); } else { const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'AGUARDANDO_ENTREGA',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${plano.nome_plano}`,plano.nome_plano,valor]); await enviarTexto(c.jid, `🟡 Pedido recebido\n\nPedido #${ins.lastID}\nPlano: ${plano.nome_plano}\nStatus: aguardando entrega manual.`); await avisarAdminTelegram(`📱 eSIM sem estoque automático\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nPlano: ${plano.nome_plano}`); } res.redirect('/cliente/historico'); });
-app.get('/cliente/pagamentos', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pagamentos WHERE revenda_id=? ORDER BY id DESC LIMIT 50',[c.id]); let hist=''; for(const p of rows) hist+=`<tr><td>${dateBR(p.criado_em)}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem||'pixgo')}</td></tr>`; res.send(clientePage('Pagamentos', `<h1>💳 Pagamentos</h1><div class="card"><h2>Adicionar saldo</h2><form method="post" action="/cliente/pagamentos/pix"><label>Valor</label><input name="valor" placeholder="Ex: 50" required><button class="btn green">Gerar PIX</button></form></div><div class="card"><h2>Histórico</h2><table><tr><th>Data</th><th>Valor</th><th>Origem</th></tr>${hist || '<tr><td colspan="3">Nenhum pagamento.</td></tr>'}</table></div>`, c)); });
-app.post('/cliente/pagamentos/pix', clienteAuth, async (req,res)=>{ const c=req.cliente; const valor=Number(String(req.body.valor||'0').replace(',','.')); if(!valor || valor<=0) return res.redirect('/cliente/pagamentos'); const pix=await gerarPix(valor, c.nome); const paymentId=pix?.data?.payment_id || pix?.payment_id || pix?.id || pix?.data?.id || pix?.transaction_id; const copia=pix?.data?.pix_copy_paste || pix?.data?.qr_code || pix?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode || ''; if(paymentId){ await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',[paymentId,c.id,c.jid,c.jid,valor]); verificarPagamento(paymentId,c.id,c.jid,valor); } await enviarTexto(c.jid, `💳 PIX gerado\n\nValor: ${brl(valor)}\n\n${copia || 'Abra o painel para copiar o código PIX.'}`); res.send(clientePage('PIX gerado', `<div class="card"><h1>💳 PIX gerado</h1><p>Valor: <b>${brl(valor)}</b></p><label>Copia e cola</label><textarea rows="6" onclick="this.select()">${safeHtml(copia || '')}</textarea><p class="muted">Quando o pagamento for aprovado, seu saldo será atualizado automaticamente.</p><a class="btn" href="/cliente/pagamentos">Voltar</a></div>`, c)); });
-
-app.all('/webhook/pixgo', async (req, res) => {
-  try {
-    console.log('📩 WEBHOOK PIXGO:', req.method, req.body || {});
-    return res.status(200).json({ success: true, received: true });
-  } catch (e) {
-    console.log('❌ ERRO WEBHOOK PIXGO:', e.message);
-    return res.status(200).json({ success: true, received: false });
-  }
-});
-
-app.use('/admin', basicAuth);
+app.get('/cliente/*', (req, res) => res.redirect('/cliente'));
 
 app.get('/admin', async (req, res) => {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
