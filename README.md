@@ -89,3 +89,8 @@ A edição permite alterar:
 - Ativo/Inativo
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
+
+
+## Centralunlocker v3 Roadmap (placeholder)
+- Cliente panel
+- Telegram auto registration

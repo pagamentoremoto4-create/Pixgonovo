@@ -2078,3 +2078,7 @@ cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) 
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarWhatsApp();
+
+
+// CENTRALUNLOCKER_V3_PLACEHOLDER
+// Future implementation scaffold for customer portal.
