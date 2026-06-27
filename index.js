@@ -1863,7 +1863,7 @@ app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{
 
   for (const entrada of validacao.entradas) {
     const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
-    const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDENTE',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,imeiBanco,entrada,tipoEntrada,entradaLabel,loteId,valor]);
+    const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDENTE',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,imeiBanco,entrada,tipoEntrada,entradaLabel,loteId,valor]);
     criados.push({ id: ins.lastID, entrada });
   }
 
