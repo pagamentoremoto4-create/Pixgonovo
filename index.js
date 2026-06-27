@@ -800,6 +800,25 @@ async function avisarEsimManualAdminTelegram(pedido) {
   }
 }
 
+async function avisarEsimAutomaticoAdminTelegram(pedido, item) {
+  if (!ADMIN_TELEGRAM_ID || !tgBot || !pedido) return;
+  const texto = `✅ eSIM entregue automaticamente
+
+👤 Cliente: ${pedido.revenda_nome || pedido.cliente_nome || '-'}
+📦 Plano: ${pedido.entrada_valor || pedido.servico_nome || item?.nome_plano || '-'}
+💰 Valor: ${brl(pedido.valor)}
+🆔 Pedido: #${pedido.id}
+📦 Estoque QR usado: #${item?.id || '-'}
+📌 Status: FINALIZADO
+
+🏢 Centralunlocker`;
+  try {
+    await tgBot.sendMessage(ADMIN_TELEGRAM_ID, texto);
+  } catch (e) {
+    console.log('⚠️ Falha aviso eSIM automático Telegram:', e.message);
+  }
+}
+
 async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
   await enviarParaAdmins(`📦 *Novo lote recebido*
 
@@ -1474,6 +1493,8 @@ async function entregarEsimRevenda(from, revenda, plano) {
   await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
+  const pedidoAuto = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+  await avisarEsimAutomaticoAdminTelegram(pedidoAuto, item);
   const qrPath = caminhoArquivoEsim(item.arquivo_qr);
   await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n📷 QR Code enviado abaixo.`);
   if (fs.existsSync(qrPath)) await enviarImagem(from, qrPath, `📱 eSIM ${item.nome_plano}\n⚠️ QR Code de uso único.`);
@@ -2640,7 +2661,55 @@ app.post('/admin/revenda/:id/precos', async (req, res) => {
   }
   res.redirect('/admin/revendas');
 });
-app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
+app.get('/admin/revenda/:id/conta', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (!r) return res.redirect('/admin/revendas');
+  const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]);
+  const tipo = normalizarTipoRevenda(r.tipo_revenda);
+  const saldoAtual = Number(r.saldo || 0);
+  const tituloSaldo = tipo === 'PRE_PAGO' ? 'Saldo / Crédito atual' : 'Situação financeira';
+  const ajudaPagamento = tipo === 'PRE_PAGO'
+    ? 'Use para adicionar crédito ao cliente pré-pago.'
+    : 'Use para abater a dívida do cliente pós-pago.';
+  const ajudaDebito = tipo === 'PRE_PAGO'
+    ? 'Use para retirar saldo manualmente do cliente pré-pago.'
+    : 'Use para lançar uma nova cobrança/débito ao cliente pós-pago.';
+
+  let html = `<h1>💳 Conta do Cliente</h1>
+  <div class="card">
+    <h2>${safeHtml(r.nome)}</h2>
+    <p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p>
+    <p class="muted">${tituloSaldo}</p>
+    <h1>${textoSituacaoSaldo(saldoAtual).replace(/\n/g, '<br>')}</h1>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>💰 Registrar pagamento</h2>
+      <p class="muted">${ajudaPagamento}</p>
+      <form method="post" action="/admin/revenda/${r.id}/pagamento">
+        <input name="valor" placeholder="Valor pago. Ex: 100" required>
+        <br><br>
+        <button class="btn green">Registrar Pagamento</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>➖ Debitar saldo / lançar débito</h2>
+      <p class="muted">${ajudaDebito}</p>
+      <form method="post" action="/admin/revenda/${r.id}/debito">
+        <input name="valor" placeholder="Valor do débito. Ex: 50" required>
+        <br><br>
+        <input name="descricao" placeholder="Descrição opcional. Ex: ajuste manual">
+        <br><br>
+        <button class="btn red" onclick="return confirm('Confirmar débito manual na conta deste cliente?')">Debitar</button>
+      </form>
+    </div>
+  </div>
+
+  <h2>Histórico</h2>${pedidoTable(pedidos)}`;
+  res.send(page('Conta', html));
+});
 app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
 app.post('/admin/revenda/:id/pagamento', async (req, res) => {
   const valor = Number(String(req.body.valor || '0').replace(',', '.'));
@@ -2664,6 +2733,47 @@ app.post('/admin/revenda/:id/pagamento', async (req, res) => {
       await enviarTexto(
         r.jid,
         `✅ Pagamento registrado\n\n💰 Valor pago: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(novo)}\n\n🏢 CentralUnlocker`
+      );
+    }
+  }
+
+  res.redirect(`/admin/revenda/${req.params.id}/conta`);
+});
+
+app.post('/admin/revenda/:id/debito', async (req, res) => {
+  const valor = Number(String(req.body.valor || '0').replace(',', '.'));
+  const descricao = String(req.body.descricao || '').trim();
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+
+  if (valor > 0 && r) {
+    // Regra única do financeiro:
+    // saldo positivo = crédito disponível; saldo negativo = débito em aberto.
+    // Portanto, debitar sempre subtrai o valor da conta.
+    const novo = Number(r.saldo || 0) - valor;
+
+    await run(
+      'UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',
+      [novo, r.id]
+    );
+
+    await run(
+      'INSERT INTO pagamentos (revenda_id, revenda_nome, valor, origem) VALUES (?, ?, ?, ?)',
+      [r.id, r.nome, -Math.abs(valor), descricao ? `debito_manual: ${descricao}` : 'debito_manual']
+    );
+
+    notificarPainel('debito', '➖ Débito manual', `${r.nome} - ${brl(valor)}`);
+    if (r.jid) {
+      await enviarTexto(
+        r.jid,
+        `➖ Débito lançado
+
+💰 Valor: ${brl(valor)}${descricao ? `
+📝 Motivo: ${descricao}` : ''}
+
+💳 Situação da conta:
+${textoSituacaoSaldo(novo)}
+
+🏢 CentralUnlocker`
       );
     }
   }
