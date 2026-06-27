@@ -953,6 +953,7 @@ async function processarMensagemTelegram(msg) {
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     const entradaLabel = labelEntradaServico(servico);
     const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+    const prePago = isRevendaPrePaga(revAtual || cliente);
     let criados = [];
     let duplicados = [];
     for (const entrada of validacao.entradas) {
@@ -962,7 +963,7 @@ async function processarMensagemTelegram(msg) {
         if (duplicado) { duplicados.push(entrada); continue; }
       }
       const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado)
-        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 1)`, [cliente.id, cliente.nome, from, cliente.telegram_id || String(msg.from.id), servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor]);
+        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?)`, [cliente.id, cliente.nome, from, cliente.telegram_id || String(msg.from.id), servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor, prePago ? 1 : 0]);
       criados.push({ id: ins.lastID, entrada });
     }
 
@@ -1312,6 +1313,7 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     const entradaLabel = labelEntradaServico(servico);
     const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+    const prePago = isRevendaPrePaga(revenda);
     let criados = [];
     let duplicados = [];
 
@@ -1321,9 +1323,13 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
         const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada]);
         if (duplicado) { duplicados.push(entrada); continue; }
       }
-      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status)
-        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor]);
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado)
+        VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?)`, [revenda.id, revenda.nome, from, revenda.whatsapp || numero, servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valor, prePago ? 1 : 0]);
       criados.push({ id: ins.lastID, entrada });
+    }
+
+    if (prePago && criados.length) {
+      await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor * criados.length, revenda.id]);
     }
 
     pedidoSessao.delete(from);
