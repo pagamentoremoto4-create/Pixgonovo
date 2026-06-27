@@ -89,29 +89,3 @@ A edição permite alterar:
 - Ativo/Inativo
 
 Ao editar, apenas QR disponíveis são atualizados. Pedidos antigos e QR vendidos não são alterados.
-
-## CentralUnlocker v4 - Cliente pelo Telegram
-
-Fluxo implementado:
-- Cliente entra no Telegram e usa `/start`.
-- Se não estiver cadastrado, o bot mostra o Telegram ID e avisa o admin.
-- Admin cadastra em `/admin/clientes-telegram`.
-- Cliente PRÉ-PAGO precisa ter saldo para comprar/solicitar.
-- Cliente PÓS-PAGO pode solicitar e o valor vira débito.
-- Menu cliente:
-  - Comprar eSIM
-  - Solicitar Serviço
-  - Meus Pedidos
-  - Financeiro
-  - Minha Conta
-  - Suporte
-- PixGo atualizado com `receiver_cpf`.
-- Pedidos do Telegram entram na tabela `pedidos`.
-
-Variáveis:
-```txt
-TELEGRAM_BOT_TOKEN=token_do_bot
-TELEGRAM_ADMIN_ID=seu_id_telegram
-TELEGRAM_AUTO_CADASTRO=0
-PIXGO_API_KEY=sua_chave
-```

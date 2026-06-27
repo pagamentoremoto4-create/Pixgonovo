@@ -11,7 +11,6 @@ const path = require('path');
 const cron = require('node-cron');
 const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
-const TelegramBot = require('node-telegram-bot-api');
 
 const {
   default: makeWASocket,
@@ -53,11 +52,6 @@ const ADMIN_NUMBERS = Array.from(new Set([
 const ADMIN_PANEL_USER = process.env.ADMIN_PANEL_USER || 'admin';
 const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || '';
-const TELEGRAM_ADMIN_ID = String(process.env.TELEGRAM_ADMIN_ID || process.env.ADMIN_TELEGRAM_ID || '').trim();
-const telegramHabilitado = !!TELEGRAM_BOT_TOKEN;
-let telegramBot = null;
-const telegramSessao = new Map();
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -323,24 +317,6 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'status', "TEXT DEFAULT 'ATIVA'");
   await addColumnIfMissing('revendas', 'saldo', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'POS_PAGO'");
-
-  await run(`CREATE TABLE IF NOT EXISTS clientes_telegram (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id TEXT UNIQUE,
-    username TEXT,
-    nome TEXT,
-    tipo_cliente TEXT DEFAULT 'PRE_PAGO',
-    saldo REAL DEFAULT 0,
-    debito REAL DEFAULT 0,
-    status TEXT DEFAULT 'ATIVO',
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`);
-  await addColumnIfMissing('clientes_telegram', 'tipo_cliente', "TEXT DEFAULT 'PRE_PAGO'");
-  await addColumnIfMissing('clientes_telegram', 'saldo', 'REAL DEFAULT 0');
-  await addColumnIfMissing('clientes_telegram', 'debito', 'REAL DEFAULT 0');
-  await addColumnIfMissing('clientes_telegram', 'status', "TEXT DEFAULT 'ATIVO'");
-
 
   await run(`CREATE TABLE IF NOT EXISTS servicos_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -653,257 +629,6 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 📍 Status: PENDENTE
 
 🏢 Centralunlocker`);
-}
-
-
-// =========================
-// TELEGRAM CLIENTE - CENTRALUNLOCKER V4
-// =========================
-function tgId(msgOrId) {
-  if (typeof msgOrId === 'object') return String(msgOrId?.from?.id || msgOrId?.chat?.id || '');
-  return String(msgOrId || '');
-}
-function tgUsername(msg) {
-  return msg?.from?.username ? '@' + msg.from.username : '';
-}
-function tgNome(msg) {
-  const first = msg?.from?.first_name || '';
-  const last = msg?.from?.last_name || '';
-  return `${first} ${last}`.trim() || tgUsername(msg) || tgId(msg);
-}
-function tgMenuKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [
-        ['📱 Comprar eSIM', '🔓 Solicitar Serviço'],
-        ['📦 Meus Pedidos', '💰 Financeiro'],
-        ['👤 Minha Conta', '🆘 Suporte']
-      ],
-      resize_keyboard: true
-    },
-    parse_mode: 'Markdown'
-  };
-}
-function tgTipoLabel(c) {
-  return String(c?.tipo_cliente || 'PRE_PAGO').toUpperCase().includes('POS') ? 'PÓS-PAGO' : 'PRÉ-PAGO';
-}
-function tgIsPre(c) { return tgTipoLabel(c) === 'PRÉ-PAGO'; }
-async function tgCliente(id) {
-  return await get('SELECT * FROM clientes_telegram WHERE telegram_id=?', [String(id)]);
-}
-async function tgClienteAtivo(id) {
-  const c = await tgCliente(id);
-  if (!c || String(c.status || '').toUpperCase() !== 'ATIVO') return null;
-  return c;
-}
-async function tgEnviarAdmin(texto) {
-  if (telegramBot && TELEGRAM_ADMIN_ID) {
-    try { await telegramBot.sendMessage(TELEGRAM_ADMIN_ID, texto, { parse_mode: 'Markdown' }); } catch(e) { console.log('TG ADMIN ERRO:', e.message); }
-  }
-}
-async function tgAvisarCliente(telegramId, texto, extra={}) {
-  if (telegramBot && telegramId) {
-    try { await telegramBot.sendMessage(String(telegramId), texto, { parse_mode: 'Markdown', ...extra }); } catch(e) { console.log('TG CLIENTE ERRO:', e.message); }
-  }
-}
-async function tgStart(msg) {
-  const id = tgId(msg);
-  let c = await tgCliente(id);
-  if (!c) {
-    if (String(process.env.TELEGRAM_AUTO_CADASTRO || '0') === '1') {
-      await run('INSERT OR IGNORE INTO clientes_telegram (telegram_id, username, nome, tipo_cliente, status) VALUES (?, ?, ?, "PRE_PAGO", "ATIVO")', [id, tgUsername(msg), tgNome(msg)]);
-      c = await tgCliente(id);
-    } else {
-      await telegramBot.sendMessage(msg.chat.id, `👋 Bem-vindo à *CentralUnlocker*.\n\nSeu Telegram ID é:\n\`${id}\`\n\nSeu acesso ainda não está liberado. Envie esse ID para o suporte/admin.`, { parse_mode: 'Markdown' });
-      await tgEnviarAdmin(`🆕 *Novo cliente tentou acessar*\n\n👤 ${tgNome(msg)}\n🔗 ${tgUsername(msg) || '-'}\n🆔 \`${id}\`\n\nCadastre no painel: Clientes Telegram.`);
-      return;
-    }
-  }
-
-  if (String(c.status || '').toUpperCase() !== 'ATIVO') {
-    await telegramBot.sendMessage(msg.chat.id, '❌ Seu cadastro está bloqueado. Fale com o suporte.');
-    return;
-  }
-
-  await telegramBot.sendMessage(
-    msg.chat.id,
-    `🏠 *CentralUnlocker*\n\nOlá, *${c.nome || tgNome(msg)}*!\n\n👤 Tipo: *${tgTipoLabel(c)}*\n💰 Saldo: *${brl(c.saldo)}*\n${Number(c.debito || 0) > 0 ? `🔴 Débito: *${brl(c.debito)}*\n` : ''}\nEscolha uma opção:`,
-    tgMenuKeyboard()
-  );
-}
-async function tgListarEsim(chatId) {
-  const c = await tgClienteAtivo(chatId);
-  if (!c) return tgStart({ chat: { id: chatId }, from: { id: chatId } });
-  const planos = await all('SELECT * FROM esim_planos WHERE ativo=1 ORDER BY nome_plano ASC');
-  if (!planos.length) return telegramBot.sendMessage(chatId, '❌ Nenhum plano eSIM disponível no momento.', tgMenuKeyboard());
-
-  const kb = { inline_keyboard: [] };
-  let texto = '📱 *Comprar eSIM*\n\nEscolha um plano:\n\n';
-  for (const p of planos) {
-    const preco = tgIsPre(c) ? Number(p.preco_cliente || p.preco_revenda || 0) : Number(p.preco_revenda || p.preco_cliente || 0);
-    const disp = await get('SELECT COUNT(*) qtd FROM esim_estoque WHERE nome_plano=? AND status="DISPONIVEL"', [p.nome_plano]);
-    texto += `📱 *${p.nome_plano}*\n💰 ${brl(preco)}\n✅ QR disponível: ${disp?.qtd || 0}\n\n`;
-    kb.inline_keyboard.push([{ text: `${p.nome_plano} - ${brl(preco)}`, callback_data: `tg_esim_${p.id}` }]);
-  }
-  await telegramBot.sendMessage(chatId, texto, { parse_mode: 'Markdown', reply_markup: kb });
-}
-async function tgComprarEsim(call) {
-  const chatId = call.message.chat.id;
-  const cliente = await tgClienteAtivo(chatId);
-  if (!cliente) return telegramBot.answerCallbackQuery(call.id, { text: 'Cliente não cadastrado.' });
-  const planoId = call.data.replace('tg_esim_', '');
-  const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [planoId]);
-  if (!plano) return telegramBot.answerCallbackQuery(call.id, { text: 'Plano não encontrado.' });
-
-  const preco = tgIsPre(cliente) ? Number(plano.preco_cliente || plano.preco_revenda || 0) : Number(plano.preco_revenda || plano.preco_cliente || 0);
-
-  if (tgIsPre(cliente) && Number(cliente.saldo || 0) < preco) {
-    telegramSessao.set(String(chatId), { etapa: 'tg_deposito_valor' });
-    await telegramBot.sendMessage(chatId, `❌ *Saldo insuficiente*\n\n📱 Plano: *${plano.nome_plano}*\n💰 Valor: *${brl(preco)}*\n💳 Seu saldo: *${brl(cliente.saldo)}*\n\nDigite o valor que deseja depositar para gerar o Pix.\nExemplo: *${Math.max(preco - Number(cliente.saldo || 0), 10).toFixed(2)}*`, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  const item = await get('SELECT * FROM esim_estoque WHERE nome_plano=? AND status="DISPONIVEL" ORDER BY id ASC LIMIT 1', [plano.nome_plano]);
-
-  const result = await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status) VALUES ('TELEGRAM', ?, ?, ?, 'eSIM', ?, 'OUTRO', 'eSIM', ?, ?)`,
-    [cliente.nome, cliente.telegram_id, `tg:${cliente.telegram_id}`, plano.nome_plano, preco, item ? 'FINALIZADO' : 'PENDENTE']);
-
-  if (tgIsPre(cliente)) {
-    await run('UPDATE clientes_telegram SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [preco, cliente.id]);
-  } else {
-    await run('UPDATE clientes_telegram SET debito=debito+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [preco, cliente.id]);
-  }
-
-  if (item) {
-    await run('UPDATE esim_estoque SET status="USADO", pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?', [result.lastID, item.id]);
-    const filePath = caminhoArquivoEsim(item.arquivo_qr);
-    if (filePath && fs.existsSync(filePath)) {
-      await telegramBot.sendPhoto(chatId, filePath, { caption: `✅ *eSIM entregue!*\n\n📱 ${plano.nome_plano}\n🆔 Pedido #${result.lastID}\n\n⚠️ QR Code de uso único.`, parse_mode: 'Markdown' });
-    } else {
-      await telegramBot.sendMessage(chatId, `✅ Pedido #${result.lastID} finalizado.\n\nQR não encontrado no arquivo. Fale com suporte.`);
-    }
-    await tgEnviarAdmin(`✅ *eSIM entregue automático via Telegram*\n\nPedido #${result.lastID}\nCliente: ${cliente.nome}\nPlano: ${plano.nome_plano}\nValor: ${brl(preco)}`);
-  } else {
-    await telegramBot.sendMessage(chatId, `🟡 Pedido #${result.lastID} criado.\n\n📱 Plano: *${plano.nome_plano}*\nStatus: *PENDENTE*\n\nO admin foi avisado e fará a entrega.`, { parse_mode: 'Markdown' });
-    await tgEnviarAdmin(`🔔 *Novo pedido eSIM Telegram*\n\nPedido #${result.lastID}\nCliente: ${cliente.nome}\nTipo: ${tgTipoLabel(cliente)}\nPlano: ${plano.nome_plano}\nValor: ${brl(preco)}\nStatus: PENDENTE`);
-  }
-}
-async function tgListarServicos(chatId) {
-  const c = await tgClienteAtivo(chatId);
-  if (!c) return tgStart({ chat: { id: chatId }, from: { id: chatId } });
-  const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY nome ASC');
-  if (!servicos.length) return telegramBot.sendMessage(chatId, '❌ Nenhum serviço disponível.', tgMenuKeyboard());
-  const kb = { inline_keyboard: servicos.map(s => [{ text: `${s.nome} - ${brl(s.preco_padrao || 0)}`, callback_data: `tg_serv_${s.id}` }]) };
-  await telegramBot.sendMessage(chatId, '🔓 *Solicitar Serviço*\n\nEscolha o serviço:', { parse_mode: 'Markdown', reply_markup: kb });
-}
-async function tgEscolherServico(call) {
-  const chatId = call.message.chat.id;
-  const id = call.data.replace('tg_serv_', '');
-  const serv = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [id]);
-  if (!serv) return telegramBot.answerCallbackQuery(call.id, { text: 'Serviço não encontrado.' });
-  telegramSessao.set(String(chatId), { etapa: 'tg_serv_entrada', servico_id: serv.id });
-  await telegramBot.sendMessage(chatId, `🛠 *${serv.nome}*\n💰 Valor: *${brl(serv.preco_padrao || 0)}*\n\nDigite ${serv.entrada_label || 'IMEI/dados'}:`, { parse_mode: 'Markdown' });
-}
-async function tgCriarPedidoServico(msg, sess) {
-  const chatId = msg.chat.id;
-  const cliente = await tgClienteAtivo(chatId);
-  const serv = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servico_id]);
-  if (!cliente || !serv) { telegramSessao.delete(String(chatId)); return; }
-  const valor = Number(serv.preco_padrao || 0);
-  if (tgIsPre(cliente) && Number(cliente.saldo || 0) < valor) {
-    telegramSessao.set(String(chatId), { etapa: 'tg_deposito_valor' });
-    await telegramBot.sendMessage(chatId, `❌ Saldo insuficiente.\n\nServiço: *${serv.nome}*\nValor: *${brl(valor)}*\nSeu saldo: *${brl(cliente.saldo)}*\n\nDigite o valor para depósito.`, { parse_mode: 'Markdown' });
-    return;
-  }
-  const entrada = String(msg.text || '').trim();
-  const result = await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status) VALUES ('TELEGRAM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE')`,
-    [cliente.nome, cliente.telegram_id, `tg:${cliente.telegram_id}`, serv.id, serv.nome, entrada, entrada, serv.tipo_entrada || 'IMEI', serv.entrada_label || 'IMEI', valor]);
-  if (tgIsPre(cliente)) await run('UPDATE clientes_telegram SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, cliente.id]);
-  else await run('UPDATE clientes_telegram SET debito=debito+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, cliente.id]);
-  telegramSessao.delete(String(chatId));
-  await telegramBot.sendMessage(chatId, `✅ Pedido criado!\n\n🆔 Pedido: *#${result.lastID}*\n🛠 Serviço: *${serv.nome}*\n📋 Dados: \`${entrada}\`\n📍 Status: *PENDENTE*`, { parse_mode: 'Markdown', ...tgMenuKeyboard() });
-  await tgEnviarAdmin(`🔔 *Novo serviço Telegram*\n\nPedido #${result.lastID}\nCliente: ${cliente.nome}\nTipo: ${tgTipoLabel(cliente)}\nServiço: ${serv.nome}\nDados: ${entrada}\nValor: ${brl(valor)}`);
-}
-async function tgMeusPedidos(chatId) {
-  const c = await tgClienteAtivo(chatId);
-  if (!c) return tgStart({ chat: { id: chatId }, from: { id: chatId } });
-  const pedidos = await all('SELECT * FROM pedidos WHERE tipo="TELEGRAM" AND cliente_whatsapp=? ORDER BY id DESC LIMIT 10', [String(chatId)]);
-  if (!pedidos.length) return telegramBot.sendMessage(chatId, '📦 Você ainda não tem pedidos.', tgMenuKeyboard());
-  let texto = '📦 *Meus Pedidos*\n\n';
-  for (const p of pedidos) texto += `#${p.id} - ${p.servico_nome || '-'} - *${p.status}* - ${brl(p.valor)}\n${p.entrada_valor ? `📋 ${p.entrada_valor}\n` : ''}\n`;
-  await telegramBot.sendMessage(chatId, texto, { parse_mode: 'Markdown', ...tgMenuKeyboard() });
-}
-async function tgFinanceiro(chatId) {
-  const c = await tgClienteAtivo(chatId);
-  if (!c) return tgStart({ chat: { id: chatId }, from: { id: chatId } });
-  if (tgIsPre(c)) {
-    telegramSessao.set(String(chatId), { etapa: 'tg_deposito_valor' });
-    await telegramBot.sendMessage(chatId, `💰 *Financeiro*\n\nTipo: *PRÉ-PAGO*\nSaldo atual: *${brl(c.saldo)}*\n\nPara depositar, digite o valor.\nExemplo: *50*`, { parse_mode: 'Markdown' });
-  } else {
-    await telegramBot.sendMessage(chatId, `💰 *Financeiro*\n\nTipo: *PÓS-PAGO*\nDébito atual: *${brl(c.debito)}*\n\nFale com o admin para registrar pagamento.`, { parse_mode: 'Markdown', ...tgMenuKeyboard() });
-  }
-}
-async function tgMinhaConta(chatId) {
-  const c = await tgClienteAtivo(chatId);
-  if (!c) return tgStart({ chat: { id: chatId }, from: { id: chatId } });
-  await telegramBot.sendMessage(chatId, `👤 *Minha Conta*\n\nNome: *${c.nome}*\nTelegram ID: \`${c.telegram_id}\`\nUsuário: ${c.username || '-'}\nTipo: *${tgTipoLabel(c)}*\nStatus: *${c.status}*\nSaldo: *${brl(c.saldo)}*\nDébito: *${brl(c.debito)}*`, { parse_mode: 'Markdown', ...tgMenuKeyboard() });
-}
-async function tgDepositoValor(msg, sess) {
-  const chatId = msg.chat.id;
-  const valor = Number(String(msg.text || '').replace(',', '.'));
-  if (!valor || valor < 10) return telegramBot.sendMessage(chatId, '❌ Valor mínimo R$ 10,00. Digite outro valor ou /cancelar.');
-  telegramSessao.set(String(chatId), { etapa: 'tg_deposito_cpf', valor });
-  await telegramBot.sendMessage(chatId, `💳 Depósito: *${brl(valor)}*\n\nDigite o CPF/CNPJ de quem vai pagar o PixGo.\nSomente números.`, { parse_mode: 'Markdown' });
-}
-async function tgDepositoCpf(msg, sess) {
-  const chatId = msg.chat.id;
-  const c = await tgClienteAtivo(chatId);
-  const doc = onlyDigits(msg.text || '');
-  const valor = Number(sess.valor || 0);
-  if (!doc || ![11,14].includes(doc.length)) return telegramBot.sendMessage(chatId, '❌ CPF/CNPJ inválido. Envie somente números.');
-  const pix = await gerarPix(valor, `telegram_${chatId}`, doc, c?.nome || 'Cliente Telegram');
-  if (!pix) return telegramBot.sendMessage(chatId, '❌ Erro ao gerar Pix.');
-  const data = pix.data || pix;
-  const paymentId = data.payment_id || data.id || data.transaction_id;
-  const qrCode = data.qr_code || data.copy_paste || data.pix_copy_paste || data.pix || data.brcode;
-  if (!qrCode) return telegramBot.sendMessage(chatId, '❌ PixGo não retornou copia e cola.');
-  await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, NULL, NULL, ?, ?, "pending")', [paymentId, `tg:${chatId}`, valor]);
-  telegramSessao.delete(String(chatId));
-  await telegramBot.sendMessage(chatId, `✅ *PIX GERADO*\n\nValor: *${brl(valor)}*\n\n📋 Copia e cola:\n\`${qrCode}\`\n\n⏳ Após confirmar, o saldo será liberado.`, { parse_mode: 'Markdown', ...tgMenuKeyboard() });
-  verificarPagamento(paymentId, null, `tg:${chatId}`, valor);
-}
-function iniciarTelegram() {
-  if (!telegramHabilitado) { console.log('ℹ️ Telegram desativado. Configure TELEGRAM_BOT_TOKEN.'); return; }
-  telegramBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-  console.log('✅ TELEGRAM CLIENTE ATIVO');
-  telegramBot.onText(/\/start/, tgStart);
-  telegramBot.onText(/\/cancelar|\/cancel/i, async (msg) => { telegramSessao.delete(tgId(msg)); await telegramBot.sendMessage(msg.chat.id, '❌ Operação cancelada.', tgMenuKeyboard()); });
-  telegramBot.on('callback_query', async (call) => {
-    try {
-      if (call.data.startsWith('tg_esim_')) await tgComprarEsim(call);
-      if (call.data.startsWith('tg_serv_')) await tgEscolherServico(call);
-      await telegramBot.answerCallbackQuery(call.id).catch(()=>{});
-    } catch(e) { console.log('TG CALLBACK ERRO:', e); }
-  });
-  telegramBot.on('message', async (msg) => {
-    if (!msg.text || msg.text.startsWith('/')) return;
-    const chatId = String(msg.chat.id);
-    try {
-      const sess = telegramSessao.get(chatId);
-      if (sess?.etapa === 'tg_serv_entrada') return tgCriarPedidoServico(msg, sess);
-      if (sess?.etapa === 'tg_deposito_valor') return tgDepositoValor(msg, sess);
-      if (sess?.etapa === 'tg_deposito_cpf') return tgDepositoCpf(msg, sess);
-
-      const t = msg.text.trim();
-      if (t === '📱 Comprar eSIM') return tgListarEsim(msg.chat.id);
-      if (t === '🔓 Solicitar Serviço') return tgListarServicos(msg.chat.id);
-      if (t === '📦 Meus Pedidos') return tgMeusPedidos(msg.chat.id);
-      if (t === '💰 Financeiro') return tgFinanceiro(msg.chat.id);
-      if (t === '👤 Minha Conta') return tgMinhaConta(msg.chat.id);
-      if (t === '🆘 Suporte') return telegramBot.sendMessage(msg.chat.id, '🆘 Suporte: fale com o administrador.', tgMenuKeyboard());
-      return tgStart(msg);
-    } catch(e) { console.log('TG MSG ERRO:', e); await telegramBot.sendMessage(msg.chat.id, '❌ Erro interno. Tente novamente.'); }
-  });
 }
 
 async function iniciarWhatsApp() {
@@ -1741,14 +1466,11 @@ async function textoBackups() {
   return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
 }
 
-async function gerarPix(valor, cliente, receiverCpf = '12345678901', receiverName = 'Cliente') {
+async function gerarPix(valor, cliente) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
-      amount: Number(valor),
-      description: `Pagamento CentralUnlocker ${cliente}`,
-      receiver_name: receiverName || 'Cliente',
-      receiver_cpf: onlyDigits(receiverCpf || '12345678901'),
-      external_id: `pedido_${Date.now()}`
+      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
+      customer_name: 'Cliente WhatsApp', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
     }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
@@ -1774,11 +1496,6 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
         }
       } else {
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, "pixgo")', [jid, jidToNumber(jid), valorPix]);
-        if (String(jid || '').startsWith('tg:')) {
-          const tg = String(jid).replace('tg:', '');
-          await run('UPDATE clientes_telegram SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE telegram_id=?', [valorPix, tg]);
-          await tgAvisarCliente(tg, `✅ *Pagamento aprovado!*\n\nSaldo adicionado: *${brl(valorPix)}*\n\nDigite /start para continuar.`);
-        }
       }
       await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${revendaId ? 'revenda' : 'cliente'}`);
@@ -2219,30 +1936,6 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
   res.redirect('/admin/esim');
 });
 
-
-app.get('/admin/clientes-telegram', async (req, res) => {
-  const rows = await all('SELECT * FROM clientes_telegram ORDER BY id DESC');
-  let table = '<table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>Tipo</th><th>Saldo</th><th>Débito</th><th>Status</th><th>Ações</th></tr>';
-  for (const c of rows) {
-    table += `<tr><td>${c.id}</td><td>${safeHtml(c.nome)}</td><td>${safeHtml(c.telegram_id)}<br>${safeHtml(c.username || '')}</td><td>${safeHtml(c.tipo_cliente)}</td><td>${brl(c.saldo)}</td><td>${brl(c.debito)}</td><td>${safeHtml(c.status)}</td><td><form method="post" action="/admin/clientes-telegram/${c.id}/saldo" class="forms-inline"><input name="valor" placeholder="Valor" style="width:90px"><button class="btn green">+Saldo</button></form> <form method="post" action="/admin/clientes-telegram/${c.id}/tipo" class="forms-inline"><select name="tipo_cliente"><option value="PRE_PAGO">Pré</option><option value="POS_PAGO">Pós</option></select><button class="btn">Tipo</button></form></td></tr>`;
-  }
-  table += '</table>';
-  res.send(page('Clientes Telegram', `<h1>👥 Clientes Telegram</h1><div class="card"><h2>➕ Cadastrar cliente</h2><form method="post" class="form-grid"><input name="nome" placeholder="Nome" required><input name="telegram_id" placeholder="Telegram ID" required><input name="username" placeholder="@username"><select name="tipo_cliente"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO">Pós-pago</option></select><button class="btn green">Cadastrar</button></form></div><div class="card">${table}</div>`));
-});
-app.post('/admin/clientes-telegram', async (req, res) => {
-  await run('INSERT OR REPLACE INTO clientes_telegram (telegram_id, username, nome, tipo_cliente, status, atualizado_em) VALUES (?, ?, ?, ?, "ATIVO", CURRENT_TIMESTAMP)', [String(req.body.telegram_id||'').trim(), req.body.username||'', req.body.nome||'', req.body.tipo_cliente||'PRE_PAGO']);
-  res.redirect('/admin/clientes-telegram');
-});
-app.post('/admin/clientes-telegram/:id/saldo', async (req, res) => {
-  const v = Number(String(req.body.valor||'0').replace(',', '.'));
-  if (v) await run('UPDATE clientes_telegram SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [v, req.params.id]);
-  res.redirect('/admin/clientes-telegram');
-});
-app.post('/admin/clientes-telegram/:id/tipo', async (req, res) => {
-  await run('UPDATE clientes_telegram SET tipo_cliente=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.tipo_cliente || 'PRE_PAGO', req.params.id]);
-  res.redirect('/admin/clientes-telegram');
-});
-
 app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
   let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div><button class="btn green">Adicionar Revenda</button></form><p class="muted">Pré-pago bloqueia compra sem saldo. Pós-pago permite comprar e fica negativo.</p></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
@@ -2385,4 +2078,3 @@ cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) 
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarWhatsApp();
-iniciarTelegram();
