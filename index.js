@@ -661,7 +661,7 @@ async function listarServicosTexto(revenda) {
     const preco = revenda ? await precoDaRevenda(revenda.id, servicos[i].id) : Number(servicos[i].preco_padrao || 0);
     texto += `${i + 1} - ${servicos[i].nome} - ${brl(preco)}\n`;
   }
-  texto += '\nDigite o número do serviço.';
+  texto += '\nToque no serviço desejado abaixo.';
   return texto;
 }
 async function enviarTexto(to, text) {
@@ -854,35 +854,87 @@ Usuário: ${login}`);
 }
 
 function menuTelegramTexto(cliente) {
-  return `🏠 MENU PRINCIPAL
+  const tipo = labelTipoRevenda(cliente?.tipo_revenda || 'PRE_PAGO');
+  const saldo = brl(cliente?.saldo || 0);
+  const linhaFinanceira = isRevendaPosPaga(cliente)
+    ? `💳 Tipo: ${tipo}
+📌 Débito atual: ${saldo}`
+    : `💳 Tipo: ${tipo}
+💰 Saldo: ${saldo}`;
+  return `🏠 *MENU PRINCIPAL*
 
 Olá, ${cliente?.nome || 'cliente'}!
 
-1️⃣ Serviços
-2️⃣ Comprar eSIM
-3️⃣ Histórico
-4️⃣ Conta
-5️⃣ Pagar
-6️⃣ Suporte
+${linhaFinanceira}
 
-Digite o número da opção.`;
+Toque em uma opção abaixo.`;
 }
 function tecladoTelegramMenu() {
   return {
+    parse_mode: 'Markdown',
     reply_markup: {
-      keyboard: [
-        ['1️⃣ Serviços', '2️⃣ Comprar eSIM'],
-        ['3️⃣ Histórico', '4️⃣ Conta'],
-        ['5️⃣ Pagar', '6️⃣ Suporte']
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false
+      inline_keyboard: [
+        [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
+        [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
+        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🆘 Suporte', callback_data: 'menu_suporte' }]
+      ]
     }
   };
 }
 async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
   await tgBot.sendMessage(chatId, menuTelegramTexto(cliente), tecladoTelegramMenu());
+}
+function montarLinhasBotoes(items, prefixo, nomeCampo='nome') {
+  const linhas = [];
+  for (let i = 0; i < items.length; i += 2) {
+    const linha = items.slice(i, i + 2).map(item => ({
+      text: String(item[nomeCampo] || item.nome_plano || item.nome || 'Opção').slice(0, 45),
+      callback_data: `${prefixo}_${item.id}`
+    }));
+    linhas.push(linha);
+  }
+  linhas.push([{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]);
+  return linhas;
+}
+async function enviarServicosBotoesTelegram(chatId, cliente) {
+  const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+  if (!servicos.length) {
+    await tgBot.sendMessage(chatId, '❌ Nenhum serviço cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+    return;
+  }
+  let texto = `🔓 *Escolha um serviço*\n\n`;
+  for (const s of servicos) {
+    const preco = cliente ? await precoDaRevenda(cliente.id, s.id) : Number(s.preco_padrao || 0);
+    texto += `• ${s.nome} — ${brl(preco)}
+`;
+  }
+  await tgBot.sendMessage(chatId, texto, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: montarLinhasBotoes(servicos, 'servico', 'nome') }
+  });
+}
+async function enviarEsimBotoesTelegram(chatId) {
+  const planos = await planosEsimDisponiveis();
+  if (!planos.length) {
+    await tgBot.sendMessage(chatId, '❌ Nenhum plano eSIM cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+    return;
+  }
+  let texto = `📱 *Escolha um plano eSIM*
+
+`;
+  for (const p of planos) {
+    const qtd = Number(p.qtd || 0);
+    const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '👨‍💻 Entrega manual';
+    texto += `• ${p.nome_plano} — ${brl(p.preco_revenda)}
+${entrega}
+
+`;
+  }
+  await tgBot.sendMessage(chatId, texto.trim(), {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: montarLinhasBotoes(planos, 'esim', 'nome_plano') }
+  });
 }
 function normalizarOpcaoTelegram(texto) {
   const t = String(texto || '').trim().toLowerCase();
@@ -955,8 +1007,8 @@ async function processarMensagemTelegram(msg) {
   const sess = pedidoSessao.get(from);
 
   if (sess?.etapa === 'menu') {
-    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
     if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
@@ -964,8 +1016,8 @@ async function processarMensagemTelegram(msg) {
   }
 
   if (!sess) {
-    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
     if (opcao === '3') { await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
@@ -1109,6 +1161,122 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       const chatId = q.message?.chat?.id;
       const data = String(q.data || '');
       if (!chatId) return;
+      // Botões do cliente no Telegram
+      const ehBotaoCliente = data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra)$/.test(data);
+      if (ehBotaoCliente) {
+        const { cliente } = await cadastrarClienteTelegram(q.from);
+        const from = tgJid(q.from.id);
+        await tgBot.answerCallbackQuery(q.id);
+
+        if (data === 'menu_voltar') {
+          pedidoSessao.delete(from);
+          return enviarMenuTelegram(chatId, cliente);
+        }
+        if (data === 'menu_servicos') {
+          pedidoSessao.set(from, { etapa: 'servico_escolha' });
+          return enviarServicosBotoesTelegram(chatId, cliente);
+        }
+        if (data === 'menu_esim') {
+          pedidoSessao.set(from, { etapa: 'esim_escolha' });
+          return enviarEsimBotoesTelegram(chatId);
+        }
+        if (data === 'menu_historico') {
+          pedidoSessao.delete(from);
+          return enviarHistoricoRevenda(from, cliente);
+        }
+        if (data === 'menu_conta') {
+          pedidoSessao.delete(from);
+          return enviarContaRevenda(from, cliente);
+        }
+        if (data === 'menu_pagar') {
+          pedidoSessao.delete(from);
+          return tgBot.sendMessage(chatId, `💳 Para gerar PIX, digite:
+
+pagar 50
+
+Ou escolha um valor:`, {
+            reply_markup: { inline_keyboard: [
+              [{ text: 'R$ 20', callback_data: 'pagar_20' }, { text: 'R$ 50', callback_data: 'pagar_50' }],
+              [{ text: 'R$ 100', callback_data: 'pagar_100' }, { text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
+            ] }
+          });
+        }
+        if (data === 'menu_suporte') {
+          pedidoSessao.delete(from);
+          return tgBot.sendMessage(chatId, '🆘 Suporte: fale com o administrador da Centralunlocker.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+        }
+        if (data.startsWith('pagar_')) {
+          const valor = Number(data.replace('pagar_', ''));
+          await tgBot.sendMessage(chatId, '⏳ Gerando PIX...');
+          const pix = await gerarPix(valor, `Telegram ${cliente.nome}`);
+          if (!pix) return tgBot.sendMessage(chatId, '❌ Erro ao gerar PIX.');
+          const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
+          const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+          if (paymentId) {
+            await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
+            verificarPagamento(paymentId, cliente.id, from, valor);
+          }
+          await tgBot.sendMessage(chatId, `✅ PIX GERADO
+
+💰 Valor: ${brl(valor)}
+
+Copia e cola abaixo:`);
+          return tgBot.sendMessage(chatId, qrCode || 'PIX indisponível');
+        }
+        const servMatch = data.match(/^servico_(\d+)$/);
+        if (servMatch) {
+          const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
+          if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+          pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+          const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+          if (tipoEntrada === 'IMEI') {
+            return tgBot.sendMessage(chatId, `📱 Envie os IMEIs
+
+• Máximo 5 IMEIs
+• 1 IMEI por linha
+• Cada IMEI precisa ter 15 números
+
+Exemplo:
+353625361425365
+353625361425366`);
+          }
+          return tgBot.sendMessage(chatId, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+        }
+        const esimMatch = data.match(/^esim_(\d+)$/);
+        if (esimMatch && !data.includes('entregar') && !data.includes('finalizar') && !data.includes('cancelar')) {
+          const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS qtd
+            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
+            WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
+          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+          pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+          return tgBot.sendMessage(chatId, `📱 ${plano.nome_plano}
+
+💰 Valor: ${brl(plano.preco_revenda)}
+💳 Seu saldo: ${brl(cliente.saldo)}
+🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+
+Confirmar compra?`, {
+            reply_markup: { inline_keyboard: [
+              [{ text: '✅ Confirmar compra', callback_data: `esim_confirmar_${plano.id}` }],
+              [{ text: '❌ Cancelar', callback_data: 'esim_cancelar_compra' }, { text: '⬅️ Voltar', callback_data: 'menu_esim' }]
+            ] }
+          });
+        }
+        const confMatch = data.match(/^esim_confirmar_(\d+)$/);
+        if (confMatch) {
+          const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(confMatch[1])]);
+          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
+          pedidoSessao.delete(from);
+          const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+          return entregarEsimRevenda(from, revAtual || cliente, plano);
+        }
+        if (data === 'esim_cancelar_compra') {
+          pedidoSessao.delete(from);
+          return tgBot.sendMessage(chatId, '✅ Compra de eSIM cancelada.', { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
+        }
+        return;
+      }
+
       if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
         await tgBot.answerCallbackQuery(q.id, { text: 'Apenas o admin pode usar este botão.', show_alert: true });
         return;
@@ -1411,6 +1579,7 @@ async function planosEsimDisponiveis() {
   // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
   return await all(`
     SELECT
+      p.id,
       p.nome_plano,
       p.preco_revenda,
       p.preco_cliente,
@@ -1420,7 +1589,7 @@ async function planosEsimDisponiveis() {
       ON e.nome_plano = p.nome_plano
      AND e.preco_revenda = p.preco_revenda
     WHERE p.ativo=1
-    GROUP BY p.nome_plano, p.preco_revenda, p.preco_cliente
+    GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente
     ORDER BY p.nome_plano ASC
   `);
 }
@@ -1433,7 +1602,7 @@ async function enviarListaEsim(from) {
     const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '📦 Sem QR no estoque\n👨‍💻 Entrega manual pelo admin';
     txt += `${i + 1}️⃣ ${p.nome_plano}\n💰 ${brl(p.preco_revenda)}\n${entrega}\n\n`;
   });
-  txt += 'Digite o número do plano.';
+  txt += 'Toque no plano desejado abaixo.';
   await enviarTexto(from, txt.trim());
 }
 
