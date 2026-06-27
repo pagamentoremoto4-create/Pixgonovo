@@ -318,6 +318,31 @@ function temaAtual() { return TEMAS_PAINEL[PAINEL_TEMA] ? PAINEL_TEMA : 'hacker-
 function temCor() { return TEMAS_PAINEL[temaAtual()].cor; }
 async function getConfig(chave, padrao='') { const r = await get('SELECT valor FROM configs WHERE chave=?', [chave]); return r ? r.valor : padrao; }
 async function setConfig(chave, valor) { await run('INSERT OR REPLACE INTO configs (chave, valor, atualizado_em) VALUES (?, ?, CURRENT_TIMESTAMP)', [chave, valor]); }
+
+function normalizarTelegramSuporte(valor) {
+  let v = String(valor || '').trim();
+  if (!v) return '';
+  v = v.replace(/^https?:\/\/t\.me\//i, '').replace(/^t\.me\//i, '').replace('@', '').trim();
+  v = v.split(/[\s/?#]/)[0];
+  return v.replace(/[^a-zA-Z0-9_]/g, '');
+}
+async function getTelegramSuporte() {
+  const cfg = await getConfig('telegram_suporte', process.env.SUPORTE_TELEGRAM || process.env.TELEGRAM_SUPORTE || 'alinesantos3360');
+  return normalizarTelegramSuporte(cfg) || 'alinesantos3360';
+}
+async function enviarSuporteTelegram(chatId) {
+  if (!tgBot) return;
+  const usuario = await getTelegramSuporte();
+  const link = `https://t.me/${usuario}`;
+  return tgBot.sendMessage(chatId, `🆘 *Suporte CentralUnlocker*\n\nPrecisa de ajuda?\nClique no botão abaixo para falar diretamente com o suporte.`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: [
+      [{ text: '💬 Falar com o suporte', url: link }],
+      [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
+    ] }
+  });
+}
+
 function notificarPainel(tipo, titulo, mensagem) {
   const n = { tipo, titulo, mensagem, hora: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) };
   io.emit('notificacao', n);
@@ -1013,7 +1038,7 @@ async function processarMensagemTelegram(msg) {
     if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
-    if (opcao === '6') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '🆘 Suporte: fale com o administrador da Centralunlocker.'); return; }
+    if (opcao === '6') { pedidoSessao.delete(from); await enviarSuporteTelegram(msg.chat.id); return; }
   }
 
   if (!sess) {
@@ -1022,7 +1047,7 @@ async function processarMensagemTelegram(msg) {
     if (opcao === '3') { await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
-    if (opcao === '6') { await tgBot.sendMessage(msg.chat.id, '🆘 Suporte: fale com o administrador da Centralunlocker.'); return; }
+    if (opcao === '6') { await enviarSuporteTelegram(msg.chat.id); return; }
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarMenuTelegram(msg.chat.id, cliente);
     return;
@@ -1204,7 +1229,7 @@ Ou escolha um valor:`, {
         }
         if (data === 'menu_suporte') {
           pedidoSessao.delete(from);
-          return tgBot.sendMessage(chatId, '🆘 Suporte: fale com o administrador da Centralunlocker.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+          return enviarSuporteTelegram(chatId);
         }
         if (data.startsWith('pagar_')) {
           const valor = Number(data.replace('pagar_', ''));
@@ -2989,11 +3014,20 @@ app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('S
 
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
-app.get('/admin/config', (req, res) => {
+app.get('/admin/config', async (req, res) => {
+  const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
-  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/config'); });
+app.post('/admin/config/suporte', async (req, res) => {
+  const usuario = normalizarTelegramSuporte(req.body.telegram_suporte || '');
+  if (usuario) {
+    await setConfig('telegram_suporte', usuario);
+    notificarPainel('config', '🆘 Suporte atualizado', `@${usuario}`);
+  }
+  res.redirect('/admin/config');
+});
 app.post('/admin/config/hacker-image', async (req, res) => {
   try {
     const data = String(req.body.imageData || '');
