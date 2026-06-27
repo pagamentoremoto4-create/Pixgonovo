@@ -553,11 +553,21 @@ function clientePage(title, body, cliente=null) {
     juntarImeis(el.closest('form'));
   }
   function juntarImeis(form){
-    if(!form) return;
+    if(!form) return '';
     const hidden = form.querySelector('input[name="entrada"]');
-    if(!hidden) return;
-    const valores = Array.from(form.querySelectorAll('.imei-field')).map(i => (i.value||'').replace(/\D/g,'')).filter(Boolean);
-    hidden.value = valores.join('\n');
+    const valores = Array.from(form.querySelectorAll('.imei-field')).map(i => (i.value||'').replace(/\D/g,'').slice(0,15)).filter(Boolean);
+    if(hidden) hidden.value = valores.join('\n');
+    return valores.join('\n');
+  }
+  function validarFormularioImei(form){
+    const txt = juntarImeis(form);
+    const valores = txt ? txt.split('\n').filter(Boolean) : [];
+    if(!form.querySelector('.imei-field')) return true;
+    if(valores.length < 1){ alert('Digite pelo menos 1 IMEI.'); return false; }
+    if(valores.length > 10){ alert('Limite máximo de 10 IMEIs.'); return false; }
+    const ruim = valores.find(v => v.length !== 15);
+    if(ruim){ alert('Cada IMEI precisa ter exatamente 15 dígitos. Corrija: '+ruim); return false; }
+    return true;
   }
   function adicionarImei(btn){
     const form = btn.closest('form');
@@ -566,7 +576,7 @@ function clientePage(title, body, cliente=null) {
     if(total >= 10){ alert('Limite máximo de 10 IMEIs.'); return; }
     const div = document.createElement('div');
     div.className = 'imei-row';
-    div.innerHTML = '<span class="imei-label">IMEI '+(total+1)+'</span><input class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)">';
+    div.innerHTML = '<span class="imei-label">IMEI '+(total+1)+'</span><input name="imeis[]" class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)">';
     lista.appendChild(div);
     div.querySelector('input').focus();
     juntarImeis(form);
@@ -580,7 +590,7 @@ function clienteEntradaHtml(s) {
   if (tipo === 'IMEI') {
     return `<label>${label}</label>
       <div class="imei-list">
-        <div class="imei-row"><span class="imei-label">IMEI 1</span><input class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)"></div>
+        <div class="imei-row"><span class="imei-label">IMEI 1</span><input name="imeis[]" class="imei-field" inputmode="numeric" autocomplete="off" maxlength="15" size="15" placeholder="000000000000000" oninput="limparImeiCampo(this)" onpaste="setTimeout(()=>limparImeiCampo(this),0)"></div>
       </div>
       <input type="hidden" name="entrada" required>
       <div class="imei-help">Campo com espaço para 15 dígitos. Use “Adicionar IMEI” para enviar até 10.</div>
@@ -1822,7 +1832,7 @@ app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
   let cards='<h1>1️⃣ Serviços</h1><div class="grid">';
   for(const s of rows){
     const preco = await precoDaRevenda(c.id, s.id);
-    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}" onsubmit="juntarImeis(this)">${clienteEntradaHtml(s)}<br><button class="btn green">Solicitar</button></form></div>`;
+    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}" onsubmit="return validarFormularioImei(this)">${clienteEntradaHtml(s)}<br><button class="btn green">Solicitar</button></form></div>`;
   }
   cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>';
   res.send(clientePage('Serviços', cards, c));
@@ -1832,7 +1842,14 @@ app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{
   const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);
   if(!s) return res.redirect('/cliente/servicos');
   const valor=await precoDaRevenda(c.id, s.id);
-  const validacao = validarEntradaServico(s, req.body.entrada || '');
+  const entradasBody = req.body.imeis || req.body['imeis[]'];
+  let entradaTexto = req.body.entrada || '';
+  if (Array.isArray(entradasBody)) {
+    entradaTexto = entradasBody.map(x => String(x || '').replace(/\D/g,'').slice(0,15)).filter(Boolean).join('\n');
+  } else if (entradasBody) {
+    entradaTexto = String(entradasBody || '').replace(/\D/g,'').slice(0,15);
+  }
+  const validacao = validarEntradaServico(s, entradaTexto);
   if(!validacao.ok) {
     return res.send(clientePage('Entrada inválida', `<div class="card"><h1>❌ Entrada inválida</h1><pre style="white-space:pre-wrap">${safeHtml(validacao.erro)}</pre><a class="btn" href="/cliente/servicos">Voltar</a></div>`, c));
   }
