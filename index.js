@@ -1312,12 +1312,27 @@ Exemplo:
 
 🏢 CentralUnlocker`;
 }
-async function enviarBoasVindasTutorialRevenda(revenda) {
+function destinoRevenda(revenda) {
+  if (!revenda) return '';
+  if (revenda.jid) return revenda.jid;
+  if (revenda.telegram_id) return tgJid(revenda.telegram_id);
   const w = normalizarNumeroWhatsApp(revenda.whatsapp);
-  const jid = revenda.jid || numberToJid(w);
+  return w ? numberToJid(w) : '';
+}
+
+async function enviarBoasVindasTutorialRevenda(revenda) {
+  const jid = destinoRevenda(revenda);
   if (!jid) return false;
   try {
+    const acesso = `🔐 *ACESSO AO PAINEL*
+
+👤 Usuário: ${revenda.login || '-'}
+🔑 Senha: ${revenda.senha || '-'}
+🌐 Painel: ${CLIENTE_PANEL_URL}
+
+Todos os avisos serão enviados aqui no Telegram.`;
     await enviarTexto(jid, await mensagemBoasVindasRevenda(revenda));
+    await enviarTexto(jid, acesso);
     await enviarTexto(jid, await mensagemTutorialRevenda());
     return true;
   } catch (e) {
@@ -1699,8 +1714,31 @@ app.get('/cliente/dashboard', clienteAuth, async (req, res) => {
 });
 app.get('/cliente/conta', clienteAuth, async (req,res)=>{ const c=req.cliente; res.send(clientePage('Conta', `<h1>4️⃣ Conta</h1><div class="card"><p><b>Nome:</b> ${safeHtml(c.nome)}</p><p><b>Usuário:</b> ${safeHtml(c.login)}</p><p><b>Telegram ID:</b> ${safeHtml(c.telegram_id || c.whatsapp || '')}</p><p><b>Tipo:</b> ${safeHtml(labelTipoRevenda(c.tipo_revenda))}</p><p><b>Saldo:</b> ${brl(c.saldo)}</p><p><b>Status:</b> ${safeHtml(c.status)}</p></div>`, c)); });
 app.get('/cliente/historico', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pedidos WHERE revenda_id=? OR cliente_jid=? ORDER BY id DESC LIMIT 100',[c.id,c.jid]); let html='<h1>3️⃣ Histórico</h1><div class="card"><table><tr><th>Pedido</th><th>Serviço</th><th>Entrada</th><th>Valor</th><th>Status</th></tr>'; for(const o of rows) html+=`<tr><td>#${o.id}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.entrada_valor||o.imei||'-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`; html += rows.length ? '</table></div>' : '<tr><td colspan="5">Nenhum pedido ainda.</td></tr></table></div>'; res.send(clientePage('Histórico', html, c)); });
-app.get('/cliente/servicos', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY nome ASC'); let cards='<h1>1️⃣ Serviços</h1><div class="grid">'; for(const s of rows){ cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(s.preco_padrao)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui"></textarea><button class="btn green">Solicitar</button></form></div>`;} cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>'; res.send(clientePage('Serviços', cards, c)); });
-app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{ const c=req.cliente; const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]); if(!s) return res.redirect('/cliente/servicos'); const valor=Number(s.preco_padrao||0); if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c)); const entrada=String(req.body.entrada||'').trim(); const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE', 1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,entrada,entrada,normalizarTipoEntrada(s.tipo_entrada),labelEntradaServico(s),valor]); await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]); await enviarTexto(c.jid, `📦 Pedido recebido\n\nPedido #${ins.lastID}\nServiço: ${s.nome}\nStatus: PENDENTE`); await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nServiço: ${s.nome}\nEntrada: ${entrada}`); notificarPainel('pedido','🔔 Novo pedido site',`${c.nome} - ${s.nome}`); res.redirect('/cliente/historico'); });
+app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
+  const c=req.cliente;
+  const rows=await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY nome ASC');
+  let cards='<h1>1️⃣ Serviços</h1><div class="grid">';
+  for(const s of rows){
+    const preco = await precoDaRevenda(c.id, s.id);
+    cards+=`<div class="card"><h2>${safeHtml(s.nome)}</h2><p>Entrada: ${safeHtml(labelEntradaServico(s))}</p><p><b>${brl(preco)}</b></p><form method="post" action="/cliente/servico/${s.id}"><label>${safeHtml(labelEntradaServico(s))}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui"></textarea><button class="btn green">Solicitar</button></form></div>`;
+  }
+  cards += rows.length ? '</div>' : '<div class="card">Nenhum serviço ativo.</div>';
+  res.send(clientePage('Serviços', cards, c));
+});
+app.post('/cliente/servico/:id', clienteAuth, async (req,res)=>{
+  const c=req.cliente;
+  const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);
+  if(!s) return res.redirect('/cliente/servicos');
+  const valor=await precoDaRevenda(c.id, s.id);
+  if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c));
+  const entrada=String(req.body.entrada||'').trim();
+  const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE', 1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,s.id,s.nome,entrada,entrada,normalizarTipoEntrada(s.tipo_entrada),labelEntradaServico(s),valor]);
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]);
+  await enviarTexto(c.jid, `📦 Pedido recebido\n\nPedido #${ins.lastID}\nServiço: ${s.nome}\nValor: ${brl(valor)}\nStatus: PENDENTE`);
+  await avisarAdminTelegram(`🔔 Novo pedido pelo site\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nServiço: ${s.nome}\nValor: ${brl(valor)}\nEntrada: ${entrada}`);
+  notificarPainel('pedido','🔔 Novo pedido site',`${c.nome} - ${s.nome}`);
+  res.redirect('/cliente/historico');
+});
 app.get('/cliente/esim', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all(`SELECT p.*, (SELECT COUNT(*) FROM esim_estoque e WHERE e.nome_plano=p.nome_plano AND e.status='DISPONIVEL') estoque FROM esim_planos p WHERE p.ativo=1 ORDER BY p.nome_plano ASC`); let html='<h1>2️⃣ Comprar eSIM</h1><div class="grid">'; for(const p of rows){ html+=`<div class="card"><h2>📱 ${safeHtml(p.nome_plano)}</h2><p>Estoque automático: ${p.estoque||0}</p><h2>${brl(p.preco_cliente || p.preco_revenda)}</h2><form method="post" action="/cliente/esim/${p.id}/comprar"><button class="btn green">Comprar</button></form></div>`;} html += rows.length ? '</div>' : '<div class="card">Nenhum plano cadastrado.</div>'; res.send(clientePage('Comprar eSIM', html, c)); });
 app.post('/cliente/esim/:id/comprar', clienteAuth, async (req,res)=>{ const c=req.cliente; const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[req.params.id]); if(!plano) return res.redirect('/cliente/esim'); const valor=Number(plano.preco_cliente || plano.preco_revenda || 0); if(isRevendaPrePaga(c) && Number(c.saldo||0) < valor) return res.send(clientePage('Saldo insuficiente', `<div class="card"><h1>❌ Saldo insuficiente</h1><p>Seu saldo: ${brl(c.saldo)}</p><p>Valor: ${brl(valor)}</p><a class="btn green" href="/cliente/pagamentos">Adicionar saldo</a></div>`, c)); const item=await get('SELECT * FROM esim_estoque WHERE nome_plano=? AND status="DISPONIVEL" ORDER BY id ASC LIMIT 1',[plano.nome_plano]); await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,c.id]); if(item){ const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado, finalizado_em) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'FINALIZADO',1,CURRENT_TIMESTAMP)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${item.nome_plano}`,item.nome_plano,valor]); await run('UPDATE esim_estoque SET status="VENDIDO", revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?',[c.id,c.nome,ins.lastID,item.id]); await enviarImagem(c.jid, caminhoArquivoEsim(item.arquivo_qr), `✅ eSIM entregue\n\nPlano: ${item.nome_plano}\nPedido #${ins.lastID}\n⚠️ QR Code de uso único.`); } else { const ins=await run(`INSERT INTO pedidos (tipo, cliente_nome, cliente_whatsapp, cliente_jid, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, valor, status, cobrado) VALUES ('CLIENTE',?,?,?,?,?,?,?,?,?,?,'AGUARDANDO_ENTREGA',1)`, [c.nome,c.telegram_id||c.whatsapp,c.jid,c.id,c.nome,c.jid,c.telegram_id||c.whatsapp,`eSIM ${plano.nome_plano}`,plano.nome_plano,valor]); await enviarTexto(c.jid, `🟡 Pedido recebido\n\nPedido #${ins.lastID}\nPlano: ${plano.nome_plano}\nStatus: aguardando entrega manual.`); await avisarAdminTelegram(`📱 eSIM sem estoque automático\n\nPedido #${ins.lastID}\nCliente: ${c.nome}\nPlano: ${plano.nome_plano}`); } res.redirect('/cliente/historico'); });
 app.get('/cliente/pagamentos', clienteAuth, async (req,res)=>{ const c=req.cliente; const rows=await all('SELECT * FROM pagamentos WHERE revenda_id=? ORDER BY id DESC LIMIT 50',[c.id]); let hist=''; for(const p of rows) hist+=`<tr><td>${dateBR(p.criado_em)}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem||'pixgo')}</td></tr>`; res.send(clientePage('Pagamentos', `<h1>💳 Pagamentos</h1><div class="card"><h2>Adicionar saldo</h2><form method="post" action="/cliente/pagamentos/pix"><label>Valor</label><input name="valor" placeholder="Ex: 50" required><button class="btn green">Gerar PIX</button></form></div><div class="card"><h2>Histórico</h2><table><tr><th>Data</th><th>Valor</th><th>Origem</th></tr>${hist || '<tr><td colspan="3">Nenhum pagamento.</td></tr>'}</table></div>`, c)); });
@@ -2100,22 +2138,46 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
 
 app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
-  let html = `<h1>🏪 Revendas</h1><div class="card"><form method="post"><div class="grid"><input name="nome" placeholder="Nome da revenda" required><input name="whatsapp" placeholder="WhatsApp 5575..." required><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div><button class="btn green">Adicionar Revenda</button></form><p class="muted">Pré-pago bloqueia compra sem saldo. Pós-pago permite comprar e fica negativo.</p></div><table><tr><th>ID</th><th>Nome</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.whatsapp || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Boas-vindas</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
+  let html = `<h1>🏪 Clientes / Revendas Telegram</h1>
+  <div class="card">
+    <h2>➕ Cadastrar pelo ID do Telegram</h2>
+    <form method="post">
+      <div class="grid">
+        <div><label>Nome</label><input name="nome" placeholder="Nome da revenda" required></div>
+        <div><label>ID do Telegram</label><input name="telegram_id" placeholder="Ex: 5319809013" required></div>
+        <div><label>Usuário de login</label><input name="login" placeholder="Deixe vazio para gerar automático"></div>
+        <div><label>Senha</label><input name="senha" placeholder="Deixe vazio para gerar automático"></div>
+        <div><label>Tipo</label><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div>
+      </div>
+      <button class="btn green">Adicionar / Atualizar</button>
+    </form>
+    <p class="muted">Agora o cadastro principal é pelo <b>ID do Telegram</b>. O WhatsApp fica opcional e não é necessário para a revenda usar o sistema.</p>
+  </div>
+  <table><tr><th>ID</th><th>Nome</th><th>Telegram ID</th><th>Login</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
+  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.login || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Enviar acesso</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="REMOVIDA"><button class="btn red" onclick="return confirm('Remover revenda?')">🗑️ Remover</button></form></td></tr>`;
   html += '</table>';
   res.send(page('Revendas', html));
 });
+
 app.post('/admin/revendas', async (req, res) => {
-  const w = normalizarNumeroWhatsApp(req.body.whatsapp);
   const nome = String(req.body.nome || '').trim();
+  const telegramId = onlyDigits(req.body.telegram_id || '');
   const tipoRevenda = normalizarTipoRevenda(req.body.tipo_revenda);
-  const existe = await get('SELECT * FROM revendas WHERE whatsapp=? AND status != "REMOVIDA"', [w]);
+  if (!nome || !telegramId) return res.redirect('/admin/revendas');
+  let login = String(req.body.login || '').trim() || gerarLogin(nome, telegramId);
+  const senha = String(req.body.senha || '').trim() || gerarSenha(8);
+  const jid = tgJid(telegramId);
+  const existeLogin = await get('SELECT id FROM revendas WHERE login=? AND (telegram_id IS NULL OR telegram_id != ?)', [login, telegramId]);
+  if (existeLogin) login = `${login}${Date.now().toString().slice(-3)}`;
+  let existe = await get('SELECT * FROM revendas WHERE (telegram_id=? OR jid=?) AND status != "REMOVIDA"', [telegramId, jid]);
   if (existe) {
-    await run('UPDATE revendas SET nome=?, status="ATIVA", jid=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, numberToJid(w), tipoRevenda, existe.id]);
-    await enviarBoasVindasTutorialRevenda({ ...existe, nome, whatsapp: w, jid: numberToJid(w) });
+    await run('UPDATE revendas SET nome=?, telegram_id=?, jid=?, login=?, senha=?, status="ATIVA", tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, telegramId, jid, login, senha, tipoRevenda, existe.id]);
+    existe = await get('SELECT * FROM revendas WHERE id=?', [existe.id]);
+    await enviarBoasVindasTutorialRevenda(existe);
   } else {
-    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', tipoRevenda]);
-    await enviarBoasVindasTutorialRevenda({ id: ins.lastID, nome, whatsapp: w, jid: numberToJid(w) });
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda, telegram_id) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?, ?)', [nome, telegramId, jid, login, senha, tipoRevenda, telegramId]);
+    existe = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+    await enviarBoasVindasTutorialRevenda(existe);
   }
   res.redirect('/admin/revendas');
 });
@@ -2134,10 +2196,48 @@ app.post('/admin/revenda/:id/status', async (req, res) => {
   }
   res.redirect('/admin/revendas');
 });
-app.get('/admin/revenda/:id/editar', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post"><label>Nome</label><input name="nome" value="${safeHtml(r.nome)}" required><br><br><label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp)}" required><br><br><label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br><label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br><button class="btn green">Salvar</button></form></div>`)); });
-app.post('/admin/revenda/:id/editar', async (req, res) => { const w = normalizarNumeroWhatsApp(req.body.whatsapp); await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w, numberToJid(w), req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]); res.redirect('/admin/revendas'); });
-app.get('/admin/revenda/:id/precos', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC'); let html = `<h1>💰 Preços - ${safeHtml(r.nome)}</h1><form method="post"><table><tr><th>Serviço</th><th>Preço da revenda</th></tr>`; for (const s of servs) { const preco = await precoDaRevenda(r.id, s.id); html += `<tr><td>${safeHtml(s.nome)}</td><td><input name="preco_${s.id}" value="${preco}"></td></tr>`; } html += `</table><br><button class="btn green">Salvar preços</button></form>`; res.send(page('Preços', html)); });
-app.post('/admin/revenda/:id/precos', async (req, res) => { const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1'); for (const s of servs) { const preco = Number(String(req.body[`preco_${s.id}`] || '0').replace(',', '.')); await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]); } res.redirect('/admin/revendas'); });
+app.get('/admin/revenda/:id/editar', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post">
+    <label>Nome</label><input name="nome" value="${safeHtml(r.nome)}" required><br><br>
+    <label>ID do Telegram</label><input name="telegram_id" value="${safeHtml(r.telegram_id || '')}" placeholder="Ex: 5319809013" required><br><br>
+    <label>Usuário de login</label><input name="login" value="${safeHtml(r.login || '')}"><br><br>
+    <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
+    <label>WhatsApp opcional</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
+    <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
+    <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
+    <button class="btn green">Salvar</button>
+  </form></div>`));
+});
+app.post('/admin/revenda/:id/editar', async (req, res) => {
+  const telegramId = onlyDigits(req.body.telegram_id || '');
+  const jid = telegramId ? tgJid(telegramId) : '';
+  const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
+  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || telegramId, telegramId, jid, req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
+  res.redirect('/admin/revendas');
+});
+app.get('/admin/revenda/:id/precos', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+  let html = `<h1>💰 Preços dos serviços</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p class="muted">Telegram ID: ${safeHtml(r.telegram_id || '-')} | Login: ${safeHtml(r.login || '-')}</p><p>Coloque aqui o preço que essa revenda vai pagar em cada serviço. Se deixar 0, usa o preço padrão do serviço.</p></div><form method="post"><table><tr><th>Serviço</th><th>Preço padrão</th><th>Preço dessa revenda</th></tr>`;
+  for (const s of servs) {
+    const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [r.id, s.id]);
+    const preco = pr ? Number(pr.preco || 0) : 0;
+    html += `<tr><td>${safeHtml(s.nome)}<br><span class="muted">${safeHtml(labelEntradaServico(s))}</span></td><td>${brl(s.preco_padrao)}</td><td><input name="preco_${s.id}" value="${preco || ''}" placeholder="0 = preço padrão"></td></tr>`;
+  }
+  html += `</table><br><button class="btn green">Salvar preços</button> <a class="btn gray" href="/admin/revendas">Voltar</a></form>`;
+  res.send(page('Preços', html));
+});
+app.post('/admin/revenda/:id/precos', async (req, res) => {
+  const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1');
+  for (const s of servs) {
+    const raw = String(req.body[`preco_${s.id}`] || '').trim();
+    const preco = Number(raw.replace(',', '.'));
+    if (!raw || !preco || preco <= 0) await run('DELETE FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [req.params.id, s.id]);
+    else await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]);
+  }
+  res.redirect('/admin/revendas');
+});
 app.get('/admin/revenda/:id/conta', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]); let html = `<h1>💳 Conta da Revenda</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p><h1>${brl(r.saldo)}</h1><form method="post" action="/admin/revenda/${r.id}/pagamento"><input name="valor" placeholder="Valor pago"><br><br><button class="btn green">Registrar Pagamento</button></form></div><h2>Histórico</h2>${pedidoTable(pedidos)}`; res.send(page('Conta', html)); });
 app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
 app.post('/admin/revenda/:id/pagamento', async (req, res) => {
