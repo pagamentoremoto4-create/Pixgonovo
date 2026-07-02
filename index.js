@@ -2618,11 +2618,29 @@ app.post('/admin/esim/plano/:id/editar', async (req, res) => {
   const ativo = req.body.ativo === '1' ? 1 : 0;
 
   if (nomeNovo && precoNovo > 0) {
-    // Atualiza o catálogo.
-    await run(`UPDATE esim_planos
-      SET nome_plano=?, preco_revenda=?, preco_cliente=?, ativo=?
-      WHERE id=?`,
-      [nomeNovo, precoNovo, precoClienteNovo || precoNovo, ativo, id]);
+    const duplicado = await get(
+      `SELECT id FROM esim_planos
+       WHERE nome_plano=? AND preco_revenda=? AND id != ?`,
+      [nomeNovo, precoNovo, id]
+    );
+
+    if (duplicado) {
+      return res.status(400).send('Já existe um plano com este nome e preço.');
+    }
+
+    try {
+      // Atualiza o catálogo.
+      await run(`UPDATE esim_planos
+        SET nome_plano=?, preco_revenda=?, preco_cliente=?, ativo=?
+        WHERE id=?`,
+        [nomeNovo, precoNovo, precoClienteNovo || precoNovo, ativo, id]);
+    } catch (err) {
+      if (err.code === 'SQLITE_CONSTRAINT') {
+        return res.status(400).send('Já existe um plano com este nome e preço.');
+      }
+      console.error(err);
+      return res.status(500).send('Erro interno ao atualizar plano.');
+    }
 
     // Atualiza apenas QR disponíveis, para não alterar histórico de QR vendidos.
     await run(`UPDATE esim_estoque
