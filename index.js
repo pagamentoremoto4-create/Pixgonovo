@@ -1271,9 +1271,21 @@ Ou escolha um valor:`, {
           return enviarSuporteTelegram(chatId);
         }
         if (data.startsWith('pagar_')) {
-          const valor = Number(data.replace('pagar_', ''));
-          await tgBot.sendMessage(chatId, '⏳ Gerando PIX...');
-          const pix = await gerarPix(valor, `Telegram ${cliente.nome}`);
+    const valor = Number(data.replace('pagar_', ''));
+
+    pedidoSessao.set(from, {
+      etapa: 'aguardando_cpf_pix',
+      valor_pix: valor
+    });
+
+    await tgBot.sendMessage(
+      chatId,
+      `📄 Informe o CPF do pagador para gerar o PIX de R$ ${valor.toFixed(2).replace('.', ',')}
+
+Somente este CPF poderá efetuar o pagamento do QR Code.`
+    );
+    return;
+  }
           if (!pix) return tgBot.sendMessage(chatId, '❌ Erro ao gerar PIX.');
           const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
           const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
