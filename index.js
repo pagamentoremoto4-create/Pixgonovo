@@ -1016,9 +1016,12 @@ async function processarMensagemTelegram(msg) {
       await tgBot.sendMessage(msg.chat.id, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50');
       return;
     }
-    await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
-    const pix = await gerarPix(valor, `Telegram ${cliente.nome}`);
-    if (!pix) { await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.'); return; }
+    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await tgBot.sendMessage(
+      msg.chat.id,
+      `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nSomente este CPF poderá efetuar o pagamento do QR Code.`
+    );
+    return;
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
@@ -1029,6 +1032,28 @@ async function processarMensagemTelegram(msg) {
     await tgBot.sendMessage(msg.chat.id, qrCode || 'PIX indisponível');
     return;
   }
+
+  const sess = pedidoSessao.get(from);
+
+  if (sess?.etapa === 'aguardando_cpf_pix') {
+    const cpf = textoOriginal.replace(/\D/g, '');
+
+    if (cpf.length !== 11) {
+      await tgBot.sendMessage(msg.chat.id, '❌ CPF inválido. Envie apenas os 11 números do CPF.');
+      return;
+    }
+
+    await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
+    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, cpf);
+
+    if (!pix) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.');
+      pedidoSessao.delete(from);
+      return;
+    }
+
+    pedidoSessao.delete(from);
+
 
   const sess = pedidoSessao.get(from);
 
@@ -2191,32 +2216,12 @@ async function textoBackups() {
   return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
 }
 
-async function gerarPix(valor, cliente) {
+async function gerarPix(valor, cliente, cpf) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
-      amount: Number(valor),
-      description: `Pagamento CentralUnlocker ${cliente}`,
-      receiver_name: cliente || 'Cliente Telegram',
-      receiver_cpf: '12345678901',
-      receiver_email: 'cliente@exemplo.com',
-      receiver_phone: '11999999999',
-      receiver_address: 'Rua Principal, 123',
-      external_id: `pedido_${Date.now()}`
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': process.env.PIXGO_API_KEY
-      },
-      timeout: 30000,
-      validateStatus: () => true
-    });
-
-    console.log('PIXGO STATUS:', response.status);
-    console.log('PIXGO BODY:', JSON.stringify(response.data));
-
-    if (response.status !== 201 || !response.data?.success) {
-      return null;
-    }
+      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
+      customer_name: 'Cliente Telegram', receiver_cpf: cpf, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+    }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
 }
