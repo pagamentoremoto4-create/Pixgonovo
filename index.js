@@ -1033,7 +1033,7 @@ async function processarMensagemTelegram(msg) {
     return;
   }
 
-  const sess = pedidoSessao.get(from);
+  let sess = pedidoSessao.get(from);
 
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const cpf = textoOriginal.replace(/\D/g, '');
@@ -1069,7 +1069,7 @@ async function processarMensagemTelegram(msg) {
     return;
   }
 
-  const sess = pedidoSessao.get(from);
+  sess = pedidoSessao.get(from);
 
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
@@ -1484,7 +1484,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
   if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
   if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
 
-  const sess = pedidoSessao.get(from);
+  sess = pedidoSessao.get(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
     if (texto === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
