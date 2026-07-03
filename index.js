@@ -1271,34 +1271,15 @@ Ou escolha um valor:`, {
           return enviarSuporteTelegram(chatId);
         }
         if (data.startsWith('pagar_')) {
-    const valor = Number(data.replace('pagar_', ''));
+          const valor = Number(data.replace('pagar_', ''));
+          pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
 
-    pedidoSessao.set(from, {
-      etapa: 'aguardando_cpf_pix',
-      valor_pix: valor
-    });
-
-    await tgBot.sendMessage(
-      chatId,
-      `📄 Informe o CPF do pagador para gerar o PIX de R$ ${valor.toFixed(2).replace('.', ',')}
+          return tgBot.sendMessage(
+            chatId,
+            `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.
 
 Somente este CPF poderá efetuar o pagamento do QR Code.`
-    );
-    return;
-  }
-          if (!pix) return tgBot.sendMessage(chatId, '❌ Erro ao gerar PIX.');
-          const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
-          const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
-          if (paymentId) {
-            await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
-            verificarPagamento(paymentId, cliente.id, from, valor);
-          }
-          await tgBot.sendMessage(chatId, `✅ PIX GERADO
-
-💰 Valor: ${brl(valor)}
-
-Copia e cola abaixo:`);
-          return tgBot.sendMessage(chatId, qrCode || 'PIX indisponível');
+          );
         }
         const servMatch = data.match(/^servico_(\d+)$/);
         if (servMatch) {
