@@ -2194,9 +2194,29 @@ async function textoBackups() {
 async function gerarPix(valor, cliente) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
-      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
-      customer_name: 'Cliente Telegram', customer_cpf: '12345678901', customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
-    }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
+      amount: Number(valor),
+      description: `Pagamento CentralUnlocker ${cliente}`,
+      receiver_name: cliente || 'Cliente Telegram',
+      receiver_cpf: '12345678901',
+      receiver_email: 'cliente@exemplo.com',
+      receiver_phone: '11999999999',
+      receiver_address: 'Rua Principal, 123',
+      external_id: `pedido_${Date.now()}`
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': process.env.PIXGO_API_KEY
+      },
+      timeout: 30000,
+      validateStatus: () => true
+    });
+
+    console.log('PIXGO STATUS:', response.status);
+    console.log('PIXGO BODY:', JSON.stringify(response.data));
+
+    if (response.status !== 201 || !response.data?.success) {
+      return null;
+    }
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
 }
