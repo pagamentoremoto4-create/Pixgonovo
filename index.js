@@ -2234,7 +2234,9 @@ async function gerarPix(valor, cliente, cpf) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
       amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
-      customer_name: 'Cliente Telegram', payer_doc: cpf, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+      customer_name: 'Cliente Telegram', receiver_cpf: cpf,
+      payer_name: cliente,
+      payer_document: cpf, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
     }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
