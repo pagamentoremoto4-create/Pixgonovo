@@ -1054,6 +1054,20 @@ async function processarMensagemTelegram(msg) {
 
     pedidoSessao.delete(from);
 
+    const valor = sess.valor_pix;
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+
+    if (paymentId) {
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',
+        [paymentId, cliente.id, from, from, valor]);
+      verificarPagamento(paymentId, cliente.id, from, valor);
+    }
+
+    await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
+    await tgBot.sendMessage(msg.chat.id, qrCode || 'PIX indisponível');
+    return;
+  }
 
   const sess = pedidoSessao.get(from);
 
