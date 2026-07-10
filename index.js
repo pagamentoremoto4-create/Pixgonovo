@@ -399,6 +399,16 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
 
+  await run(`CREATE TABLE IF NOT EXISTS whatsapp_vinculos (
+    codigo TEXT PRIMARY KEY,
+    revenda_id INTEGER NOT NULL,
+    telegram_id TEXT NOT NULL,
+    expira_em INTEGER NOT NULL,
+    usado INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run('DELETE FROM whatsapp_vinculos WHERE usado=1 OR expira_em < ?', [Date.now()]);
+
   await run(`CREATE TABLE IF NOT EXISTS servicos_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
@@ -966,6 +976,103 @@ Usuário: ${login}`);
   return { cliente, novo:true };
 }
 
+function gerarCodigoVinculo() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+async function criarCodigoVinculoWhatsApp(cliente) {
+  if (!cliente?.id || !cliente?.telegram_id) throw new Error('Conta do Telegram inválida');
+  await run('DELETE FROM whatsapp_vinculos WHERE revenda_id=? OR usado=1 OR expira_em < ?', [cliente.id, Date.now()]);
+  let codigo;
+  for (let i = 0; i < 10; i++) {
+    const candidato = gerarCodigoVinculo();
+    const existe = await get('SELECT codigo FROM whatsapp_vinculos WHERE codigo=?', [candidato]);
+    if (!existe) { codigo = candidato; break; }
+  }
+  if (!codigo) throw new Error('Não foi possível gerar o código');
+  const expiraEm = Date.now() + (10 * 60 * 1000);
+  await run('INSERT INTO whatsapp_vinculos (codigo, revenda_id, telegram_id, expira_em, usado) VALUES (?, ?, ?, ?, 0)', [codigo, cliente.id, String(cliente.telegram_id), expiraEm]);
+  return codigo;
+}
+
+async function vincularWhatsAppPorCodigo(codigo, numero, nomeContato='Cliente WhatsApp') {
+  const numeroNorm = normalizarNumeroWhatsApp(numero);
+  const vinculo = await get('SELECT * FROM whatsapp_vinculos WHERE codigo=? AND usado=0', [String(codigo)]);
+  if (!vinculo) return { ok:false, erro:'Código inválido ou já utilizado.' };
+  if (Number(vinculo.expira_em) < Date.now()) {
+    await run('DELETE FROM whatsapp_vinculos WHERE codigo=?', [String(codigo)]);
+    return { ok:false, erro:'Código expirado. Gere um novo código no Telegram.' };
+  }
+  const telegram = await get('SELECT * FROM revendas WHERE id=? AND telegram_id=? AND status != "REMOVIDA"', [vinculo.revenda_id, String(vinculo.telegram_id)]);
+  if (!telegram) return { ok:false, erro:'Conta do Telegram não encontrada.' };
+  const whatsapp = await get('SELECT * FROM revendas WHERE (whatsapp=? OR jid=?) AND status != "REMOVIDA"', [numeroNorm, `wa:${numeroNorm}`]);
+  if (whatsapp && whatsapp.id !== telegram.id && whatsapp.telegram_id && String(whatsapp.telegram_id) !== String(telegram.telegram_id)) {
+    return { ok:false, erro:'Este WhatsApp já está vinculado a outra conta do Telegram.' };
+  }
+
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    if (whatsapp && whatsapp.id !== telegram.id) {
+      // O Telegram permanece como conta principal. O cadastro provisório do WhatsApp
+      // é desativado sem transferir saldo, pedidos, pagamentos, preços ou histórico.
+      await run('UPDATE revendas SET status="REMOVIDA", whatsapp=NULL, jid=NULL, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [whatsapp.id]);
+    }
+    await run('UPDATE revendas SET whatsapp=?, jid=?, nome=COALESCE(NULLIF(nome, ""), ?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [numeroNorm, `wa:${numeroNorm}`, nomeContato, telegram.id]);
+    await run('UPDATE whatsapp_vinculos SET usado=1 WHERE codigo=?', [String(codigo)]);
+    await run('COMMIT');
+  } catch (e) {
+    try { await run('ROLLBACK'); } catch (_) {}
+    throw e;
+  }
+  const atualizado = await get('SELECT * FROM revendas WHERE id=?', [telegram.id]);
+  return { ok:true, cliente:atualizado };
+}
+
+
+async function vincularContaWhatsAppPeloAdmin(whatsappId, telegramId) {
+  const wa = await get('SELECT * FROM revendas WHERE id=? AND status != "REMOVIDA"', [whatsappId]);
+  const tg = await get('SELECT * FROM revendas WHERE id=? AND status != "REMOVIDA"', [telegramId]);
+  if (!wa) return { ok:false, erro:'Conta do WhatsApp não encontrada.' };
+  if (!tg) return { ok:false, erro:'Conta do Telegram não encontrada.' };
+  if (!wa.whatsapp || wa.telegram_id) return { ok:false, erro:'Selecione uma conta criada somente pelo WhatsApp.' };
+  if (!tg.telegram_id) return { ok:false, erro:'Selecione uma conta antiga do Telegram.' };
+  if (Number(wa.id) === Number(tg.id)) return { ok:false, erro:'As contas selecionadas são iguais.' };
+
+  const numero = normalizarNumeroWhatsApp(wa.whatsapp || jidToNumber(wa.jid));
+  if (!numero) return { ok:false, erro:'A conta do WhatsApp não possui um número válido.' };
+
+  const outroVinculo = await get('SELECT id FROM revendas WHERE whatsapp=? AND id NOT IN (?, ?) AND status != "REMOVIDA"', [numero, wa.id, tg.id]);
+  if (outroVinculo) return { ok:false, erro:'Este WhatsApp já está vinculado a outra conta.' };
+
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    // A conta antiga do Telegram permanece integralmente como conta principal.
+    // Nenhum saldo, pedido, pagamento, PIX, eSIM, preço ou histórico da conta
+    // provisória do WhatsApp é somado ou transferido.
+    await run('UPDATE revendas SET whatsapp=?, jid=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [numero, `wa:${numero}`, tg.id]);
+
+    // Desativa a conta provisória do WhatsApp. Os registros antigos dela permanecem
+    // separados no banco para auditoria, mas deixam de aparecer para o cliente.
+    await run(`UPDATE revendas SET status='REMOVIDA', whatsapp=NULL, jid=NULL, login=?, senha=NULL, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,
+      [`substituida_${wa.id}_${Date.now()}`, wa.id]);
+
+    await run('COMMIT');
+  } catch (e) {
+    try { await run('ROLLBACK'); } catch (_) {}
+    throw e;
+  }
+
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [tg.id]);
+  pedidoSessao.delete(`wa:${numero}`);
+  notificarPainel('cliente', '🔗 WhatsApp vinculado ao Telegram', `${cliente.nome} - WhatsApp +${numero}`);
+  try {
+    await enviarParaCanaisCliente(cliente, `✅ Seu WhatsApp foi vinculado à sua conta antiga do Telegram.\n\nA partir de agora, os dois canais usam exclusivamente o saldo, o histórico e os pedidos da conta do Telegram.`);
+  } catch (e) {
+    console.log('⚠️ Aviso após vínculo administrativo:', e.message);
+  }
+  return { ok:true, cliente };
+}
+
 function menuTelegramTexto(cliente) {
   const tipo = labelTipoRevenda(cliente?.tipo_revenda || 'PRE_PAGO');
   const saldo = brl(cliente?.saldo || 0);
@@ -989,7 +1096,8 @@ function tecladoTelegramMenu() {
       inline_keyboard: [
         [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
         [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
-        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🆘 Suporte', callback_data: 'menu_suporte' }]
+        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🆘 Suporte', callback_data: 'menu_suporte' }],
+        [{ text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
       ]
     }
   };
@@ -1093,6 +1201,19 @@ async function processarMensagemTelegram(msg) {
   if (texto === '/menu' || texto === 'menu' || texto === 'início' || texto === 'inicio') {
     pedidoSessao.delete(from);
     await enviarMenuTelegram(msg.chat.id, cliente);
+    return;
+  }
+
+  if (texto === '/vincular' || texto === 'vincular' || texto === 'vincular whatsapp') {
+    pedidoSessao.delete(from);
+    const codigo = await criarCodigoVinculoWhatsApp(cliente);
+    await tgBot.sendMessage(msg.chat.id, `🔗 *Vincular WhatsApp*
+
+Envie este código para o WhatsApp da CentralUnlocker:
+
+*${codigo}*
+
+⏳ O código é válido por 10 minutos.`, { parse_mode: 'Markdown' });
     return;
   }
 
@@ -1247,12 +1368,12 @@ async function processarMensagemTelegram(msg) {
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido Telegram', `${cliente.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+      await enviarParaCanaisCliente(cliente, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`, from);
       return;
     }
     notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
     await avisarNovoLoteAdmins(cliente, servico, criados.length, valor * criados.length);
-    await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
+    await enviarParaCanaisCliente(cliente, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
     return;
   }
 
@@ -1301,6 +1422,32 @@ async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const lower = textoOriginal.toLowerCase();
   const opcao = normalizarOpcaoTelegram(textoOriginal);
   const { cliente, novo } = await cadastrarClienteWhatsApp(numeroNorm, nome);
+
+  // Código de 6 dígitos gerado no Telegram: vincula as duas contas.
+  if (/^\d{6}$/.test(textoOriginal)) {
+    const tentativa = await get('SELECT codigo FROM whatsapp_vinculos WHERE codigo=? AND usado=0', [textoOriginal]);
+    if (tentativa) {
+      try {
+        const resultado = await vincularWhatsAppPorCodigo(textoOriginal, numeroNorm, nome);
+        if (!resultado.ok) { await enviarTexto(from, `❌ ${resultado.erro}`); return; }
+        pedidoSessao.delete(from);
+        await enviarTexto(from, `✅ WhatsApp vinculado com sucesso à sua conta do Telegram.\n\nAgora seu saldo, histórico e pedidos são os mesmos nos dois canais.`);
+        if (tgBot && resultado.cliente?.telegram_id) {
+          await tgBot.sendMessage(String(resultado.cliente.telegram_id), `✅ WhatsApp vinculado com sucesso.
+
+📱 Número: +${numeroNorm}
+
+Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma conta.`);
+        }
+        notificarPainel('cliente', '🔗 WhatsApp vinculado', `${resultado.cliente?.nome || nome} - ${numeroNorm}`);
+        return;
+      } catch (e) {
+        console.log('❌ VINCULAR WHATSAPP:', e);
+        await enviarTexto(from, '❌ Não foi possível vincular agora. Gere um novo código no Telegram e tente novamente.');
+        return;
+      }
+    }
+  }
 
   // Primeiro contato: cadastro silencioso e menu automático.
   if (novo) {
@@ -1521,6 +1668,19 @@ Ou escolha um valor:`, {
         if (data === 'menu_suporte') {
           pedidoSessao.delete(from);
           return enviarSuporteTelegram(chatId);
+        }
+        if (data === 'menu_vincular_whatsapp') {
+          pedidoSessao.delete(from);
+          const codigo = await criarCodigoVinculoWhatsApp(cliente);
+          return tgBot.sendMessage(chatId, `🔗 *Vincular WhatsApp*
+
+Envie este código para o WhatsApp da CentralUnlocker:
+
+*${codigo}*
+
+⏳ O código é válido por 10 minutos.
+
+O número que enviar o código será vinculado automaticamente à sua conta do Telegram.`, { parse_mode: 'Markdown' });
         }
         if (data.startsWith('pagar_')) {
           const valor = Number(data.replace('pagar_', ''));
@@ -1832,13 +1992,13 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`);
+      await enviarParaCanaisCliente(revenda, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`, from);
       return;
     }
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
     await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
-    await enviarTexto(from, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`);
+    await enviarParaCanaisCliente(revenda, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
     return;
   }
 
@@ -2529,23 +2689,55 @@ async function finalizarPedido(pedido) {
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
   await notificarPedido(atualizado, 'finalizar');
 }
-async function notificarPedido(pedido, tipo, motivo = '') {
-  let jid = pedido.revenda_jid || pedido.cliente_jid;
-  if (!jid && pedido.revenda_numero) jid = numberToJid(pedido.revenda_numero);
-  if (!jid && pedido.cliente_whatsapp) jid = numberToJid(pedido.cliente_whatsapp);
-  if (!jid) return;
-  if (tipo === 'processo') await enviarTexto(jid, `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n💰 Valor: ${brl(pedido.valor)}`);
-  if (tipo === 'finalizar') {
-    if (pedido.tipo === 'REVENDA') {
-      const rev = await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]);
-      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`);
-    } else {
-      await enviarTexto(jid, `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nPara pagar digite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`);
+async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '') {
+  const destinos = new Set();
+  const telegramId = cliente?.telegram_id;
+  const whatsappNumero = normalizarNumeroWhatsApp(cliente?.whatsapp);
+  if (telegramId) destinos.add(tgJid(telegramId));
+  if (whatsappNumero) destinos.add(`wa:${whatsappNumero}`);
+  if (!destinos.size && fallbackDestino) destinos.add(fallbackDestino);
+
+  let enviados = 0;
+  for (const destino of destinos) {
+    try {
+      const ok = await enviarTexto(destino, mensagem);
+      if (ok !== false) enviados++;
+    } catch (e) {
+      console.log('⚠️ FALHA ENVIO MULTICANAL:', destino, e.message);
     }
   }
-  if (tipo === 'cancelar') await enviarTexto(jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
+  return enviados;
 }
 
+async function notificarPedido(pedido, tipo, motivo = '') {
+  const rev = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?', [pedido.revenda_id]) : null;
+  const destinos = new Set();
+  const telegramId = rev?.telegram_id || (isTgJid(pedido.revenda_jid) ? tgIdFromJid(pedido.revenda_jid) : '');
+  const whatsappNumero = normalizarNumeroWhatsApp(rev?.whatsapp || pedido.revenda_numero || pedido.cliente_whatsapp);
+  if (telegramId) destinos.add(tgJid(telegramId));
+  if (whatsappNumero) destinos.add(`wa:${whatsappNumero}`);
+  if (!destinos.size) {
+    const legado = pedido.revenda_jid || pedido.cliente_jid;
+    if (legado) destinos.add(legado);
+  }
+  if (!destinos.size) return;
+
+  let mensagem = '';
+  if (tipo === 'processo') mensagem = `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n💰 Valor: ${brl(pedido.valor)}`;
+  if (tipo === 'finalizar') {
+    if (pedido.tipo === 'REVENDA') {
+      mensagem = `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`;
+    } else {
+      mensagem = `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\nPara pagar digite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`;
+    }
+  }
+  if (tipo === 'cancelar') mensagem = `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`;
+  if (!mensagem) return;
+  for (const destino of destinos) {
+    try { await enviarTexto(destino, mensagem); }
+    catch (e) { console.log('⚠️ FALHA NOTIFICAÇÃO DUPLA:', destino, e.message); }
+  }
+}
 
 
 function textoMensagemBaileys(message = {}) {
@@ -3236,12 +3428,12 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
 
 app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
-  let html = `<h1>🏪 Clientes / Revendas Telegram</h1>
+  let html = `<h1>👥 Clientes Telegram e WhatsApp</h1>
   <div class="card">
     <h2>➕ Cadastrar pelo ID do Telegram</h2>
     <form method="post">
       <div class="grid">
-        <div><label>Nome</label><input name="nome" placeholder="Nome da revenda" required></div>
+        <div><label>Nome</label><input name="nome" placeholder="Nome do cliente" required></div>
         <div><label>ID do Telegram</label><input name="telegram_id" placeholder="Ex: 5319809013" required></div>
         <div><label>Usuário de login</label><input name="login" placeholder="Deixe vazio para gerar automático"></div>
         <div><label>Senha</label><input name="senha" placeholder="Deixe vazio para gerar automático"></div>
@@ -3249,12 +3441,45 @@ app.get('/admin/revendas', async (req, res) => {
       </div>
       <button class="btn green">Adicionar / Atualizar</button>
     </form>
-    <p class="muted">Agora o cadastro principal é pelo <b>ID do Telegram</b>. O O acesso do cliente/revenda é feito somente pelo Telegram.</p>
+    <p class="muted">Clientes novos do WhatsApp são cadastrados automaticamente. Para recuperar o histórico antigo do Telegram, use o botão <b>Vincular ao Telegram</b> na conta criada pelo WhatsApp.</p>
   </div>
-  <table><tr><th>ID</th><th>Nome</th><th>Telegram ID</th><th>Login</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
-  for (const r of rows) html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.login || '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions"><a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/boasvindas"><button class="btn green">📨 Enviar acesso</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico de pedidos será mantido, mas o vínculo do Telegram será apagado.')">🗑️ Remover</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/excluir-permanente"><button class="btn red" onclick="return confirm('Excluir permanentemente este cliente e todos os pedidos/pagamentos dele?')">💥 Excluir tudo</button></form></td></tr>`;
+  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
+  for (const r of rows) {
+    const somenteWhatsApp = Boolean(r.whatsapp && !r.telegram_id);
+    const vinculo = somenteWhatsApp ? `<a class="btn green" href="/admin/revenda/${r.id}/vincular-telegram">🔗 Vincular ao Telegram</a>` : '';
+    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
+  }
   html += '</table>';
-  res.send(page('Revendas', html));
+  res.send(page('Clientes', html));
+});
+
+app.get('/admin/revenda/:id/vincular-telegram', async (req, res) => {
+  const wa = await get('SELECT * FROM revendas WHERE id=? AND status != "REMOVIDA"', [req.params.id]);
+  if (!wa || !wa.whatsapp || wa.telegram_id) return res.redirect('/admin/revendas');
+  const telegrams = await all('SELECT * FROM revendas WHERE telegram_id IS NOT NULL AND telegram_id != "" AND status != "REMOVIDA" ORDER BY nome COLLATE NOCASE ASC');
+  let opcoes = telegrams.map(t => `<option value="${t.id}">${safeHtml(t.nome)} — Telegram ${safeHtml(t.telegram_id)} — ${brl(t.saldo)}</option>`).join('');
+  const html = `<h1>🔗 Vincular WhatsApp ao Telegram</h1>
+    <div class="card"><h2>${safeHtml(wa.nome)}</h2><p>WhatsApp: <b>+${safeHtml(wa.whatsapp)}</b></p>
+    <p>Escolha abaixo a conta antiga do Telegram deste mesmo cliente.</p>
+    <form method="post">
+      <label>Conta antiga do Telegram</label>
+      <select name="telegram_revenda_id" required><option value="">Selecione...</option>${opcoes}</select><br><br>
+      <div class="card"><b>Importante:</b><br>A conta antiga do Telegram será mantida integralmente. Nenhum saldo, pedido, pagamento, PIX, eSIM, preço ou histórico da conta provisória do WhatsApp será somado ou transferido. O WhatsApp passará a acessar somente os dados da conta do Telegram.</div>
+      <button class="btn green" onclick="return confirm('Confirma a vinculação? Os dados da conta provisória do WhatsApp NÃO serão somados nem transferidos. O WhatsApp passará a usar somente a conta do Telegram.')">Confirmar vinculação</button>
+      <a class="btn gray" href="/admin/revendas">Cancelar</a>
+    </form></div>`;
+  res.send(page('Vincular contas', html));
+});
+
+app.post('/admin/revenda/:id/vincular-telegram', async (req, res) => {
+  try {
+    const resultado = await vincularContaWhatsAppPeloAdmin(Number(req.params.id), Number(req.body.telegram_revenda_id));
+    if (!resultado.ok) return res.status(400).send(page('Erro ao vincular', `<h1>❌ Não foi possível vincular</h1><div class="card"><p>${safeHtml(resultado.erro)}</p><a class="btn" href="/admin/revendas">Voltar</a></div>`));
+    res.send(page('Contas vinculadas', `<h1>✅ Contas vinculadas</h1><div class="card"><p>O WhatsApp foi associado à conta antiga do Telegram de <b>${safeHtml(resultado.cliente.nome)}</b>.</p><p>Agora Telegram e WhatsApp usam exclusivamente o saldo, o histórico e os pedidos da conta antiga do Telegram.</p><a class="btn green" href="/admin/revendas">Voltar aos clientes</a></div>`));
+  } catch (e) {
+    console.log('❌ VÍNCULO ADMIN:', e);
+    res.status(500).send(page('Erro ao vincular', `<h1>❌ Erro interno</h1><div class="card"><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/revendas">Voltar</a></div>`));
+  }
 });
 
 app.post('/admin/revendas', async (req, res) => {
@@ -3329,10 +3554,10 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
   res.send(page('Editar Revenda', `<h1>✏️ Editar Revenda</h1><div class="card"><form method="post">
     <label>Nome</label><input name="nome" value="${safeHtml(r.nome)}" required><br><br>
-    <label>ID do Telegram</label><input name="telegram_id" value="${safeHtml(r.telegram_id || '')}" placeholder="Ex: 5319809013" required><br><br>
+    <label>ID do Telegram</label><input name="telegram_id" value="${safeHtml(r.telegram_id || '')}" placeholder="Ex: 5319809013"><br><br>
     <label>Usuário de login</label><input name="login" value="${safeHtml(r.login || '')}"><br><br>
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
-    <label>Telegram ID</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
+    <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <button class="btn green">Salvar</button>
@@ -3342,7 +3567,7 @@ app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
   const jid = telegramId ? tgJid(telegramId) : '';
   const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
-  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || telegramId, telegramId, jid, req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
+  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/precos', async (req, res) => {
