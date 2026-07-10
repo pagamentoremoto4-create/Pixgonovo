@@ -69,10 +69,13 @@ let tgBot = null;
 let qrCodeBase64 = null;
 let conectado = false;
 let whatsappSocket = null;
+const whatsappJidPorNumero = new Map();
 let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
 let whatsappNumeroConectado = '';
 let whatsappReconectarTimer = null;
 let whatsappIniciando = false;
+let whatsappUltimoErro = '';
+let whatsappInicioEm = null;
 let db = new sqlite3.Database(DB_PATH);
 let PAINEL_TEMA = 'hacker-green';
 const TEMAS_PAINEL = {
@@ -713,7 +716,8 @@ async function enviarWhatsAppTexto(numero, text) {
         console.log('⚠️ WhatsApp QR Code ainda não está conectado.');
         return false;
       }
-      await whatsappSocket.sendMessage(numberToJid(number), { text: String(text || '') });
+      const destino = whatsappJidPorNumero.get(number) || numberToJid(number);
+      await whatsappSocket.sendMessage(destino, { text: String(text || '') });
       return true;
     }
     if (WHATSAPP_PROVIDER === 'evolution') {
@@ -2561,6 +2565,16 @@ function textoMensagemBaileys(message = {}) {
   ).trim();
 }
 
+function comTimeoutWhatsApp(promise, ms, etapa) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Tempo limite excedido em: ${etapa}`)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
 function agendarReconexaoWhatsApp() {
   if (whatsappReconectarTimer || !WHATSAPP_ENABLED) return;
   whatsappReconectarTimer = setTimeout(() => {
@@ -2570,58 +2584,107 @@ function agendarReconexaoWhatsApp() {
 }
 
 async function iniciarWhatsAppQrCode() {
-  if (!WHATSAPP_ENABLED || !['baileys', 'qrcode'].includes(WHATSAPP_PROVIDER) || whatsappIniciando) return;
+  if (!WHATSAPP_ENABLED || !['baileys', 'qrcode'].includes(WHATSAPP_PROVIDER)) {
+    whatsappStatus = WHATSAPP_ENABLED ? 'PROVEDOR_INVALIDO' : 'DESABILITADO';
+    console.log('⚠️ WhatsApp QR não iniciado:', { enabled: WHATSAPP_ENABLED, provider: WHATSAPP_PROVIDER });
+    return;
+  }
+  if (whatsappIniciando) {
+    console.log('ℹ️ WhatsApp já está em processo de inicialização.');
+    return;
+  }
+
   whatsappIniciando = true;
+  whatsappInicioEm = Date.now();
+  whatsappUltimoErro = '';
   whatsappStatus = 'INICIANDO';
+  io.emit('whatsapp-status', { status: whatsappStatus });
+
   try {
-    const baileys = await import('@whiskeysockets/baileys');
-    const pinoModule = await import('pino');
+    console.log('📲 Iniciando WhatsApp...');
+    console.log('📁 Pasta da sessão:', WHATSAPP_SESSION_DIR);
+    fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+    fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
+    console.log('✅ Pasta da sessão acessível para leitura e gravação');
+
+    console.log('📦 Carregando Baileys...');
+    const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
+    console.log('✅ Baileys carregado');
+
+    const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'carregar logger');
     const pino = pinoModule.default || pinoModule;
     const makeWASocket = baileys.default || baileys.makeWASocket;
-    const { state, saveCreds } = await baileys.useMultiFileAuthState(WHATSAPP_SESSION_DIR);
-    const { version } = await baileys.fetchLatestBaileysVersion();
+    if (typeof makeWASocket !== 'function') throw new Error('Função makeWASocket não encontrada no Baileys');
+
+    console.log('🔐 Carregando sessão...');
+    const { state, saveCreds } = await comTimeoutWhatsApp(
+      baileys.useMultiFileAuthState(WHATSAPP_SESSION_DIR),
+      15000,
+      'carregar sessão'
+    );
     const logger = pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' });
 
+    console.log('🔌 Criando conexão do WhatsApp...');
+    // Não consulta fetchLatestBaileysVersion: essa consulta externa pode travar no Render.
+    // O Baileys usa sua versão compatível padrão quando "version" não é informada.
     whatsappSocket = makeWASocket({
-      version,
       auth: state,
       logger,
       printQRInTerminal: false,
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('CentralUnlocker') : ['CentralUnlocker', 'Chrome', '1.0.0'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
-      generateHighQualityLinkPreview: false
+      generateHighQualityLinkPreview: false,
+      connectTimeoutMs: 30000,
+      defaultQueryTimeoutMs: 30000,
+      keepAliveIntervalMs: 20000,
+      retryRequestDelayMs: 500
     });
+    console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
     whatsappSocket.ev.on('creds.update', saveCreds);
     whatsappSocket.ev.on('connection.update', async update => {
-      const { connection, lastDisconnect, qr } = update || {};
-      if (qr) {
-        qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
-        conectado = false;
-        whatsappStatus = 'AGUARDANDO_QR';
-        io.emit('whatsapp-status', { status: whatsappStatus });
-      }
-      if (connection === 'open') {
-        conectado = true;
-        qrCodeBase64 = null;
-        whatsappStatus = 'CONECTADO';
-        whatsappNumeroConectado = jidToNumber(whatsappSocket?.user?.id || '');
-        console.log('✅ WHATSAPP CONECTADO:', whatsappNumeroConectado || 'número identificado');
-        notificarPainel('whatsapp', '✅ WhatsApp conectado', whatsappNumeroConectado || 'Sessão ativa');
-        io.emit('whatsapp-status', { status: whatsappStatus, numero: whatsappNumeroConectado });
-      }
-      if (connection === 'close') {
-        conectado = false;
-        qrCodeBase64 = null;
-        whatsappStatus = 'DESCONECTADO';
-        whatsappSocket = null;
-        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
-        const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
-        console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || lastDisconnect?.error?.message || 'sem código');
-        io.emit('whatsapp-status', { status: whatsappStatus });
-        if (!loggedOut) agendarReconexaoWhatsApp();
-        else whatsappStatus = 'SESSAO_EXPIRADA';
+      try {
+        const { connection, lastDisconnect, qr } = update || {};
+        if (qr) {
+          qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+          conectado = false;
+          whatsappStatus = 'AGUARDANDO_QR';
+          whatsappUltimoErro = '';
+          console.log('📷 QR Code do WhatsApp gerado');
+          io.emit('whatsapp-status', { status: whatsappStatus });
+        }
+        if (connection === 'connecting') {
+          whatsappStatus = qrCodeBase64 ? 'AGUARDANDO_QR' : 'CONECTANDO';
+          io.emit('whatsapp-status', { status: whatsappStatus });
+        }
+        if (connection === 'open') {
+          conectado = true;
+          qrCodeBase64 = null;
+          whatsappStatus = 'CONECTADO';
+          whatsappUltimoErro = '';
+          whatsappNumeroConectado = jidToNumber(whatsappSocket?.user?.id || '');
+          console.log('✅ WHATSAPP CONECTADO:', whatsappNumeroConectado || 'número identificado');
+          notificarPainel('whatsapp', '✅ WhatsApp conectado', whatsappNumeroConectado || 'Sessão ativa');
+          io.emit('whatsapp-status', { status: whatsappStatus, numero: whatsappNumeroConectado });
+        }
+        if (connection === 'close') {
+          conectado = false;
+          qrCodeBase64 = null;
+          whatsappSocket = null;
+          const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+          const motivo = lastDisconnect?.error?.message || `código ${statusCode || 'desconhecido'}`;
+          const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
+          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
+          whatsappUltimoErro = motivo;
+          console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
+          io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
+          if (!loggedOut) agendarReconexaoWhatsApp();
+        }
+      } catch (eventError) {
+        whatsappUltimoErro = eventError.message;
+        whatsappStatus = 'ERRO';
+        console.log('❌ EVENTO DE CONEXÃO WHATSAPP:', eventError.stack || eventError.message);
       }
     });
 
@@ -2629,11 +2692,20 @@ async function iniciarWhatsAppQrCode() {
       if (type !== 'notify') return;
       for (const msg of messages || []) {
         try {
-          const jid = msg?.key?.remoteJid || '';
-          if (!jid || msg?.key?.fromMe || jid === 'status@broadcast' || jid.endsWith('@g.us')) continue;
-          const numero = normalizarNumeroWhatsApp(jidToNumber(jid));
+          const jidPrincipal = msg?.key?.remoteJid || '';
+          const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
+          if (!jidPrincipal || msg?.key?.fromMe || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+
+          // Em contas recentes o WhatsApp pode entregar o remetente como @lid.
+          // Quando existir o JID telefônico alternativo, ele deve ser usado para cadastro e respostas.
+          const jidTelefone = [jidAlternativo, jidPrincipal].find(j => String(j || '').endsWith('@s.whatsapp.net')) || '';
+          const numero = normalizarNumeroWhatsApp(jidToNumber(jidTelefone || jidPrincipal));
+          const jidResposta = jidTelefone || jidPrincipal;
           const texto = textoMensagemBaileys(msg?.message || {});
           if (!numero || !texto) continue;
+
+          whatsappJidPorNumero.set(numero, jidResposta);
+          console.log('📩 WHATSAPP RECEBIDO:', { numero, jid: jidResposta, texto: texto.slice(0, 60) });
           await processarMensagemWhatsApp({ numero, nome: msg?.pushName || 'Cliente WhatsApp', texto });
         } catch (e) {
           console.log('❌ PROCESSAR MENSAGEM WHATSAPP:', e.message);
@@ -2641,9 +2713,12 @@ async function iniciarWhatsAppQrCode() {
       }
     });
   } catch (e) {
+    whatsappUltimoErro = e.message || String(e);
     whatsappStatus = 'ERRO';
-    console.log('❌ INICIAR WHATSAPP QR CODE:', e.message);
-    agendarReconexaoWhatsApp();
+    conectado = false;
+    whatsappSocket = null;
+    console.log('❌ INICIAR WHATSAPP QR CODE:', e.stack || e.message);
+    io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
   } finally {
     whatsappIniciando = false;
   }
@@ -2656,6 +2731,7 @@ async function desconectarWhatsApp() {
   qrCodeBase64 = null;
   whatsappNumeroConectado = '';
   whatsappStatus = 'DESCONECTADO';
+  whatsappUltimoErro = '';
   try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
   fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
 }
@@ -3451,16 +3527,19 @@ app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELEC
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 
 app.get('/admin/whatsapp', async (req, res) => {
-  const statusLabel = conectado ? '🟢 CONECTADO' : whatsappStatus === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO LEITURA DO QR CODE' : `🔴 ${safeHtml(whatsappStatus)}`;
+  const statusLabel = conectado ? '🟢 CONECTADO' : whatsappStatus === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO LEITURA DO QR CODE' : whatsappStatus === 'CONECTANDO' ? '🟡 CONECTANDO' : `🔴 ${safeHtml(whatsappStatus)}`;
+  const erroHtml = whatsappUltimoErro ? `<div class="card" style="border-color:#ef4444"><h3>⚠️ Detalhe do erro</h3><p>${safeHtml(whatsappUltimoErro)}</p><p class="mini-help">Confira também os Logs do Render.</p></div>` : '';
   const qrHtml = qrCodeBase64
     ? `<div style="text-align:center"><img src="${qrCodeBase64}" alt="QR Code do WhatsApp" style="width:min(360px,100%);background:#fff;padding:12px;border-radius:18px"><p class="mini-help">No celular: WhatsApp → Aparelhos conectados → Conectar um aparelho → escaneie este QR Code.</p></div>`
     : conectado
       ? `<div class="card"><h2>✅ WhatsApp conectado</h2><p><b>Número:</b> ${safeHtml(whatsappNumeroConectado || 'identificado pela sessão')}</p><p>A sessão será restaurada automaticamente depois de reiniciar, desde que a pasta persistente não seja apagada.</p></div>`
       : `<div class="card"><p>O QR Code ainda está sendo preparado. Use o botão abaixo para iniciar ou atualizar a conexão.</p></div>`;
-  res.send(page('WhatsApp', `<h1>📲 Conexão do WhatsApp</h1><div class="grid"><div class="card metric"><h2>Status</h2><h1 style="font-size:22px">${statusLabel}</h1></div><div class="card metric"><h2>Provedor</h2><h1 style="font-size:22px">QR CODE DIRETO</h1></div></div><div class="card">${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/conectar"><button class="btn green">🔄 Gerar/Atualizar QR Code</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/desconectar"><button class="btn red" onclick="return confirm('Desconectar o WhatsApp e apagar a sessão?')">🔌 Desconectar</button></form></div><script>setTimeout(()=>location.reload(),5000)</script>`));
+  res.send(page('WhatsApp', `<h1>📲 Conexão do WhatsApp</h1><div class="grid"><div class="card metric"><h2>Status</h2><h1 style="font-size:22px">${statusLabel}</h1></div><div class="card metric"><h2>Provedor</h2><h1 style="font-size:22px">QR CODE DIRETO</h1></div></div>${erroHtml}<div class="card">${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/conectar"><button class="btn green">🔄 Gerar/Atualizar QR Code</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/desconectar"><button class="btn red" onclick="return confirm('Desconectar o WhatsApp e apagar a sessão?')">🔌 Desconectar</button></form></div><script>setTimeout(()=>location.reload(),5000)</script>`));
 });
 app.post('/admin/whatsapp/conectar', async (req, res) => {
   if (!conectado) {
+    console.log('🔄 Reinício manual do WhatsApp solicitado pelo painel');
+    if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
     try { if (whatsappSocket?.end) whatsappSocket.end(new Error('reinicio manual')); } catch (_) {}
     whatsappSocket = null;
     qrCodeBase64 = null;
