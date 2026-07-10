@@ -1564,7 +1564,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     notificarPainel('pedido', '🔔 Novo pedido WhatsApp', `${cliente.nome} - ${servico.nome}`);
     if (criados.length === 1) await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
     else await avisarNovoLoteAdmins(cliente, servico, criados.length, totalPedido);
-    await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(totalPedido)}\n\n📍 Pendente`);
+    const entradaLabel = labelEntradaServico(servico);
+    const entradaIcone = iconeEntradaServico(servico);
+    const detalhesEntradas = criados.length === 1
+      ? `${entradaIcone} ${entradaLabel}: ${criados[0].entrada}`
+      : `${entradaIcone} ${entradaLabel}s:\n${criados.map(item => item.entrada).join('\n')}`;
+    await enviarParaCanaisCliente(cliente, `✅ Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${detalhesEntradas}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(totalPedido)}\n\n📍 Status: PENDENTE`, from);
     return;
   }
 
