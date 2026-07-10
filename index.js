@@ -14,7 +14,7 @@ const crypto = require('crypto');
 let TelegramBot = null;
 try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
 
-// Operação 100% Telegram: integração WhatsApp/Baileys removida.
+// Telegram + WhatsApp: conexão direta via QR Code usando Baileys; webhook Evolution mantido apenas como compatibilidade opcional.
 
 const app = express();
 const server = http.createServer(app);
@@ -50,16 +50,29 @@ const ADMIN_PANEL_PASS = process.env.ADMIN_PANEL_PASS || '123456';
 const BASE_URL = (process.env.BASE_URL || '').replace(/\/$/, '');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || '';
 const ADMIN_TELEGRAM_ID = String(process.env.ADMIN_TELEGRAM_ID || process.env.ADMIN_ID || '').trim();
-// Site do cliente removido: clientes usam apenas o Telegram.
+const WHATSAPP_ENABLED = String(process.env.WHATSAPP_ENABLED || 'false').toLowerCase() === 'true';
+const WHATSAPP_PROVIDER = String(process.env.WHATSAPP_PROVIDER || 'baileys').toLowerCase();
+const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
+const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
+const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
+// Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
 if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
+if (!fs.existsSync(WHATSAPP_SESSION_DIR)) fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
 
 let tgBot = null;
 let qrCodeBase64 = null;
 let conectado = false;
+let whatsappSocket = null;
+let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
+let whatsappNumeroConectado = '';
+let whatsappReconectarTimer = null;
+let whatsappIniciando = false;
 let db = new sqlite3.Database(DB_PATH);
 let PAINEL_TEMA = 'hacker-green';
 const TEMAS_PAINEL = {
@@ -621,7 +634,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:20px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:31px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:12px 14px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:30px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:32px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:9px 13px;border-radius:12px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{padding:12px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:12px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:18px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:42px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:18px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:24px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:30px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -690,24 +703,94 @@ async function listarServicosTexto(revenda) {
   texto += '\nToque no serviço desejado abaixo.';
   return texto;
 }
+async function enviarWhatsAppTexto(numero, text) {
+  if (!WHATSAPP_ENABLED) return false;
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number) return false;
+  try {
+    if (WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') {
+      if (!whatsappSocket || !conectado) {
+        console.log('⚠️ WhatsApp QR Code ainda não está conectado.');
+        return false;
+      }
+      await whatsappSocket.sendMessage(numberToJid(number), { text: String(text || '') });
+      return true;
+    }
+    if (WHATSAPP_PROVIDER === 'evolution') {
+      if (!EVOLUTION_API_URL || !EVOLUTION_INSTANCE || !EVOLUTION_API_KEY) return false;
+      await axios.post(`${EVOLUTION_API_URL}/message/sendText/${EVOLUTION_INSTANCE}`, {
+        number,
+        text: String(text || '')
+      }, {
+        headers: { apikey: EVOLUTION_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 20000
+      });
+      return true;
+    }
+  } catch (e) {
+    console.log('❌ ERRO ENVIAR TEXTO WHATSAPP:', e.response?.data || e.message);
+  }
+  return false;
+}
 async function enviarTexto(to, text) {
   try {
-    if (!tgBot || !to) return false;
-    const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
-    if (!/^\d+$/.test(chatId)) return false;
-    await tgBot.sendMessage(chatId, String(text || ''));
-    return true;
-  } catch (e) { console.log('❌ ERRO ENVIAR TEXTO TELEGRAM:', e.message); }
+    if (!to) return false;
+    if (isTgJid(to) || /^\d+$/.test(String(to))) {
+      if (!tgBot) return false;
+      const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
+      if (!/^\d+$/.test(chatId)) return false;
+      await tgBot.sendMessage(chatId, String(text || ''));
+      return true;
+    }
+    if (String(to).startsWith('wa:')) return await enviarWhatsAppTexto(String(to).slice(3), text);
+    if (String(to).includes('@s.whatsapp.net')) return await enviarWhatsAppTexto(jidToNumber(to), text);
+    return await enviarWhatsAppTexto(to, text);
+  } catch (e) { console.log('❌ ERRO ENVIAR TEXTO:', e.message); }
+  return false;
+}
+async function enviarImagemWhatsApp(numero, filePath, caption='') {
+  if (!WHATSAPP_ENABLED) return false;
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number || !filePath || !fs.existsSync(filePath)) return false;
+  try {
+    if (WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') {
+      if (!whatsappSocket || !conectado) return false;
+      await whatsappSocket.sendMessage(numberToJid(number), {
+        image: fs.readFileSync(filePath),
+        caption: String(caption || '')
+      });
+      return true;
+    }
+    if (WHATSAPP_PROVIDER === 'evolution') {
+      if (!EVOLUTION_API_URL || !EVOLUTION_INSTANCE || !EVOLUTION_API_KEY) return false;
+      const base64 = fs.readFileSync(filePath).toString('base64');
+      await axios.post(`${EVOLUTION_API_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`, {
+        number,
+        mediatype: 'image',
+        mimetype: 'image/png',
+        caption: String(caption || ''),
+        media: base64,
+        fileName: path.basename(filePath)
+      }, { headers: { apikey: EVOLUTION_API_KEY, 'Content-Type': 'application/json' }, timeout: 30000 });
+      return true;
+    }
+  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM WHATSAPP:', e.response?.data || e.message); }
   return false;
 }
 async function enviarImagem(to, filePath, caption='') {
   try {
-    if (!tgBot || !to || !filePath || !fs.existsSync(filePath)) return false;
-    const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
-    if (!/^\d+$/.test(chatId)) return false;
-    await tgBot.sendPhoto(chatId, fs.createReadStream(filePath), { caption: String(caption || '') });
-    return true;
-  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM TELEGRAM:', e.message); }
+    if (!to || !filePath || !fs.existsSync(filePath)) return false;
+    if (isTgJid(to) || /^\d+$/.test(String(to))) {
+      if (!tgBot) return false;
+      const chatId = isTgJid(to) ? tgIdFromJid(to) : String(to);
+      if (!/^\d+$/.test(chatId)) return false;
+      await tgBot.sendPhoto(chatId, fs.createReadStream(filePath), { caption: String(caption || '') });
+      return true;
+    }
+    if (String(to).startsWith('wa:')) return await enviarImagemWhatsApp(String(to).slice(3), filePath, caption);
+    if (String(to).includes('@s.whatsapp.net')) return await enviarImagemWhatsApp(jidToNumber(to), filePath, caption);
+    return await enviarImagemWhatsApp(to, filePath, caption);
+  } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM:', e.message); }
   return false;
 }
 async function avisarAdminTelegram(texto) {
@@ -1170,6 +1253,171 @@ async function processarMensagemTelegram(msg) {
   }
 
   await enviarMenuTelegram(msg.chat.id, cliente);
+}
+
+
+async function cadastrarClienteWhatsApp(numero, nomeInformado='Cliente WhatsApp') {
+  const numeroNorm = normalizarNumeroWhatsApp(numero);
+  const jid = `wa:${numeroNorm}`;
+  let cliente = await get('SELECT * FROM revendas WHERE (jid=? OR whatsapp=?) AND status != "REMOVIDA"', [jid, numeroNorm]);
+  if (cliente) return { cliente, novo:false };
+  const nome = String(nomeInformado || `Cliente ${numeroNorm}`).trim().slice(0, 80);
+  let login = gerarLogin(nome, numeroNorm);
+  const existe = await get('SELECT id FROM revendas WHERE login=?', [login]);
+  if (existe) login = `${login}${Date.now().toString().slice(-3)}`;
+  const senha = gerarSenha(8);
+  const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda, limite_credito) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, "PRE_PAGO", 0)', [nome, numeroNorm, jid, login, senha]);
+  cliente = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
+  notificarPainel('cliente', '👤 Novo cliente WhatsApp', `${nome} - ${numeroNorm}`);
+  await avisarAdminTelegram(`👤 Novo cliente cadastrado pelo WhatsApp\n\nNome: ${nome}\nWhatsApp: ${numeroNorm}\nUsuário: ${login}`);
+  return { cliente, novo:true };
+}
+
+function extrairMensagemWhatsApp(body) {
+  const data = body?.data || body;
+  const key = data?.key || body?.key || {};
+  const msg = data?.message || body?.message || data?.messages?.[0]?.message || {};
+  const fromRaw = key?.remoteJid || data?.remoteJid || body?.remoteJid || data?.from || body?.from || data?.sender || '';
+  const numero = normalizarNumeroWhatsApp(jidToNumber(fromRaw) || fromRaw);
+  const pushName = data?.pushName || body?.pushName || data?.senderName || body?.senderName || 'Cliente WhatsApp';
+  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || msg?.buttonsResponseMessage?.selectedDisplayText || msg?.listResponseMessage?.title || '';
+  const fromMe = Boolean(key?.fromMe || data?.fromMe || body?.fromMe);
+  return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
+}
+
+function menuWhatsAppTexto() {
+  return `👋 Olá! Seja bem-vindo à CentralUnlocker.\n\nComo posso ajudar você hoje?\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Minha conta\n5️⃣ Pagar / Pix\n6️⃣ Suporte\n\nDigite uma opção:`;
+}
+
+async function processarMensagemWhatsApp({ numero, nome, texto }) {
+  const numeroNorm = normalizarNumeroWhatsApp(numero);
+  if (!numeroNorm || !texto) return;
+  const from = `wa:${numeroNorm}`;
+  const textoOriginal = String(texto || '').trim();
+  const lower = textoOriginal.toLowerCase();
+  const opcao = normalizarOpcaoTelegram(textoOriginal);
+  const { cliente, novo } = await cadastrarClienteWhatsApp(numeroNorm, nome);
+
+  // Primeiro contato: cadastro silencioso e menu automático.
+  if (novo) {
+    pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarTexto(from, menuWhatsAppTexto());
+    return;
+  }
+
+  if (['cancelar', 'sair', 'voltar'].includes(lower)) {
+    pedidoSessao.delete(from);
+    await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    return;
+  }
+
+  if (lower === 'menu') {
+    pedidoSessao.delete(from);
+    pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarTexto(from, menuWhatsAppTexto());
+    return;
+  }
+
+  if (lower.startsWith('pagar') || lower.startsWith('/pagar')) {
+    const partes = textoOriginal.split(/\s+/);
+    const valor = Number(String(partes[1] || '0').replace(',', '.'));
+    if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50'); return; }
+    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await enviarTexto(from, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    return;
+  }
+
+  let sess = pedidoSessao.get(from);
+  if (sess?.etapa === 'aguardando_cpf_pix') {
+    const cpf = textoOriginal.replace(/\D/g, '');
+    if (cpf.length !== 11) { await enviarTexto(from, '❌ CPF inválido. Envie apenas os 11 números do CPF.'); return; }
+    await enviarTexto(from, '⏳ Gerando PIX...');
+    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, cpf);
+    pedidoSessao.delete(from);
+    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
+    const valor = sess.valor_pix;
+    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
+    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+    if (paymentId) {
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
+      verificarPagamento(paymentId, cliente.id, from, valor);
+    }
+    await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
+    await enviarTexto(from, qrCode || 'PIX indisponível');
+    return;
+  }
+
+  sess = pedidoSessao.get(from);
+  if (!sess) {
+    // Cliente já cadastrado: não abre o menu com mensagens avulsas.
+    // Para iniciar, ele precisa digitar a palavra "menu".
+    return;
+  }
+
+  if (sess?.etapa === 'menu') {
+    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '5') { pedidoSessao.delete(from); await enviarTexto(from, `💳 Para gerar PIX, digite:\n\npagar 50`); return; }
+    if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte CentralUnlocker\n\nFale com o suporte pelo Telegram configurado no painel.`); return; }
+    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
+    return;
+  }
+
+  if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
+    const planos = await planosEsimDisponiveis();
+    const plano = planos[Number(opcao) - 1];
+    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
+    return;
+  }
+
+  if (sess?.etapa === 'esim_confirmar') {
+    if (opcao === '2' || lower === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
+    pedidoSessao.delete(from);
+    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+    await entregarEsimRevenda(from, revAtual || cliente, sess.plano);
+    return;
+  }
+
+  if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
+    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+    const servico = servicos[Number(opcao) - 1];
+    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
+    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+    return;
+  }
+
+  if (sess?.etapa === 'entrada') {
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
+    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    const validacao = validarEntradaServico(servico, textoOriginal);
+    if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
+    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+    const valor = await precoDaRevenda(cliente.id, servico.id);
+    const totalPedido = valor * validacao.entradas.length;
+    if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
+      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      return;
+    }
+    pedidoSessao.delete(from);
+    const criados = [];
+    for (const entrada of validacao.entradas) {
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0)`, [cliente.id, cliente.nome, from, numeroNorm, servico.id, servico.nome, entrada, entrada, normalizarTipoEntrada(servico.tipo_entrada), labelEntradaServico(servico), valor]);
+      criados.push({ id: ins.lastID, entrada });
+    }
+    notificarPainel('pedido', '🔔 Novo pedido WhatsApp', `${cliente.nome} - ${servico.nome}`);
+    if (criados.length === 1) await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
+    else await avisarNovoLoteAdmins(cliente, servico, criados.length, totalPedido);
+    await enviarTexto(from, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(totalPedido)}\n\n📍 Pendente`);
+    return;
+  }
+
+  await enviarTexto(from, 'Digite menu para começar.');
 }
 
 async function iniciarTelegram() {
@@ -2294,9 +2542,144 @@ async function notificarPedido(pedido, tipo, motivo = '') {
   if (tipo === 'cancelar') await enviarTexto(jid, `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`);
 }
 
+
+
+function textoMensagemBaileys(message = {}) {
+  const m = message || {};
+  return String(
+    m.conversation ||
+    m.extendedTextMessage?.text ||
+    m.imageMessage?.caption ||
+    m.videoMessage?.caption ||
+    m.buttonsResponseMessage?.selectedDisplayText ||
+    m.buttonsResponseMessage?.selectedButtonId ||
+    m.listResponseMessage?.title ||
+    m.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    m.templateButtonReplyMessage?.selectedDisplayText ||
+    m.templateButtonReplyMessage?.selectedId ||
+    ''
+  ).trim();
+}
+
+function agendarReconexaoWhatsApp() {
+  if (whatsappReconectarTimer || !WHATSAPP_ENABLED) return;
+  whatsappReconectarTimer = setTimeout(() => {
+    whatsappReconectarTimer = null;
+    iniciarWhatsAppQrCode().catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
+  }, 5000);
+}
+
+async function iniciarWhatsAppQrCode() {
+  if (!WHATSAPP_ENABLED || !['baileys', 'qrcode'].includes(WHATSAPP_PROVIDER) || whatsappIniciando) return;
+  whatsappIniciando = true;
+  whatsappStatus = 'INICIANDO';
+  try {
+    const baileys = await import('@whiskeysockets/baileys');
+    const pinoModule = await import('pino');
+    const pino = pinoModule.default || pinoModule;
+    const makeWASocket = baileys.default || baileys.makeWASocket;
+    const { state, saveCreds } = await baileys.useMultiFileAuthState(WHATSAPP_SESSION_DIR);
+    const { version } = await baileys.fetchLatestBaileysVersion();
+    const logger = pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' });
+
+    whatsappSocket = makeWASocket({
+      version,
+      auth: state,
+      logger,
+      printQRInTerminal: false,
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('CentralUnlocker') : ['CentralUnlocker', 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false
+    });
+
+    whatsappSocket.ev.on('creds.update', saveCreds);
+    whatsappSocket.ev.on('connection.update', async update => {
+      const { connection, lastDisconnect, qr } = update || {};
+      if (qr) {
+        qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+        conectado = false;
+        whatsappStatus = 'AGUARDANDO_QR';
+        io.emit('whatsapp-status', { status: whatsappStatus });
+      }
+      if (connection === 'open') {
+        conectado = true;
+        qrCodeBase64 = null;
+        whatsappStatus = 'CONECTADO';
+        whatsappNumeroConectado = jidToNumber(whatsappSocket?.user?.id || '');
+        console.log('✅ WHATSAPP CONECTADO:', whatsappNumeroConectado || 'número identificado');
+        notificarPainel('whatsapp', '✅ WhatsApp conectado', whatsappNumeroConectado || 'Sessão ativa');
+        io.emit('whatsapp-status', { status: whatsappStatus, numero: whatsappNumeroConectado });
+      }
+      if (connection === 'close') {
+        conectado = false;
+        qrCodeBase64 = null;
+        whatsappStatus = 'DESCONECTADO';
+        whatsappSocket = null;
+        const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
+        const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
+        console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || lastDisconnect?.error?.message || 'sem código');
+        io.emit('whatsapp-status', { status: whatsappStatus });
+        if (!loggedOut) agendarReconexaoWhatsApp();
+        else whatsappStatus = 'SESSAO_EXPIRADA';
+      }
+    });
+
+    whatsappSocket.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+      for (const msg of messages || []) {
+        try {
+          const jid = msg?.key?.remoteJid || '';
+          if (!jid || msg?.key?.fromMe || jid === 'status@broadcast' || jid.endsWith('@g.us')) continue;
+          const numero = normalizarNumeroWhatsApp(jidToNumber(jid));
+          const texto = textoMensagemBaileys(msg?.message || {});
+          if (!numero || !texto) continue;
+          await processarMensagemWhatsApp({ numero, nome: msg?.pushName || 'Cliente WhatsApp', texto });
+        } catch (e) {
+          console.log('❌ PROCESSAR MENSAGEM WHATSAPP:', e.message);
+        }
+      }
+    });
+  } catch (e) {
+    whatsappStatus = 'ERRO';
+    console.log('❌ INICIAR WHATSAPP QR CODE:', e.message);
+    agendarReconexaoWhatsApp();
+  } finally {
+    whatsappIniciando = false;
+  }
+}
+
+async function desconectarWhatsApp() {
+  try { if (whatsappSocket) await whatsappSocket.logout(); } catch (e) { console.log('⚠️ LOGOUT WHATSAPP:', e.message); }
+  whatsappSocket = null;
+  conectado = false;
+  qrCodeBase64 = null;
+  whatsappNumeroConectado = '';
+  whatsappStatus = 'DESCONECTADO';
+  try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
+  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+}
+
+app.post('/webhook/whatsapp', async (req, res) => {
+  try {
+    if (WHATSAPP_WEBHOOK_SECRET) {
+      const recebido = req.headers['x-webhook-secret'] || req.query.secret || req.body?.secret;
+      if (String(recebido || '') !== String(WHATSAPP_WEBHOOK_SECRET)) return res.status(401).json({ ok:false, error:'unauthorized' });
+    }
+    const m = extrairMensagemWhatsApp(req.body || {});
+    if (!m.fromMe && m.numero && m.texto) await processarMensagemWhatsApp({ numero: m.numero, nome: m.nome, texto: m.texto });
+    res.json({ ok:true });
+  } catch (e) {
+    console.log('❌ WEBHOOK WHATSAPP:', e);
+    res.status(200).json({ ok:false });
+  }
+});
+
+app.get('/webhook/whatsapp', (req, res) => res.json({ ok:true, whatsapp: WHATSAPP_ENABLED ? 'enabled' : 'disabled' }));
+
 app.get('/', (req, res) => {
-  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 Telegram ativo</h1><p>Este projeto usa somente Telegram.</p></div>`));
-  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
+  if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 Atendimento ativo</h1><p>Escaneie o QR Code na página WhatsApp do painel administrativo.</p></div>`));
+  res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}${conectado ? '<br>WhatsApp conectado ✅' : WHATSAPP_ENABLED ? '<br>WhatsApp aguardando conexão' : '<br>WhatsApp desabilitado'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
 });
 
 
@@ -2327,7 +2710,7 @@ app.get('/admin', async (req, res) => {
   let table = '<table><tr><th>ID</th><th>Entrada</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
   for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
   table += '</table>';
-  res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot Telegram</span><span class="online">${tgBot ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
+  res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot Telegram</span><span class="online">${tgBot ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>WhatsApp</span><span class="online">${conectado ? 'CONECTADO' : whatsappStatus}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
   <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
   </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
@@ -3066,6 +3449,31 @@ app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('S
 
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
+
+app.get('/admin/whatsapp', async (req, res) => {
+  const statusLabel = conectado ? '🟢 CONECTADO' : whatsappStatus === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO LEITURA DO QR CODE' : `🔴 ${safeHtml(whatsappStatus)}`;
+  const qrHtml = qrCodeBase64
+    ? `<div style="text-align:center"><img src="${qrCodeBase64}" alt="QR Code do WhatsApp" style="width:min(360px,100%);background:#fff;padding:12px;border-radius:18px"><p class="mini-help">No celular: WhatsApp → Aparelhos conectados → Conectar um aparelho → escaneie este QR Code.</p></div>`
+    : conectado
+      ? `<div class="card"><h2>✅ WhatsApp conectado</h2><p><b>Número:</b> ${safeHtml(whatsappNumeroConectado || 'identificado pela sessão')}</p><p>A sessão será restaurada automaticamente depois de reiniciar, desde que a pasta persistente não seja apagada.</p></div>`
+      : `<div class="card"><p>O QR Code ainda está sendo preparado. Use o botão abaixo para iniciar ou atualizar a conexão.</p></div>`;
+  res.send(page('WhatsApp', `<h1>📲 Conexão do WhatsApp</h1><div class="grid"><div class="card metric"><h2>Status</h2><h1 style="font-size:22px">${statusLabel}</h1></div><div class="card metric"><h2>Provedor</h2><h1 style="font-size:22px">QR CODE DIRETO</h1></div></div><div class="card">${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/conectar"><button class="btn green">🔄 Gerar/Atualizar QR Code</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/desconectar"><button class="btn red" onclick="return confirm('Desconectar o WhatsApp e apagar a sessão?')">🔌 Desconectar</button></form></div><script>setTimeout(()=>location.reload(),5000)</script>`));
+});
+app.post('/admin/whatsapp/conectar', async (req, res) => {
+  if (!conectado) {
+    try { if (whatsappSocket?.end) whatsappSocket.end(new Error('reinicio manual')); } catch (_) {}
+    whatsappSocket = null;
+    qrCodeBase64 = null;
+    whatsappStatus = 'INICIANDO';
+    await iniciarWhatsAppQrCode();
+  }
+  res.redirect('/admin/whatsapp');
+});
+app.post('/admin/whatsapp/desconectar', async (req, res) => {
+  await desconectarWhatsApp();
+  res.redirect('/admin/whatsapp');
+});
+
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
@@ -3108,3 +3516,4 @@ cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) 
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarTelegram();
+iniciarWhatsAppQrCode().catch(e => console.log('❌ WHATSAPP START:', e.message));
