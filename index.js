@@ -1573,9 +1573,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
-  // Mensagem não reconhecida: não repetir aviso automaticamente.
-  // O menu já é enviado no primeiro contato e pode ser aberto digitando "menu".
-  return;
+  await enviarTexto(from, 'Digite menu para começar.');
 }
 
 async function iniciarTelegram() {
