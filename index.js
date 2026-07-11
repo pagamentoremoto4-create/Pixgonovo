@@ -1217,6 +1217,18 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
+  const sessValorPixTelegram = pedidoSessao.get(from);
+  if (sessValorPixTelegram?.etapa === 'aguardando_valor_pix') {
+    const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
+    if (!valor || valor < 10) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
+      return;
+    }
+    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await tgBot.sendMessage(msg.chat.id, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    return;
+  }
+
   if (texto.startsWith('pagar') || texto.startsWith('/pagar')) {
     const partes = textoOriginal.trim().split(/\s+/);
     const valor = Number(String(partes[1] || '0').replace(',', '.'));
@@ -1284,7 +1296,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
     if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { pedidoSessao.delete(from); await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
+    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
     if (opcao === '6') { pedidoSessao.delete(from); await enviarSuporteTelegram(msg.chat.id); return; }
   }
 
@@ -1293,7 +1305,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
     if (opcao === '3') { await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { await tgBot.sendMessage(msg.chat.id, '💳 Para gerar PIX, digite:\n\npagar 50'); return; }
+    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
     if (opcao === '6') { await enviarSuporteTelegram(msg.chat.id); return; }
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarMenuTelegram(msg.chat.id, cliente);
@@ -1469,6 +1481,18 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
+  const sessValorPixWhatsApp = pedidoSessao.get(from);
+  if (sessValorPixWhatsApp?.etapa === 'aguardando_valor_pix') {
+    const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
+    if (!valor || valor < 10) {
+      await enviarTexto(from, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
+      return;
+    }
+    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await enviarTexto(from, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    return;
+  }
+
   if (lower.startsWith('pagar') || lower.startsWith('/pagar')) {
     const partes = textoOriginal.split(/\s+/);
     const valor = Number(String(partes[1] || '0').replace(',', '.'));
@@ -1510,7 +1534,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
     if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { pedidoSessao.delete(from); await enviarTexto(from, `💳 Para gerar PIX, digite:\n\npagar 50`); return; }
+    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
     if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte CentralUnlocker\n\nFale com o suporte pelo Telegram configurado no painel.`); return; }
     await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
     return;
