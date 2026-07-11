@@ -201,26 +201,23 @@ function normalizarTipoRevenda(v) {
 function labelTipoRevenda(v) { return normalizarTipoRevenda(v) === 'PRE_PAGO' ? 'Pré-pago' : 'Pós-pago'; }
 function isRevendaPrePaga(revenda) { return normalizarTipoRevenda(revenda?.tipo_revenda) === 'PRE_PAGO'; }
 function isRevendaPosPaga(revenda) { return normalizarTipoRevenda(revenda?.tipo_revenda) === 'POS_PAGO'; }
-function textoSaldoInsuficiente(revenda, valor, item='serviço') {
+function textoSaldoInsuficiente(revenda, valor, item='serviço', entradas=[]) {
   const saldo = Number(revenda?.saldo || 0);
   const falta = Math.max(0, Number(valor || 0) - saldo);
-  return `❌ Saldo insuficiente.
+  const lista = Array.isArray(entradas) ? entradas.filter(Boolean) : [entradas].filter(Boolean);
+  const imeiTexto = lista.length ? `\n📱 IMEI: ${lista.join(', ')}` : '';
+  return `❌ Saldo insuficiente!
 
-${item ? `🛠 ${item}
-` : ''}💰 Valor: ${brl(valor)}
-💳 Seu saldo atual: ${brl(saldo)}
+🛠 Serviço: ${item}${imeiTexto}
+💰 Valor: ${brl(valor)}
+💳 Saldo atual: ${brl(saldo)}
+💵 Falta pagar: ${brl(falta)}
 
-Faltam: ${brl(falta)}
+Escolha uma opção:
 
-Para adicionar saldo, digite:
-
-*pagar ${falta.toFixed(2).replace('.', ',')}*
-
-Ou digite outro valor, exemplo:
-*pagar 100*
-*pagar 200*
-
-Após a confirmação do PIX, seu saldo será liberado automaticamente.`;
+1️⃣ Pagar este serviço
+2️⃣ Adicionar saldo
+3️⃣ Cancelar pedido`;
 }
 
 function normalizarTipoEntrada(v) {
@@ -490,6 +487,8 @@ async function initDB() {
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
   await addColumnIfMissing('pix_pedidos', 'cliente_jid', 'TEXT');
+  await addColumnIfMissing('pix_pedidos', 'tipo_pagamento', "TEXT DEFAULT 'SALDO'");
+  await addColumnIfMissing('pix_pedidos', 'contexto_json', 'TEXT');
 
   await run(`CREATE TABLE IF NOT EXISTS esim_estoque (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1225,7 +1224,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
       return;
     }
     pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
-    await tgBot.sendMessage(msg.chat.id, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    await tgBot.sendMessage(msg.chat.id, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
 
@@ -1239,14 +1238,16 @@ Envie este código para o WhatsApp da CentralUnlocker:
     pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
     await tgBot.sendMessage(
       msg.chat.id,
-      `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nSomente este CPF poderá efetuar o pagamento do QR Code.`
+      `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.\n\nSomente este documento poderá efetuar o pagamento do QR Code.`
     );
     return;
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
-      verificarPagamento(paymentId, cliente.id, from, valor);
+      const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
+      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
     await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
     await tgBot.sendMessage(msg.chat.id, qrCode || 'PIX indisponível');
@@ -1255,16 +1256,38 @@ Envie este código para o WhatsApp da CentralUnlocker:
 
   let sess = pedidoSessao.get(from);
 
-  if (sess?.etapa === 'aguardando_cpf_pix') {
-    const cpf = textoOriginal.replace(/\D/g, '');
 
-    if (cpf.length !== 11) {
-      await tgBot.sendMessage(msg.chat.id, '❌ CPF inválido. Envie apenas os 11 números do CPF.');
+  if (sess?.etapa === 'saldo_insuficiente_servico') {
+    if (opcao === '1') {
+      const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+      const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
+      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, tipo_pix: 'SERVICO' });
+      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+      return;
+    }
+    if (opcao === '2') {
+      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
+      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50');
+      return;
+    }
+    if (opcao === '3' || texto === 'cancelar') {
+      pedidoSessao.delete(from);
+      await enviarTexto(from, '❌ Pedido cancelado.\n\nDigite menu para voltar ao início.');
+      return;
+    }
+    await enviarTexto(from, 'Escolha 1 para pagar o serviço, 2 para adicionar saldo ou 3 para cancelar.');
+    return;
+  }
+  if (sess?.etapa === 'aguardando_cpf_pix') {
+    const documento = textoOriginal.replace(/\D/g, '');
+
+    if (![11, 14].includes(documento.length)) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.');
       return;
     }
 
     await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
-    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, cpf);
+    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, documento);
 
     if (!pix) {
       await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.');
@@ -1279,9 +1302,11 @@ Envie este código para o WhatsApp da CentralUnlocker:
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
 
     if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")',
-        [paymentId, cliente.id, from, from, valor]);
-      verificarPagamento(paymentId, cliente.id, from, valor);
+      const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)',
+        [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
+      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
 
     await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
@@ -1354,7 +1379,8 @@ Envie este código para o WhatsApp da CentralUnlocker:
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
     if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
-      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      pedidoSessao.set(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
+      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
     }
 
@@ -1489,7 +1515,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       return;
     }
     pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
-    await enviarTexto(from, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
 
@@ -1498,24 +1524,48 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const valor = Number(String(partes[1] || '0').replace(',', '.'));
     if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50'); return; }
     pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
-    await enviarTexto(from, `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os 11 números.`);
+    await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
 
   let sess = pedidoSessao.get(from);
+
+  if (sess?.etapa === 'saldo_insuficiente_servico') {
+    if (opcao === '1') {
+      const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+      const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
+      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, tipo_pix: 'SERVICO' });
+      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+      return;
+    }
+    if (opcao === '2') {
+      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
+      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50');
+      return;
+    }
+    if (opcao === '3' || texto === 'cancelar') {
+      pedidoSessao.delete(from);
+      await enviarTexto(from, '❌ Pedido cancelado.\n\nDigite menu para voltar ao início.');
+      return;
+    }
+    await enviarTexto(from, 'Escolha 1 para pagar o serviço, 2 para adicionar saldo ou 3 para cancelar.');
+    return;
+  }
   if (sess?.etapa === 'aguardando_cpf_pix') {
-    const cpf = textoOriginal.replace(/\D/g, '');
-    if (cpf.length !== 11) { await enviarTexto(from, '❌ CPF inválido. Envie apenas os 11 números do CPF.'); return; }
+    const documento = textoOriginal.replace(/\D/g, '');
+    if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
     await enviarTexto(from, '⏳ Gerando PIX...');
-    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, cpf);
+    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, documento);
     pedidoSessao.delete(from);
     if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
     const valor = sess.valor_pix;
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status) VALUES (?, ?, ?, ?, ?, "pending")', [paymentId, cliente.id, from, from, valor]);
-      verificarPagamento(paymentId, cliente.id, from, valor);
+      const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
+      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
     await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
     await enviarTexto(from, qrCode || 'PIX indisponível');
@@ -1576,7 +1626,8 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
     if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
-      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      pedidoSessao.set(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
+      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
     }
     pedidoSessao.delete(from);
@@ -1719,9 +1770,13 @@ O número que enviar o código será vinculado automaticamente à sua conta do T
 
           return tgBot.sendMessage(
             chatId,
-            `📄 Informe o CPF do pagador para gerar o PIX de ${brl(valor)}.
+            `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.
 
-Somente este CPF poderá efetuar o pagamento do QR Code.`
+Envie somente os números:
+• CPF: 11 dígitos
+• CNPJ: 14 dígitos.
+
+Somente este documento poderá efetuar o pagamento do QR Code.`
           );
         }
         const servMatch = data.match(/^servico_(\d+)$/);
@@ -2666,13 +2721,13 @@ async function textoBackups() {
   return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
 }
 
-async function gerarPix(valor, cliente, cpf) {
+async function gerarPix(valor, cliente, documento) {
   try {
     const response = await axios.post(`${PIXGO_API}/payment/create`, {
       amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
-      customer_name: 'Cliente Telegram', receiver_cpf: cpf,
+      customer_name: 'Cliente', receiver_cpf: documento,
       payer_name: cliente,
-      payer_document: cpf, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+      payer_document: documento, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
     }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
     return response.data;
   } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
@@ -2681,7 +2736,46 @@ async function consultarStatus(paymentId) {
   try { return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, { headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000 })).data; }
   catch (e) { return null; }
 }
-async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
+async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
+  let contexto;
+  try { contexto = typeof contextoJson === 'string' ? JSON.parse(contextoJson) : contextoJson; } catch (_) { contexto = null; }
+  if (!contexto?.servicoId || !Array.isArray(contexto.entradas) || !contexto.entradas.length) return false;
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
+  const servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [contexto.servicoId]);
+  if (!cliente || !servico) return false;
+  const valorUnitario = await precoDaRevenda(cliente.id, servico.id);
+  const totalPedido = Number(contexto.totalPedido || (valorUnitario * contexto.entradas.length));
+  const pixInfo = await get('SELECT valor FROM pix_pedidos WHERE contexto_json=? AND status="completed" ORDER BY criado_em DESC LIMIT 1', [typeof contextoJson === 'string' ? contextoJson : JSON.stringify(contexto)]);
+  const valorPix = Number(pixInfo?.valor || 0);
+  const saldoUsado = Math.max(0, totalPedido - valorPix);
+  if (saldoUsado > 0) await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
+  const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+  const entradaLabel = labelEntradaServico(servico);
+  const loteId = contexto.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+  const criados = [];
+  for (const entrada of contexto.entradas) {
+    const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
+    if (tipoEntrada === 'IMEI') {
+      const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada]);
+      if (duplicado) continue;
+    }
+    const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado)
+      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 1)`, [cliente.id, cliente.nome, jid, cliente.telegram_id || jidToNumber(jid), servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valorUnitario]);
+    criados.push({ id: ins.lastID, entrada });
+  }
+  if (!criados.length) { await enviarTexto(jid, '⚠️ O pagamento foi confirmado, mas o IMEI já possui um pedido em andamento.'); return true; }
+  for (const criado of criados) {
+    const pedido = await get('SELECT * FROM pedidos WHERE id=?', [criado.id]);
+    await avisarNovoPedidoAdmins(pedido);
+  }
+  notificarPainel('pedido', '🔔 Novo pedido pago por PIX', `${cliente.nome} - ${servico.nome}`);
+  const total = valorUnitario * criados.length;
+  const entradasTexto = criados.map(c => c.entrada).join('\n');
+  await enviarParaCanaisCliente(cliente, `✅ Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(total)}\n\n📍 Status: PENDENTE`, jid);
+  return true;
+}
+
+async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagamento='SALDO', contextoJson=null) {
   let tentativas = 0;
   const interval = setInterval(async () => {
     tentativas++;
@@ -2689,19 +2783,23 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix) {
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
       let novo = null;
+      const pagamentoServico = String(tipoPagamento || '').toUpperCase() === 'SERVICO';
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
-          novo = Number(rev.saldo || 0) + Number(valorPix || 0);
-          await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
-          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, "pixgo")', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix]);
+          if (!pagamentoServico) {
+            novo = Number(rev.saldo || 0) + Number(valorPix || 0);
+            await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
+          }
+          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
         }
       } else {
-        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, "pixgo")', [jid, jidToNumber(jid), valorPix]);
+        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
       }
       await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
-      notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${revendaId ? 'revenda' : 'cliente'}`);
-      await enviarTexto(jid, `✅ Pagamento confirmado\n\n💰 Valor pago: ${brl(valorPix)}${novo !== null ? `\n\n💳 Situação da conta:\n${textoSituacaoSaldo(novo)}` : ''}\n\n🏢 CentralUnlocker`);
+      notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
+      await enviarTexto(jid, `✅ Pagamento confirmado!\n\n💳 Valor pago: ${brl(valorPix)}`);
+      if (pagamentoServico) await criarPedidoPagoDireto(revendaId, jid, contextoJson);
     }
     if (status?.success && status.data?.status === 'expired') {
       clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
