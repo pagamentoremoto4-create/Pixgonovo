@@ -3067,15 +3067,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
 app.get('/webhook/whatsapp', (req, res) => res.json({ ok:true, whatsapp: WHATSAPP_ENABLED ? 'enabled' : 'disabled' }));
 
-app.get('/health', (req, res) => res.status(200).json({
-  ok: true,
-  service: 'centralunlocker',
-  telegram: Boolean(tgBot),
-  whatsapp: conectado ? 'connected' : whatsappStatus,
-  ia: Boolean(IA_ENABLED && openai),
-  uptime: Math.floor(process.uptime())
-}));
-
 app.get('/', (req, res) => {
   if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 Atendimento ativo</h1><p>Escaneie o QR Code na página WhatsApp do painel administrativo.</p></div>`));
   res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}${conectado ? '<br>WhatsApp conectado ✅' : WHATSAPP_ENABLED ? '<br>WhatsApp aguardando conexão' : '<br>WhatsApp desabilitado'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
