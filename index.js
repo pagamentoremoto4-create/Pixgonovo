@@ -1474,39 +1474,27 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false) {
 }
 
 function menuWhatsAppTextoFallback(cliente, primeiroAcesso=false) {
-  return `${menuWhatsAppTexto(cliente, primeiroAcesso)}\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Minha conta\n5️⃣ Pagar / PIX\n6️⃣ Suporte\n\nDigite uma opção:`;
+  const cabecalho = menuWhatsAppTexto(cliente, primeiroAcesso);
+  return `${cabecalho}
+
+━━━━━━━━━━━━━━━━━━
+📋 *MENU PRINCIPAL*
+━━━━━━━━━━━━━━━━━━
+
+1️⃣  🛠 Serviços
+2️⃣  📱 Comprar eSIM
+3️⃣  🧾 Histórico
+4️⃣  👤 Minha conta
+5️⃣  💳 Pagar / PIX
+6️⃣  🆘 Suporte
+
+━━━━━━━━━━━━━━━━━━
+💬 Responda somente com o número da opção.`;
 }
 
 async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
-  const numero = String(from || '').startsWith('wa:') ? String(from).slice(3) : jidToNumber(from) || from;
-  const number = normalizarNumeroWhatsApp(numero);
-  if (!number) return false;
-
-  if ((WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') && whatsappSocket && conectado) {
-    const destino = whatsappJidPorNumero.get(number) || numberToJid(number);
-    try {
-      await whatsappSocket.sendMessage(destino, {
-        text: menuWhatsAppTexto(cliente, primeiroAcesso),
-        footer: 'CentralUnlocker',
-        buttonText: '📋 Abrir menu',
-        sections: [{
-          title: 'MENU PRINCIPAL',
-          rows: [
-            { title: '🛠 Serviços', description: 'Consulte os serviços disponíveis', rowId: 'menu_1' },
-            { title: '📱 Comprar eSIM', description: 'Veja os planos disponíveis', rowId: 'menu_2' },
-            { title: '🧾 Histórico', description: 'Acompanhe seus pedidos', rowId: 'menu_3' },
-            { title: '👤 Minha conta', description: 'Consulte saldo e dados da conta', rowId: 'menu_4' },
-            { title: '💳 Pagar / PIX', description: 'Adicione saldo à sua conta', rowId: 'menu_5' },
-            { title: '🆘 Suporte', description: 'Fale com o atendimento', rowId: 'menu_6' }
-          ]
-        }]
-      });
-      return true;
-    } catch (e) {
-      console.log('⚠️ MENU COM BOTÕES NÃO SUPORTADO; enviando menu em texto:', e.message);
-    }
-  }
-
+  // Menus interativos antigos podem ser aceitos pela biblioteca e ainda assim
+  // aparecer no celular sem botões. O texto formatado funciona em qualquer versão.
   return await enviarTexto(from, menuWhatsAppTextoFallback(cliente, primeiroAcesso));
 }
 
