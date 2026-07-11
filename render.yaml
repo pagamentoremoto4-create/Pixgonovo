@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: centralunlocker-v14-ia
+    runtime: node
+    plan: free
+    buildCommand: npm install --no-audit --no-fund --verbose
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: IA_ENABLED
+        value: "true"
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: WHATSAPP_PROVIDER
+        value: baileys
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ADMIN_PANEL_USER
+        sync: false
+      - key: ADMIN_PANEL_PASS
+        sync: false
+      - key: ADMIN_TELEGRAM_ID
+        sync: false
+      - key: ADMIN_NUMBER
+        sync: false
+      - key: WHATSAPP_ENABLED
+        value: "true"
