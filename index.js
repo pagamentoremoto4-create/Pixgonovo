@@ -1157,7 +1157,7 @@ ${entrega}
   });
 }
 function normalizarOpcaoTelegram(texto) {
-  const t = String(texto || '').trim().toLowerCase();
+  const t = String(texto || '').trim().toLowerCase().replace(/^menu_/, '');
   if (t.includes('serviço') || t.includes('servico')) return '1';
   if (t.includes('esim')) return '2';
   if (t.includes('histórico') || t.includes('historico')) return '3';
@@ -1245,7 +1245,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
@@ -1261,7 +1261,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
     if (opcao === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, tipo_pix: 'SERVICO' });
+      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
       await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
       return;
     }
@@ -1303,7 +1303,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
 
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)',
         [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
@@ -1443,13 +1443,71 @@ function extrairMensagemWhatsApp(body) {
   const fromRaw = key?.remoteJid || data?.remoteJid || body?.remoteJid || data?.from || body?.from || data?.sender || '';
   const numero = normalizarNumeroWhatsApp(jidToNumber(fromRaw) || fromRaw);
   const pushName = data?.pushName || body?.pushName || data?.senderName || body?.senderName || 'Cliente WhatsApp';
-  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || msg?.buttonsResponseMessage?.selectedDisplayText || msg?.listResponseMessage?.title || '';
+
+  let respostaInterativa = msg?.buttonsResponseMessage?.selectedButtonId
+    || msg?.buttonsResponseMessage?.selectedDisplayText
+    || msg?.listResponseMessage?.singleSelectReply?.selectedRowId
+    || msg?.listResponseMessage?.title
+    || msg?.templateButtonReplyMessage?.selectedId
+    || msg?.templateButtonReplyMessage?.selectedDisplayText
+    || '';
+
+  const paramsJson = msg?.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+  if (!respostaInterativa && paramsJson) {
+    try {
+      const params = JSON.parse(paramsJson);
+      respostaInterativa = params.id || params.row_id || params.selected_id || params.button_id || '';
+    } catch (_) {}
+  }
+
+  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || respostaInterativa || '';
   const fromMe = Boolean(key?.fromMe || data?.fromMe || body?.fromMe);
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
 
-function menuWhatsAppTexto() {
-  return `👋 Olá! Seja bem-vindo à CentralUnlocker.\n\nComo posso ajudar você hoje?\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Minha conta\n5️⃣ Pagar / Pix\n6️⃣ Suporte\n\nDigite uma opção:`;
+function menuWhatsAppTexto(cliente, primeiroAcesso=false) {
+  const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
+  if (primeiroAcesso) {
+    return `👋 Olá, *${nome}*!\n\nSeja bem-vindo à CentralUnlocker.\n\nComo posso ajudar você hoje?`;
+  }
+  return `👤 *${nome}*\n\nEscolha uma opção:`;
+}
+
+function menuWhatsAppTextoFallback(cliente, primeiroAcesso=false) {
+  return `${menuWhatsAppTexto(cliente, primeiroAcesso)}\n\n1️⃣ Serviços\n2️⃣ Comprar eSIM\n3️⃣ Histórico\n4️⃣ Minha conta\n5️⃣ Pagar / PIX\n6️⃣ Suporte\n\nDigite uma opção:`;
+}
+
+async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
+  const numero = String(from || '').startsWith('wa:') ? String(from).slice(3) : jidToNumber(from) || from;
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number) return false;
+
+  if ((WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') && whatsappSocket && conectado) {
+    const destino = whatsappJidPorNumero.get(number) || numberToJid(number);
+    try {
+      await whatsappSocket.sendMessage(destino, {
+        text: menuWhatsAppTexto(cliente, primeiroAcesso),
+        footer: 'CentralUnlocker',
+        buttonText: '📋 Abrir menu',
+        sections: [{
+          title: 'MENU PRINCIPAL',
+          rows: [
+            { title: '🛠 Serviços', description: 'Consulte os serviços disponíveis', rowId: 'menu_1' },
+            { title: '📱 Comprar eSIM', description: 'Veja os planos disponíveis', rowId: 'menu_2' },
+            { title: '🧾 Histórico', description: 'Acompanhe seus pedidos', rowId: 'menu_3' },
+            { title: '👤 Minha conta', description: 'Consulte saldo e dados da conta', rowId: 'menu_4' },
+            { title: '💳 Pagar / PIX', description: 'Adicione saldo à sua conta', rowId: 'menu_5' },
+            { title: '🆘 Suporte', description: 'Fale com o atendimento', rowId: 'menu_6' }
+          ]
+        }]
+      });
+      return true;
+    } catch (e) {
+      console.log('⚠️ MENU COM BOTÕES NÃO SUPORTADO; enviando menu em texto:', e.message);
+    }
+  }
+
+  return await enviarTexto(from, menuWhatsAppTextoFallback(cliente, primeiroAcesso));
 }
 
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
@@ -1490,7 +1548,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   // Primeiro contato: cadastro silencioso e menu automático.
   if (novo) {
     pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarTexto(from, menuWhatsAppTexto());
+    await enviarMenuWhatsApp(from, cliente, true);
     return;
   }
 
@@ -1503,7 +1561,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   if (lower === 'menu') {
     pedidoSessao.delete(from);
     pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarTexto(from, menuWhatsAppTexto());
+    await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
 
@@ -1534,7 +1592,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (opcao === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, tipo_pix: 'SERVICO' });
+      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
       await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
       return;
     }
@@ -1563,7 +1621,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido }) : null;
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
@@ -2745,10 +2803,12 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   if (!cliente || !servico) return false;
   const valorUnitario = await precoDaRevenda(cliente.id, servico.id);
   const totalPedido = Number(contexto.totalPedido || (valorUnitario * contexto.entradas.length));
-  const pixInfo = await get('SELECT valor FROM pix_pedidos WHERE contexto_json=? AND status="completed" ORDER BY criado_em DESC LIMIT 1', [typeof contextoJson === 'string' ? contextoJson : JSON.stringify(contexto)]);
-  const valorPix = Number(pixInfo?.valor || 0);
-  const saldoUsado = Math.max(0, totalPedido - valorPix);
-  if (saldoUsado > 0) await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
+  // O saldo parcial usado no pedido é congelado quando o PIX é gerado.
+  // Após a confirmação, esse valor é debitado uma única vez da carteira.
+  const saldoUsado = Math.max(0, Math.min(Number(contexto.saldoUsado || 0), totalPedido));
+  if (saldoUsado > 0) {
+    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
+  }
   const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const entradaLabel = labelEntradaServico(servico);
   const loteId = contexto.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
@@ -2782,6 +2842,10 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
     const status = await consultarStatus(paymentId);
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
+      // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
+      const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status!="completed"', [paymentId]);
+      if (!marcado?.changes) return;
+
       let novo = null;
       const pagamentoServico = String(tipoPagamento || '').toUpperCase() === 'SERVICO';
       if (revendaId) {
@@ -2796,7 +2860,6 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       } else {
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
       }
-      await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=?', [paymentId]);
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
       await enviarTexto(jid, `✅ Pagamento confirmado!\n\n💳 Valor pago: ${brl(valorPix)}`);
       if (pagamentoServico) await criarPedidoPagoDireto(revendaId, jid, contextoJson);
