@@ -1293,7 +1293,7 @@ Exemplo: *50*
 0️⃣ ⬅️ Voltar`);
       return;
     }
-    if (opcao === '3' || lower === 'cancelar') {
+    if (opcao === '3' || texto === 'cancelar') {
       pedidoSessao.delete(from);
       await enviarTexto(from, `╔══════════════════════╗
      ❌ PEDIDO CANCELADO
@@ -1348,8 +1348,8 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
-    if (opcao === '3') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, `╔══════════════════════╗
        💳 ADICIONAR SALDO
 ╚══════════════════════╝
@@ -1373,52 +1373,6 @@ Exemplo: *50*
     if (opcao === '6') { await enviarSuporteTelegram(msg.chat.id); return; }
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarMenuTelegram(msg.chat.id, cliente);
-    return;
-  }
-
-  if (sess?.etapa === 'conta') {
-    if (opcao === '5') {
-      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\n\n0️⃣ ⬅️ Voltar');
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite 5 para adicionar saldo ou 0 para voltar.');
-    return;
-  }
-
-  if (sess?.etapa === 'historico') {
-    await enviarTexto(from, '❌ Digite 0 para voltar ao menu principal.');
-    return;
-  }
-
-  if (sess?.etapa === 'suporte') {
-    if (opcao === '1') {
-      const usuarioSuporte = await getTelegramSuporte();
-      await enviarTexto(from, `🆘 Falar com o suporte\n\nTelegram: https://t.me/${usuarioSuporte}\n\n0️⃣ ⬅️ Voltar`);
-      return;
-    }
-    if (opcao === '2') {
-      pedidoSessao.set(from, { etapa: 'suporte_consultar_pedido' });
-      await enviarTexto(from, '📦 Digite o número do pedido que deseja consultar.\n\nExemplo: 123\n\n0️⃣ ⬅️ Voltar');
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite 1, 2 ou 0 para voltar.');
-    return;
-  }
-
-  if (sess?.etapa === 'suporte_consultar_pedido') {
-    const pedidoId = Number(onlyDigits(textoOriginal));
-    if (!pedidoId) {
-      await enviarTexto(from, '❌ Número inválido. Digite somente o número do pedido ou 0 para voltar.');
-      return;
-    }
-    const pedido = await get('SELECT * FROM pedidos WHERE id=? AND revenda_id=?', [pedidoId, cliente.id]);
-    if (!pedido) {
-      await enviarTexto(from, `❌ Pedido #${pedidoId} não encontrado na sua conta.\n\nDigite outro número ou 0 para voltar.`);
-      return;
-    }
-    await enviarTexto(from, `📦 Pedido #${pedido.id}\n\n🛠️ ${pedido.servico_nome || '-'}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n💰 ${brl(pedido.valor)}\n📍 ${pedido.status}\n\n0️⃣ ⬅️ Voltar`);
-    pedidoSessao.set(from, { etapa: 'suporte' });
     return;
   }
 
@@ -1645,11 +1599,6 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   const sessValorPixWhatsApp = pedidoSessao.get(from);
   if (sessValorPixWhatsApp?.etapa === 'aguardando_valor_pix') {
-    if (normalizarOpcaoTelegram(textoOriginal) === '0') {
-      pedidoSessao.set(from, { etapa: 'menu' });
-      await enviarMenuWhatsApp(from, cliente, false);
-      return;
-    }
     const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
     if (!valor || valor < 10) {
       await enviarTexto(from, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
@@ -1715,7 +1664,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
     await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
-    await enviarTexto(from, qrCode || 'PIX indisponível');
+    await enviarTexto(from, qrCode ? `\`\`\`${String(qrCode).trim()}\`\`\`` : 'PIX indisponível');
     return;
   }
 
@@ -1729,10 +1678,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (opcao === '3') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
-    if (opcao === '6') { pedidoSessao.set(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
+    if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
 2️⃣ Consultar pedido
@@ -1740,52 +1689,6 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
     await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
-    return;
-  }
-
-  if (sess?.etapa === 'conta') {
-    if (opcao === '5') {
-      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\n\n0️⃣ ⬅️ Voltar');
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite 5 para adicionar saldo ou 0 para voltar.');
-    return;
-  }
-
-  if (sess?.etapa === 'historico') {
-    await enviarTexto(from, '❌ Digite 0 para voltar ao menu principal.');
-    return;
-  }
-
-  if (sess?.etapa === 'suporte') {
-    if (opcao === '1') {
-      const usuarioSuporte = await getTelegramSuporte();
-      await enviarTexto(from, `🆘 Falar com o suporte\n\nTelegram: https://t.me/${usuarioSuporte}\n\n0️⃣ ⬅️ Voltar`);
-      return;
-    }
-    if (opcao === '2') {
-      pedidoSessao.set(from, { etapa: 'suporte_consultar_pedido' });
-      await enviarTexto(from, '📦 Digite o número do pedido que deseja consultar.\n\nExemplo: 123\n\n0️⃣ ⬅️ Voltar');
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite 1, 2 ou 0 para voltar.');
-    return;
-  }
-
-  if (sess?.etapa === 'suporte_consultar_pedido') {
-    const pedidoId = Number(onlyDigits(textoOriginal));
-    if (!pedidoId) {
-      await enviarTexto(from, '❌ Número inválido. Digite somente o número do pedido ou 0 para voltar.');
-      return;
-    }
-    const pedido = await get('SELECT * FROM pedidos WHERE id=? AND revenda_id=?', [pedidoId, cliente.id]);
-    if (!pedido) {
-      await enviarTexto(from, `❌ Pedido #${pedidoId} não encontrado na sua conta.\n\nDigite outro número ou 0 para voltar.`);
-      return;
-    }
-    await enviarTexto(from, `📦 Pedido #${pedido.id}\n\n🛠️ ${pedido.servico_nome || '-'}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n💰 ${brl(pedido.valor)}\n📍 ${pedido.status}\n\n0️⃣ ⬅️ Voltar`);
-    pedidoSessao.set(from, { etapa: 'suporte' });
     return;
   }
 
@@ -2115,7 +2018,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
     await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
-    await enviarTexto(from, qrCode || 'PIX indisponível');
+    await enviarTexto(from, qrCode ? `\`\`\`${String(qrCode).trim()}\`\`\`` : 'PIX indisponível');
     try {
       const revendaPix = await getRevendaByMsg(msg, from);
 
@@ -2197,31 +2100,15 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     return;
   }
 
-  if (texto === 'historico' || texto === '/historico') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, revenda); return; }
-  if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, revenda); return; }
+  if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
+  if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
 
   sess = pedidoSessao.get(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
     if (texto === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (texto === '3') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, revenda); return; }
-    if (texto === '4') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, revenda); return; }
-  }
-
-  if (texto === '0' && sess && sess.etapa !== 'menu') {
-    pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarTexto(from, `👋 Olá, ${revenda.nome}!\n\n💰 Saldo: ${brl(revenda.saldo)}\n📦 Pedidos: 0\n\n1️⃣ 🛠️ Serviços\n2️⃣ 📱 Comprar eSIM\n3️⃣ 📋 Histórico\n4️⃣ 👤 Minha Conta\n5️⃣ 💳 PIX / Pagamentos\n6️⃣ 🆘 Suporte\n\n💬 Digite a opção desejada.`);
-    return;
-  }
-
-  if (sess?.etapa === 'conta') {
-    if (texto === '5') {
-      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\n\n0️⃣ ⬅️ Voltar');
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite 5 para adicionar saldo ou 0 para voltar.');
-    return;
+    if (texto === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, revenda); return; }
+    if (texto === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, revenda); return; }
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(texto)) {
