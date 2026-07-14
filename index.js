@@ -61,6 +61,7 @@ const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_
 
 // Atendimento automático por IA removido. O WhatsApp usa apenas os fluxos do sistema.
 let whatsappSocket = null;
+let qrCodeBase64 = null;
 const whatsappJidPorNumero = new Map();
 let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
 let whatsappNumeroConectado = '';
@@ -1284,8 +1285,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
       await tgBot.sendMessage(msg.chat.id, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
       return;
     }
-    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-    await tgBot.sendMessage(msg.chat.id, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => tgBot.sendMessage(msg.chat.id, m));
     return;
   }
 
@@ -1296,11 +1296,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
       await tgBot.sendMessage(msg.chat.id, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50');
       return;
     }
-    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-    await tgBot.sendMessage(
-      msg.chat.id,
-      `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.\n\nSomente este documento poderá efetuar o pagamento do QR Code.`
-    );
+    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => tgBot.sendMessage(msg.chat.id, m));
     return;
   }
 
@@ -1312,8 +1308,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
     if (opcaoSaldo === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
-      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+      await iniciarFluxoPagamento(from, { ...sess, valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' }, cliente, async (m) => tgBot.sendMessage(msg.chat.id, m));
       return;
     }
     if (opcaoSaldo === '2') {
@@ -1348,88 +1343,15 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) {
-      await tgBot.sendMessage(msg.chat.id, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');
-      return;
-    }
-    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway });
-    await tgBot.sendMessage(msg.chat.id, `✅ ${nomeGateway(gateway)} selecionado.\n\n📄 Envie novamente o CPF ou CNPJ do pagador.`);
-    return;
+    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
+    if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
+    await enviarTexto(from, `✅ PixGo selecionado.\n\n📄 Informe o CPF ou CNPJ do pagador.`); return;
   }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
-
-    if (![11, 14].includes(documento.length)) {
-      await tgBot.sendMessage(msg.chat.id, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.');
-      return;
-    }
-
-    await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
-    const gateway = sess.gateway || await escolherGatewayParaSessao(from, { ...sess, documento_pix: documento }, async (m) => tgBot.sendMessage(msg.chat.id, m));
-    if (!gateway) return;
-    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, documento, gateway);
-
-    if (!pix) {
-      await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.');
-      pedidoSessao.delete(from);
-      return;
-    }
-
-    await apagarSessaoPedido(from);
-
-    const valor = sess.valor_pix;
-    const paymentId = pix?.paymentId;
-    const qrCode = pix?.qrCode;
-
-    if (paymentId) {
-      const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
-        [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson, gateway]);
-      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson, gateway);
-    }
-
-    await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
-    await tgBot.sendMessage(msg.chat.id, qrCode || 'PIX indisponível');
-    return;
-  }
-
-  // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
-  // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
-  // ter prioridade mesmo após reinício do Render.
-  sess = sess || await carregarSessaoPedido(from);
-
-
-
-  if (sess?.etapa === 'menu') {
-    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
-    if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, `╔══════════════════════╗
-       💳 ADICIONAR SALDO
-╚══════════════════════╝
-
-Digite somente o valor desejado.
-
-Exemplo: *50*
-
-══════════════════════
-
-0️⃣ ⬅️ Voltar`); return; }
-    if (opcao === '6') { pedidoSessao.delete(from); await enviarSuporteTelegram(msg.chat.id); return; }
-  }
-
-  if (!sess) {
-    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
-    if (opcao === '3') { await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
-    if (opcao === '6') { await enviarSuporteTelegram(msg.chat.id); return; }
-    pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarMenuTelegram(msg.chat.id, cliente);
-    return;
+    if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
+    await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
@@ -1679,8 +1601,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarTexto(from, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
       return;
     }
-    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-    await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => enviarTexto(from, m), true);
     return;
   }
 
@@ -1688,8 +1609,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const partes = textoOriginal.split(/\s+/);
     const valor = Number(String(partes[1] || '0').replace(',', '.'));
     if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50'); return; }
-    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-    await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => enviarTexto(from, m), true);
     return;
   }
 
@@ -1707,8 +1627,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (opcaoSaldo === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
-      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+      await iniciarFluxoPagamento(from, { ...sess, valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' }, cliente, async (m) => enviarTexto(from, m), true);
       return;
     }
     if (opcaoSaldo === '2') {
@@ -1727,35 +1646,17 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) {
-      await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');
-      return;
-    }
-    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway });
-    await enviarTexto(from, `✅ ${nomeGateway(gateway)} selecionado.\n\n📄 Envie novamente o CPF ou CNPJ do pagador.`);
-    return;
+    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
+    if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
+    await enviarTexto(from, `✅ PixGo selecionado.
+
+📄 Informe o CPF ou CNPJ do pagador.`); return;
   }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
     if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
-    await enviarTexto(from, '⏳ Gerando PIX...');
-    const gateway = sess.gateway || await escolherGatewayParaSessao(from, { ...sess, documento_pix: documento }, async (m) => enviarTexto(from, m));
-    if (!gateway) return;
-    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, documento, gateway);
-    await apagarSessaoPedido(from);
-    if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
-    const valor = sess.valor_pix;
-    const paymentId = pix?.paymentId;
-    const qrCode = pix?.qrCode;
-    if (paymentId) {
-      const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson, gateway]);
-      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson, gateway);
-    }
-    await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
-    await enviarTexto(from, qrCode ? `\`\`\`${String(qrCode).trim()}\`\`\`` : 'PIX indisponível');
-    return;
+    await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
   }
 
   // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
@@ -1984,12 +1885,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
           const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
           if (falta <= 0) return tgBot.sendMessage(chatId, '✅ Seu saldo já é suficiente. Escolha o serviço novamente para confirmar.');
-          await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
-          return tgBot.sendMessage(chatId, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.
-
-Envie somente os números:
-• CPF: 11 dígitos
-• CNPJ: 14 dígitos.`);
+          return iniciarFluxoPagamento(from, { ...sess, valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' }, cliente, async (m) => tgBot.sendMessage(chatId, m));
         }
         if (data === 'saldo_adicionar') {
           await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
@@ -2043,18 +1939,7 @@ Exemplo: 50`);
         if (data.startsWith('pagar_')) {
           const valor = Number(data.replace('pagar_', ''));
           if (!Number.isFinite(valor) || valor < 10) return tgBot.sendMessage(chatId, '❌ Valor inválido.');
-          await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-
-          return tgBot.sendMessage(
-            chatId,
-            `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.
-
-Envie somente os números:
-• CPF: 11 dígitos
-• CNPJ: 14 dígitos.
-
-Somente este documento poderá efetuar o pagamento do QR Code.`
-          );
+          return iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => tgBot.sendMessage(chatId, m));
         }
         const servMatch = data.match(/^servico_(\d+)$/);
         if (servMatch) {
@@ -3087,18 +2972,16 @@ async function gerarPixPixGo(valor, cliente, documento) {
   };
 }
 
-async function gerarPixMercadoPago(valor, cliente, documento) {
+async function gerarPixMercadoPago(valor, cliente) {
   const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
   if (!token) throw new Error('MERCADO_PAGO_ACCESS_TOKEN não configurado');
-  const tipoDoc = String(documento).length === 14 ? 'CNPJ' : 'CPF';
   const response = await axios.post(`${MERCADO_PAGO_API}/v1/payments`, {
     transaction_amount: Number(valor),
     description: `Pagamento CentralUnlocker ${cliente}`.slice(0, 255),
     payment_method_id: 'pix',
     payer: {
       email: process.env.MERCADO_PAGO_PAYER_EMAIL || 'cliente@centralunlocker.com.br',
-      first_name: String(cliente || 'Cliente').slice(0, 50),
-      identification: { type: tipoDoc, number: String(documento) }
+      first_name: String(cliente || 'Cliente').slice(0, 50)
     },
     external_reference: `centralunlocker_${Date.now()}`,
     notification_url: BASE_URL ? `${BASE_URL}/webhook/mercadopago` : undefined
@@ -3121,12 +3004,62 @@ async function gerarPixMercadoPago(valor, cliente, documento) {
 async function gerarPix(valor, cliente, documento, gateway='pixgo') {
   try {
     return gateway === 'mercadopago'
-      ? await gerarPixMercadoPago(valor, cliente, documento)
+      ? await gerarPixMercadoPago(valor, cliente)
       : await gerarPixPixGo(valor, cliente, documento);
   } catch (e) {
     console.log(`ERRO ${nomeGateway(gateway).toUpperCase()}:`, e.response?.data || e.message);
     return null;
   }
+}
+
+
+async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
+  const gateway = sess.gateway || 'pixgo';
+  await enviarMensagem('⏳ Gerando PIX...');
+  const documento = gateway === 'pixgo' ? String(sess.documento_pix || '') : '';
+  const pix = await gerarPix(sess.valor_pix, `${chave.startsWith('tg:') ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
+  await apagarSessaoPedido(chave);
+  if (!pix) {
+    await enviarMensagem(`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)}. Tente novamente ou escolha outra forma de pagamento.`);
+    return false;
+  }
+  const valor = Number(sess.valor_pix || 0);
+  const paymentId = pix?.paymentId;
+  const qrCode = pix?.qrCode;
+  if (paymentId) {
+    const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
+    const contextoJson = tipoPagamento === 'SERVICO'
+      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
+      : null;
+    await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
+      [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
+    verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
+  }
+  await enviarMensagem(`✅ PIX GERADO\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
+  const codigo = qrCode || 'PIX indisponível';
+  await enviarMensagem(codigoMonoespacado && qrCode ? `\`\`\`${String(codigo).trim()}\`\`\`` : codigo);
+  return true;
+}
+
+async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
+  const cfg = await gatewaysPagamentoAtivos();
+  if (!cfg.lista.length) {
+    await apagarSessaoPedido(chave);
+    await enviarMensagem('⚠️ Pagamentos temporariamente indisponíveis. Entre em contato com o suporte.');
+    return false;
+  }
+  if (cfg.lista.length > 1) {
+    await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_gateway_pix' });
+    await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+    return false;
+  }
+  const gateway = cfg.lista[0];
+  if (gateway === 'pixgo') {
+    await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
+    await enviarMensagem(`📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(sess.valor_pix)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+    return false;
+  }
+  return finalizarGeracaoPix(chave, { ...sess, gateway: 'mercadopago' }, cliente, enviarMensagem, codigoMonoespacado);
 }
 
 async function consultarStatus(paymentId, gateway='pixgo') {
