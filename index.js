@@ -1646,7 +1646,26 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
-  if (lower === 'menu') {
+  // Saudações e comandos simples abrem o menu automaticamente.
+  // A limpeza das pontuações permite reconhecer mensagens como "Oi!" e "Olá.".
+  const comandoMenu = lower
+    .replace(/[!?.,;:]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const palavrasMenu = [
+    'menu',
+    'oi',
+    'ola',
+    'olá',
+    'bom dia',
+    'boa tarde',
+    'boa noite',
+    'inicio',
+    'início',
+    'start'
+  ];
+
+  if (palavrasMenu.includes(comandoMenu)) {
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
