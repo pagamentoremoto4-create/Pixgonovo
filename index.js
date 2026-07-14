@@ -57,6 +57,14 @@ const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
+
+// IA exclusiva do WhatsApp (OpenAI Responses API).
+const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
+const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
+const whatsappAiHistorico = new Map();
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
@@ -88,6 +96,39 @@ const TEMAS_PAINEL = {
 
 const pedidoSessao = new Map();
 const adminSessao = new Map();
+
+// Sessões críticas de checkout também ficam no SQLite. Assim o botão de pagamento
+// continua funcionando mesmo após reinício/redeploy do servidor.
+async function salvarSessaoPedido(chave, sessao) {
+  pedidoSessao.set(chave, sessao);
+  try {
+    await run(`INSERT OR REPLACE INTO pedido_sessoes (chave, etapa, dados_json, atualizado_em)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
+      [chave, String(sessao?.etapa || ''), JSON.stringify(sessao || {})]);
+  } catch (e) {
+    console.log('⚠️ Não foi possível persistir sessão do pedido:', e.message);
+  }
+}
+
+async function carregarSessaoPedido(chave) {
+  const memoria = pedidoSessao.get(chave);
+  if (memoria) return memoria;
+  try {
+    const linha = await get('SELECT dados_json FROM pedido_sessoes WHERE chave=?', [chave]);
+    if (!linha?.dados_json) return null;
+    const sessao = JSON.parse(linha.dados_json);
+    pedidoSessao.set(chave, sessao);
+    return sessao;
+  } catch (e) {
+    console.log('⚠️ Não foi possível recuperar sessão do pedido:', e.message);
+    return null;
+  }
+}
+
+async function apagarSessaoPedido(chave) {
+  pedidoSessao.delete(chave);
+  try { await run('DELETE FROM pedido_sessoes WHERE chave=?', [chave]); } catch (_) {}
+}
 
 const uploadEsim = multer({
   storage: multer.diskStorage({
@@ -235,6 +276,25 @@ ${brl(falta)}
 ══════════════════════
 
 💬 Digite o número da opção.`;
+}
+
+function normalizarOpcaoSaldoInsuficiente(texto) {
+  const t = String(texto || '').trim().toLowerCase();
+  const limpo = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (limpo === '1' || limpo.includes('pagar este servico') || limpo.includes('pagar servico')) return '1';
+  if (limpo === '2' || limpo.includes('adicionar saldo') || limpo.includes('colocar saldo') || limpo.includes('recarregar saldo')) return '2';
+  if (limpo === '3' || limpo.includes('cancelar')) return '3';
+  return t.replace(/[️⃣\s]/g, '');
+}
+
+async function enviarSaldoInsuficienteTelegram(chatId, revenda, valor, item='serviço', entradas=[]) {
+  return tgBot.sendMessage(chatId, textoSaldoInsuficiente(revenda, valor, item, entradas), {
+    reply_markup: { inline_keyboard: [
+      [{ text: '💳 Pagar este serviço', callback_data: 'saldo_pagar_servico' }],
+      [{ text: '➕ Adicionar saldo', callback_data: 'saldo_adicionar' }],
+      [{ text: '❌ Cancelar pedido', callback_data: 'saldo_cancelar' }]
+    ] }
+  });
 }
 
 function normalizarTipoEntrada(v) {
@@ -506,6 +566,13 @@ async function initDB() {
   await addColumnIfMissing('pix_pedidos', 'cliente_jid', 'TEXT');
   await addColumnIfMissing('pix_pedidos', 'tipo_pagamento', "TEXT DEFAULT 'SALDO'");
   await addColumnIfMissing('pix_pedidos', 'contexto_json', 'TEXT');
+
+  await run(`CREATE TABLE IF NOT EXISTS pedido_sessoes (
+    chave TEXT PRIMARY KEY,
+    etapa TEXT,
+    dados_json TEXT NOT NULL,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
 
   await run(`CREATE TABLE IF NOT EXISTS esim_estoque (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1215,14 +1282,14 @@ async function processarMensagemTelegram(msg) {
   const opcao = normalizarOpcaoTelegram(textoOriginal);
 
   if (['cancelar', 'sair', 'voltar'].includes(texto)) {
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     await tgBot.sendMessage(msg.chat.id, '✅ Operação cancelada.');
     await enviarMenuTelegram(msg.chat.id, cliente);
     return;
   }
 
   if (texto === '/menu' || texto === 'menu' || texto === 'início' || texto === 'inicio') {
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     await enviarMenuTelegram(msg.chat.id, cliente);
     return;
   }
@@ -1240,14 +1307,14 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
-  const sessValorPixTelegram = pedidoSessao.get(from);
+  const sessValorPixTelegram = await carregarSessaoPedido(from);
   if (sessValorPixTelegram?.etapa === 'aguardando_valor_pix') {
     const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
     if (!valor || valor < 10) {
       await tgBot.sendMessage(msg.chat.id, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
       return;
     }
-    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
     await tgBot.sendMessage(msg.chat.id, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
@@ -1259,7 +1326,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
       await tgBot.sendMessage(msg.chat.id, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50');
       return;
     }
-    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
     await tgBot.sendMessage(
       msg.chat.id,
       `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.\n\nSomente este documento poderá efetuar o pagamento do QR Code.`
@@ -1267,19 +1334,20 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
-  let sess = pedidoSessao.get(from);
+  let sess = await carregarSessaoPedido(from);
 
 
   if (sess?.etapa === 'saldo_insuficiente_servico') {
-    if (opcao === '1') {
+    const opcaoSaldo = normalizarOpcaoSaldoInsuficiente(textoOriginal);
+    if (opcaoSaldo === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
+      await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
       await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
       return;
     }
-    if (opcao === '2') {
-      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
+    if (opcaoSaldo === '2') {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
       await enviarTexto(from, `╔══════════════════════╗
        💳 ADICIONAR SALDO
 ╚══════════════════════╝
@@ -1293,8 +1361,8 @@ Exemplo: *50*
 0️⃣ ⬅️ Voltar`);
       return;
     }
-    if (opcao === '3' || texto === 'cancelar') {
-      pedidoSessao.delete(from);
+    if (opcaoSaldo === '3' || texto === 'cancelar') {
+      await apagarSessaoPedido(from);
       await enviarTexto(from, `╔══════════════════════╗
      ❌ PEDIDO CANCELADO
 ╚══════════════════════╝
@@ -1324,7 +1392,7 @@ Digite *menu* para voltar.`);
       return;
     }
 
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
 
     const valor = sess.valor_pix;
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
@@ -1430,8 +1498,8 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
     if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
-      pedidoSessao.set(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
-      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
+      await salvarSessaoPedido(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
+      await enviarSaldoInsuficienteTelegram(msg.chat.id, revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas);
       return;
     }
 
@@ -1542,6 +1610,102 @@ async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
   return await enviarTexto(from, menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0)));
 }
 
+async function obterContextoComercialIA(cliente) {
+  const servicos = await all(`SELECT nome, preco FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40`);
+  const planos = await all(`SELECT nome, preco, estoque FROM esim_planos WHERE ativo=1 ORDER BY id ASC LIMIT 40`).catch(() => []);
+  const suporte = String(process.env.SUPORTE_TELEGRAM || '').replace(/^@/, '').trim();
+  const linhasServicos = servicos.length
+    ? servicos.map(s => `- ${s.nome}: ${brl(s.preco || 0)}`).join('\n')
+    : '- Nenhum serviço disponível no momento.';
+  const linhasPlanos = planos.length
+    ? planos.map(p => `- ${p.nome}: ${brl(p.preco || 0)}; estoque ${Number(p.estoque || 0) > 0 ? 'disponível' : 'indisponível'}`).join('\n')
+    : '- Consulte a opção Comprar eSIM no menu.';
+  return {
+    instrucoes: `Você é a assistente virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
+Responda em português do Brasil, com educação, objetividade e mensagens curtas próprias para WhatsApp.
+Use exclusivamente as informações fornecidas abaixo. Nunca invente preço, prazo, estoque, status, garantia ou procedimento.
+Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
+Não tente gerar PIX, alterar saldo, criar/cancelar pedidos ou consultar status por conta própria. Para essas ações, oriente o cliente a usar o menu.
+Quando o cliente quiser atendimento humano, tiver reclamação, problema de pagamento, confirmação de PIX, pedido atrasado, ou quando você não souber, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu.".
+Não responda assuntos fora da CentralUnlocker. Nesse caso, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.
+Não diga que executou uma ação que não executou.
+
+Cliente: ${cliente?.nome || 'Cliente'}
+Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (apenas informe se ele perguntar; para atualização mande usar Minha Conta)
+
+SERVIÇOS ATIVOS:
+${linhasServicos}
+
+PLANOS eSIM:
+${linhasPlanos}
+
+CANAIS E COMANDOS:
+- Digitar "menu" abre o menu principal.
+- Opção 1: Serviços.
+- Opção 2: Comprar eSIM.
+- Opção 3: Histórico.
+- Opção 4: Minha Conta.
+- Opção 5: PIX / Pagamentos e adicionar saldo.
+- Opção 6: Suporte.${suporte ? `\n- Telegram do suporte: @${suporte}` : ''}`
+  };
+}
+
+function extrairTextoRespostaOpenAI(data) {
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+  const partes = [];
+  for (const item of (data?.output || [])) {
+    for (const conteudo of (item?.content || [])) {
+      if (conteudo?.type === 'output_text' && conteudo?.text) partes.push(conteudo.text);
+    }
+  }
+  return partes.join('\n').trim();
+}
+
+async function responderComIAWhatsApp(from, cliente, textoOriginal) {
+  if (!WHATSAPP_AI_ENABLED) return false;
+  if (!OPENAI_API_KEY) {
+    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas OPENAI_API_KEY não foi configurada.');
+    return false;
+  }
+
+  const chave = String(from);
+  const historico = whatsappAiHistorico.get(chave) || [];
+  const contexto = await obterContextoComercialIA(cliente);
+  const mensagens = [
+    ...historico.slice(-8),
+    { role: 'user', content: String(textoOriginal || '').slice(0, 1500) }
+  ];
+
+  try {
+    const resposta = await axios.post('https://api.openai.com/v1/responses', {
+      model: OPENAI_MODEL,
+      instructions: contexto.instrucoes,
+      input: mensagens,
+      max_output_tokens: WHATSAPP_AI_MAX_TOKENS,
+      temperature: 0.3
+    }, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: WHATSAPP_AI_TIMEOUT_MS
+    });
+
+    const textoIA = extrairTextoRespostaOpenAI(resposta.data);
+    if (!textoIA) return false;
+    await enviarTexto(from, textoIA.slice(0, 3500));
+    whatsappAiHistorico.set(chave, [
+      ...mensagens,
+      { role: 'assistant', content: textoIA }
+    ].slice(-10));
+    return true;
+  } catch (e) {
+    const detalhe = e?.response?.data?.error?.message || e.message;
+    console.log('❌ IA WHATSAPP:', detalhe);
+    return false;
+  }
+}
+
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
@@ -1585,26 +1749,26 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   }
 
   if (['cancelar', 'sair', 'voltar'].includes(lower)) {
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
     return;
   }
 
   if (lower === 'menu') {
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
 
-  const sessValorPixWhatsApp = pedidoSessao.get(from);
+  const sessValorPixWhatsApp = await carregarSessaoPedido(from);
   if (sessValorPixWhatsApp?.etapa === 'aguardando_valor_pix') {
     const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
     if (!valor || valor < 10) {
       await enviarTexto(from, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
       return;
     }
-    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
     await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
@@ -1613,34 +1777,36 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const partes = textoOriginal.split(/\s+/);
     const valor = Number(String(partes[1] || '0').replace(',', '.'));
     if (!valor || valor < 10) { await enviarTexto(from, '❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50'); return; }
-    pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+    await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
     await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return;
   }
 
-  let sess = pedidoSessao.get(from);
+  let sess = await carregarSessaoPedido(from);
 
   if (opcao === '0' && sess && sess.etapa !== 'menu') {
+    await apagarSessaoPedido(from);
     pedidoSessao.set(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
 
   if (sess?.etapa === 'saldo_insuficiente_servico') {
-    if (opcao === '1') {
+    const opcaoSaldo = normalizarOpcaoSaldoInsuficiente(textoOriginal);
+    if (opcaoSaldo === '1') {
       const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
       const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
-      pedidoSessao.set(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
+      await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
       await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
       return;
     }
-    if (opcao === '2') {
-      pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' });
+    if (opcaoSaldo === '2') {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
       await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50');
       return;
     }
-    if (opcao === '3' || texto === 'cancelar') {
-      pedidoSessao.delete(from);
+    if (opcaoSaldo === '3' || lower === 'cancelar') {
+      await apagarSessaoPedido(from);
       await enviarTexto(from, '❌ Pedido cancelado.\n\nDigite menu para voltar ao início.');
       return;
     }
@@ -1652,7 +1818,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
     await enviarTexto(from, '⏳ Gerando PIX...');
     const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, documento);
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
     const valor = sess.valor_pix;
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
@@ -1736,7 +1902,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
     if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
-      pedidoSessao.set(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
+      await salvarSessaoPedido(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
       await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
     }
@@ -1776,8 +1942,12 @@ ${brl(totalPedido)}
     return;
   }
 
-  // Mensagem não reconhecida: não repetir aviso automaticamente.
-  // O menu já é enviado no primeiro contato e pode ser aberto digitando "menu".
+  // Fora dos fluxos do sistema, a IA responde somente no WhatsApp.
+  // Pagamentos, pedidos, IMEI e menus continuam sendo tratados acima pelo código normal.
+  const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+  if (!respondeuIA && WHATSAPP_AI_ENABLED) {
+    await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
+  }
   return;
 }
 
@@ -1836,7 +2006,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       const data = String(q.data || '');
       if (!chatId) return;
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra)$/.test(data);
+      const ehBotaoCliente = data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || /^esim_(\d+|confirmar_\d+|cancelar_compra)$/.test(data);
       if (ehBotaoCliente) {
         const { cliente } = await cadastrarClienteTelegram(q.from);
         const from = tgJid(q.from.id);
@@ -1862,8 +2032,34 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           pedidoSessao.delete(from);
           return enviarContaRevenda(from, cliente);
         }
+        if (data === 'saldo_pagar_servico') {
+          const sess = await carregarSessaoPedido(from);
+          if (!sess || sess.etapa !== 'saldo_insuficiente_servico') {
+            return tgBot.sendMessage(chatId, '⌛ Esta solicitação expirou. Escolha o serviço novamente.');
+          }
+          const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
+          const falta = Math.max(0, Number(sess.totalPedido || 0) - Number(revAtual?.saldo || 0));
+          if (falta <= 0) return tgBot.sendMessage(chatId, '✅ Seu saldo já é suficiente. Escolha o serviço novamente para confirmar.');
+          await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', valor_pix: falta, saldo_usado: Math.min(Number(revAtual?.saldo || 0), Number(sess.totalPedido || 0)), tipo_pix: 'SERVICO' });
+          return tgBot.sendMessage(chatId, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(falta)}.
+
+Envie somente os números:
+• CPF: 11 dígitos
+• CNPJ: 14 dígitos.`);
+        }
+        if (data === 'saldo_adicionar') {
+          await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
+          return tgBot.sendMessage(chatId, `💳 Digite somente o valor que deseja adicionar ao saldo.
+
+Valor mínimo: R$ 10,00
+Exemplo: 50`);
+        }
+        if (data === 'saldo_cancelar') {
+          await apagarSessaoPedido(from);
+          return tgBot.sendMessage(chatId, '❌ Pedido cancelado. Nenhuma cobrança foi realizada.', { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
+        }
         if (data === 'menu_pagar') {
-          pedidoSessao.delete(from);
+          await salvarSessaoPedido(from, { etapa: 'menu_pagamento' });
           return tgBot.sendMessage(chatId, `💳 Para gerar PIX, digite:
 
 pagar 50
@@ -1871,7 +2067,8 @@ pagar 50
 Ou escolha um valor:`, {
             reply_markup: { inline_keyboard: [
               [{ text: 'R$ 20', callback_data: 'pagar_20' }, { text: 'R$ 50', callback_data: 'pagar_50' }],
-              [{ text: 'R$ 100', callback_data: 'pagar_100' }, { text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
+              [{ text: 'R$ 100', callback_data: 'pagar_100' }, { text: 'Outro valor', callback_data: 'pagar_outro' }],
+              [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
             ] }
           });
         }
@@ -1892,9 +2089,17 @@ Envie este código para o WhatsApp da CentralUnlocker:
 
 O número que enviar o código será vinculado automaticamente à sua conta do Telegram.`, { parse_mode: 'Markdown' });
         }
+        if (data === 'pagar_outro') {
+          await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
+          return tgBot.sendMessage(chatId, `💳 Digite somente o valor que deseja adicionar ao saldo.
+
+Valor mínimo: R$ 10,00
+Exemplo: 50`);
+        }
         if (data.startsWith('pagar_')) {
           const valor = Number(data.replace('pagar_', ''));
-          pedidoSessao.set(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor });
+          if (!Number.isFinite(valor) || valor < 10) return tgBot.sendMessage(chatId, '❌ Valor inválido.');
+          await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
 
           return tgBot.sendMessage(
             chatId,
