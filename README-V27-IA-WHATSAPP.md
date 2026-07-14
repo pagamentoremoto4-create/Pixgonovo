@@ -1,40 +1,32 @@
-# V27 — Gemini somente no WhatsApp
+# V27 — IA somente no WhatsApp
 
 ## O que foi implementado
 
-- Google Gemini responde apenas mensagens livres do WhatsApp.
+- IA responde apenas mensagens do WhatsApp que não pertencem a um fluxo do sistema.
 - Telegram permanece sem IA.
-- Menus, PIX, adicionar saldo, pagar serviço, IMEI, pedidos e eSIM continuam no fluxo normal.
-- A IA recebe como contexto os serviços, preços e estoque ativos no banco de dados.
-- A IA não confirma pagamentos, não altera saldo e não cria ou cancela pedidos.
-- Em erros ou dúvidas sensíveis, o cliente é direcionado ao suporte humano.
+- Menus, PIX, adicionar saldo, pagar serviço, IMEI, pedidos e eSIM continuam sendo tratados pelo código normal.
+- A IA usa os serviços e preços ativos do banco de dados como contexto.
+- A IA não confirma pagamentos, não altera saldo e não cria pedidos.
+- Em erros ou dúvidas sensíveis, orienta o cliente a usar o suporte humano.
 
 ## Variáveis no Render
 
 ```env
 WHATSAPP_AI_ENABLED=true
-GEMINI_API_KEY=cole_sua_chave_do_google_ai_studio
-GEMINI_MODEL=gemini-3.5-flash
+OPENAI_API_KEY=coloque_sua_chave_aqui
+OPENAI_MODEL=gpt-4.1-mini
 WHATSAPP_AI_MAX_TOKENS=350
 WHATSAPP_AI_TIMEOUT_MS=25000
 ```
 
-Não coloque a chave no GitHub. Configure-a somente em **Render > Environment**.
+Depois de salvar as variáveis, reinicie o serviço no Render.
 
 ## Teste
 
-Depois do deploy e com o WhatsApp conectado, envie uma pergunta livre:
+Envie no WhatsApp uma pergunta livre, por exemplo:
 
 `Quais serviços vocês oferecem?`
 
-Para abrir o fluxo normal do sistema, envie:
+Para abrir o sistema normal, envie:
 
 `menu`
-
-## Desativar a IA
-
-Altere no Render:
-
-```env
-WHATSAPP_AI_ENABLED=false
-```

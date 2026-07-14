@@ -58,47 +58,13 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
 
-// IA exclusiva do WhatsApp (Google Gemini API).
-let WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
-const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
+// IA exclusiva do WhatsApp (OpenAI Responses API).
+const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
+const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
-const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'true').toLowerCase() === 'true';
-const WHATSAPP_AI_ALLOW_GENERAL = String(process.env.WHATSAPP_AI_ALLOW_GENERAL || 'true').toLowerCase() === 'true';
-const WHATSAPP_AI_BUSINESS_NOTES = String(process.env.WHATSAPP_AI_BUSINESS_NOTES || '').trim();
-const WHATSAPP_AI_ROUTER = String(process.env.WHATSAPP_AI_ROUTER || 'true').toLowerCase() === 'true';
-console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})${WHATSAPP_AI_ROUTER ? ' + ROTEADOR V34' : ''}` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
 const whatsappAiHistorico = new Map();
-const WHATSAPP_AI_HISTORY_LIMIT = Math.max(4, Number(process.env.WHATSAPP_AI_HISTORY_LIMIT || 12));
-const WHATSAPP_AI_HUMAN_TIMEOUT_MIN = Math.max(15, Number(process.env.WHATSAPP_AI_HUMAN_TIMEOUT_MIN || 120));
-
-async function registrarMetricaIA(tipo, clienteId=null) {
-  try {
-    await run('INSERT INTO ia_metricas (tipo, revenda_id, criado_em) VALUES (?, ?, CURRENT_TIMESTAMP)', [String(tipo || 'evento'), clienteId || null]);
-  } catch (_) {}
-}
-
-async function atendimentoHumanoAtivo(clienteId) {
-  if (!clienteId) return false;
-  const row = await get(`SELECT ativo, atualizado_em FROM ia_atendimentos_humanos WHERE revenda_id=?`, [clienteId]).catch(() => null);
-  if (!row || Number(row.ativo || 0) !== 1) return false;
-  const atualizado = Date.parse(String(row.atualizado_em || '').replace(' ', 'T') + 'Z');
-  if (Number.isFinite(atualizado) && Date.now() - atualizado > WHATSAPP_AI_HUMAN_TIMEOUT_MIN * 60000) {
-    await run('UPDATE ia_atendimentos_humanos SET ativo=0, atualizado_em=CURRENT_TIMESTAMP WHERE revenda_id=?', [clienteId]).catch(() => {});
-    return false;
-  }
-  return true;
-}
-
-async function definirAtendimentoHumano(clienteId, ativo, motivo='') {
-  if (!clienteId) return;
-  await run(`INSERT INTO ia_atendimentos_humanos (revenda_id, ativo, motivo, atualizado_em)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(revenda_id) DO UPDATE SET ativo=excluded.ativo, motivo=excluded.motivo, atualizado_em=CURRENT_TIMESTAMP`,
-    [clienteId, ativo ? 1 : 0, String(motivo || '').slice(0, 500)]);
-}
-
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
@@ -652,20 +618,6 @@ async function initDB() {
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  await run(`CREATE TABLE IF NOT EXISTS ia_metricas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tipo TEXT NOT NULL,
-    revenda_id INTEGER,
-    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  await run(`CREATE TABLE IF NOT EXISTS ia_atendimentos_humanos (
-    revenda_id INTEGER PRIMARY KEY,
-    ativo INTEGER DEFAULT 0,
-    motivo TEXT,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
-  )`);
-
   await run(`CREATE TABLE IF NOT EXISTS mensagens_envio (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     destino TEXT,
@@ -679,10 +631,6 @@ async function initDB() {
   )`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
-  // O painel pode sobrescrever a configuração inicial do Render.
-  const aiPainelSalva = await getConfig('whatsapp_ai_enabled', WHATSAPP_AI_ENABLED ? 'true' : 'false');
-  WHATSAPP_AI_ENABLED = String(aiPainelSalva).toLowerCase() === 'true';
-  console.log(`🤖 IA WhatsApp após carregar painel: ${WHATSAPP_AI_ENABLED ? 'ATIVA' : 'DESATIVADA'}`);
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -782,7 +730,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/ia">🤖 Inteligência Artificial</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -1663,42 +1611,8 @@ async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
 }
 
 async function obterContextoComercialIA(cliente) {
-  // Usa os nomes reais das colunas do banco. Antes, esta consulta tentava ler
-  // as colunas inexistentes "preco", "nome" e "estoque", causando:
-  // SQLITE_ERROR: no such column: preco.
-  const servicos = await all(`
-    SELECT
-      s.nome,
-      COALESCE(NULLIF(pr.preco, 0), s.preco_padrao, 0) AS preco
-    FROM servicos_catalogo s
-    LEFT JOIN precos_revenda pr
-      ON pr.servico_id = s.id
-     AND pr.revenda_id = ?
-    WHERE s.ativo = 1
-    ORDER BY s.id ASC
-    LIMIT 40
-  `, [cliente?.id || 0]).catch((erro) => {
-    console.error('❌ IA: erro ao carregar serviços:', erro.message);
-    return [];
-  });
-
-  const planos = await all(`
-    SELECT
-      p.nome_plano AS nome,
-      COALESCE(NULLIF(p.preco_cliente, 0), p.preco_revenda, 0) AS preco,
-      COALESCE(SUM(CASE WHEN e.status = 'DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
-    FROM esim_planos p
-    LEFT JOIN esim_estoque e
-      ON e.nome_plano = p.nome_plano
-     AND e.preco_revenda = p.preco_revenda
-    WHERE p.ativo = 1
-    GROUP BY p.id, p.nome_plano, p.preco_cliente, p.preco_revenda
-    ORDER BY p.id ASC
-    LIMIT 40
-  `).catch((erro) => {
-    console.error('❌ IA: erro ao carregar planos eSIM:', erro.message);
-    return [];
-  });
+  const servicos = await all(`SELECT nome, preco FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40`);
+  const planos = await all(`SELECT nome, preco, estoque FROM esim_planos WHERE ativo=1 ORDER BY id ASC LIMIT 40`).catch(() => []);
   const suporte = String(process.env.SUPORTE_TELEGRAM || '').replace(/^@/, '').trim();
   const linhasServicos = servicos.length
     ? servicos.map(s => `- ${s.nome}: ${brl(s.preco || 0)}`).join('\n')
@@ -1706,39 +1620,25 @@ async function obterContextoComercialIA(cliente) {
   const linhasPlanos = planos.length
     ? planos.map(p => `- ${p.nome}: ${brl(p.preco || 0)}; estoque ${Number(p.estoque || 0) > 0 ? 'disponível' : 'indisponível'}`).join('\n')
     : '- Consulte a opção Comprar eSIM no menu.';
-  const notasExtras = WHATSAPP_AI_BUSINESS_NOTES
-    ? `\nINFORMAÇÕES ADICIONAIS CADASTRADAS PELO ADMINISTRADOR:\n${WHATSAPP_AI_BUSINESS_NOTES.slice(0, 6000)}\n`
-    : '';
   return {
-    instrucoes: `Você é a especialista virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
-Sua especialidade inclui: desbloqueio de aparelhos, bloqueio e desbloqueio de operadora, TIM, SSP, Mi Account/Xiaomi, IMEI, eSIM, ativação de planos, pagamentos PIX, saldo, pedidos e orientação de uso do sistema.
+    instrucoes: `Você é a assistente virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
+Responda em português do Brasil, com educação, objetividade e mensagens curtas próprias para WhatsApp.
+Use exclusivamente as informações fornecidas abaixo. Nunca invente preço, prazo, estoque, status, garantia ou procedimento.
+Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
+Não tente gerar PIX, alterar saldo, criar/cancelar pedidos ou consultar status por conta própria. Para essas ações, oriente o cliente a usar o menu.
+Quando o cliente quiser atendimento humano, tiver reclamação, problema de pagamento, confirmação de PIX, pedido atrasado, ou quando você não souber, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu.".
+Não responda assuntos fora da CentralUnlocker. Nesse caso, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.
+Não diga que executou uma ação que não executou.
 
-COMPORTAMENTO:
-- Responda em português do Brasil, de forma humana, educada, clara e objetiva.
-- Entenda erros de digitação, abreviações e perguntas incompletas. Faça somente uma pergunta de esclarecimento quando realmente necessário.
-- Para saudações como "oi" ou "boa noite", cumprimente pelo nome e pergunte como pode ajudar.
-- Explique termos técnicos em linguagem simples.
-- Quando a pergunta for sobre um serviço, apresente o serviço correto, o valor cadastrado e o próximo passo.
-- Quando perguntarem preço sem dizer qual serviço, mostre uma lista curta dos serviços ativos com os respectivos valores.
-- Quando perguntarem sobre eSIM, explique o que existe e informe disponibilidade real do estoque. Não peça IMEI apenas para responder uma dúvida.
-- Só oriente o cliente a iniciar uma compra quando ele demonstrar intenção clara de comprar.
-- Para abrir o fluxo correto, diga exatamente qual opção do menu deve ser usada.
-- Nunca invente preço, prazo, estoque, status, garantia, compatibilidade ou procedimento.
-- Não confirme pagamento por fotografia ou mensagem; a confirmação deve vir do sistema.
-- Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
-- Não diga que gerou PIX, alterou saldo, criou/cancelou pedido ou consultou status se o código não executou essa ação.
-- Quando houver reclamação, pagamento não confirmado, pedido atrasado, dúvida sobre um pedido específico ou necessidade de humano, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu."
-- Se não tiver informação suficiente, seja honesta e encaminhe para o suporte.
-${WHATSAPP_AI_ALLOW_GENERAL ? '- Você também pode responder perguntas gerais úteis, mas deixe claro quando o assunto não for uma informação oficial da CentralUnlocker.\n' : '- Para assuntos fora da CentralUnlocker, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.\n'}
 Cliente: ${cliente?.nome || 'Cliente'}
-Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (informe apenas se perguntado; para atualização, oriente Minha Conta)
+Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (apenas informe se ele perguntar; para atualização mande usar Minha Conta)
 
-SERVIÇOS ATIVOS E PREÇOS REAIS:
+SERVIÇOS ATIVOS:
 ${linhasServicos}
 
-PLANOS eSIM E ESTOQUE REAL:
+PLANOS eSIM:
 ${linhasPlanos}
-${notasExtras}
+
 CANAIS E COMANDOS:
 - Digitar "menu" abre o menu principal.
 - Opção 1: Serviços.
@@ -1750,262 +1650,60 @@ CANAIS E COMANDOS:
   };
 }
 
-function extrairTextoRespostaGemini(data) {
-  const candidatos = Array.isArray(data?.candidates) ? data.candidates : [];
-  const partes = candidatos
-    .flatMap(c => Array.isArray(c?.content?.parts) ? c.content.parts : [])
-    .map(p => typeof p?.text === 'string' ? p.text : '')
-    .filter(Boolean);
+function extrairTextoRespostaOpenAI(data) {
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
+  const partes = [];
+  for (const item of (data?.output || [])) {
+    for (const conteudo of (item?.content || [])) {
+      if (conteudo?.type === 'output_text' && conteudo?.text) partes.push(conteudo.text);
+    }
+  }
   return partes.join('\n').trim();
 }
 
 async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   if (!WHATSAPP_AI_ENABLED) return false;
-  if (!GEMINI_API_KEY) {
-    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas GEMINI_API_KEY não foi configurada.');
+  if (!OPENAI_API_KEY) {
+    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas OPENAI_API_KEY não foi configurada.');
     return false;
   }
 
   const chave = String(from);
   const historico = whatsappAiHistorico.get(chave) || [];
   const contexto = await obterContextoComercialIA(cliente);
-  const contents = [
-    ...historico.slice(-WHATSAPP_AI_HISTORY_LIMIT),
-    { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
+  const mensagens = [
+    ...historico.slice(-8),
+    { role: 'user', content: String(textoOriginal || '').slice(0, 1500) }
   ];
 
   try {
-    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
-    const resposta = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
-      {
-        systemInstruction: {
-          parts: [{ text: contexto.instrucoes }]
-        },
-        contents,
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
-        }
+    const resposta = await axios.post('https://api.openai.com/v1/responses', {
+      model: OPENAI_MODEL,
+      instructions: contexto.instrucoes,
+      input: mensagens,
+      max_output_tokens: WHATSAPP_AI_MAX_TOKENS,
+      temperature: 0.3
+    }, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
       },
-      {
-        headers: {
-          'x-goog-api-key': GEMINI_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        timeout: WHATSAPP_AI_TIMEOUT_MS
-      }
-    );
+      timeout: WHATSAPP_AI_TIMEOUT_MS
+    });
 
-    const textoIA = extrairTextoRespostaGemini(resposta.data);
+    const textoIA = extrairTextoRespostaOpenAI(resposta.data);
     if (!textoIA) return false;
-
     await enviarTexto(from, textoIA.slice(0, 3500));
     whatsappAiHistorico.set(chave, [
-      ...contents,
-      { role: 'model', parts: [{ text: textoIA }] }
-    ].slice(-(WHATSAPP_AI_HISTORY_LIMIT + 2)));
-    await registrarMetricaIA('resposta_ia', cliente?.id);
+      ...mensagens,
+      { role: 'assistant', content: textoIA }
+    ].slice(-10));
     return true;
   } catch (e) {
     const detalhe = e?.response?.data?.error?.message || e.message;
-    const codigo = e?.response?.status;
-    console.log(`❌ IA GEMINI WHATSAPP${codigo ? ` (${codigo})` : ''}:`, detalhe);
+    console.log('❌ IA WHATSAPP:', detalhe);
     return false;
   }
-}
-
-
-function extrairJsonIA(texto) {
-  const bruto = String(texto || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
-  try { return JSON.parse(bruto); } catch (_) {}
-  const inicio = bruto.indexOf('{');
-  const fim = bruto.lastIndexOf('}');
-  if (inicio >= 0 && fim > inicio) {
-    try { return JSON.parse(bruto.slice(inicio, fim + 1)); } catch (_) {}
-  }
-  return null;
-}
-
-function normalizarTextoIA(texto) {
-  return String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9$.,\s]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-async function detectarIntencaoLocalWhatsApp(cliente, textoOriginal) {
-  const t = normalizarTextoIA(textoOriginal);
-  if (!t) return null;
-  if (/^(menu|inicio|iniciar|voltar ao menu)$/.test(t)) return { acao: 'menu', confianca: 1 };
-  if (/^(cancelar|cancela|parar|desistir)$/.test(t)) return { acao: 'cancelar', confianca: 1 };
-  if (/(atendimento humano|atendente|falar com humano|falar com alguem|suporte humano|quero suporte)/.test(t)) return { acao: 'suporte_direto', confianca: 1 };
-  if (/(voltar para ia|ativar ia|retomar ia|sair do atendimento humano)/.test(t)) return { acao: 'retomar_ia', confianca: 1 };
-  if (/^(saldo|meu saldo|quanto tenho|ver saldo)$/.test(t)) return { acao: 'consultar_saldo', confianca: .99 };
-  if (/(meus pedidos|meu pedido|historico|acompanhar pedido|status do pedido)/.test(t)) return { acao: 'consultar_historico', confianca: .95 };
-  const valor = t.match(/(?:adicionar|colocar|recarregar|depositar)\s+(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/);
-  if (valor) return { acao: 'adicionar_saldo', valor: Number(valor[1].replace(',', '.')), confianca: .99 };
-  if (/(listar|mostrar|ver|quais).*(servicos|servico)/.test(t) || /^(servicos|servico)$/.test(t)) return { acao: 'listar_servicos', confianca: .95 };
-  if (/(comprar|quero|preciso).*(esim|e sim)/.test(t)) return { acao: 'comprar_esim', confianca: .9 };
-
-  // Detecta intenção clara de contratar um serviço pelo nome, tolerando pequenas frases.
-  if (/(quero|preciso|fazer|contratar|solicitar|pedir|desbloquear|bloquear)/.test(t)) {
-    const servicos = await all('SELECT id, nome FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 80').catch(() => []);
-    let melhor = null;
-    for (const servico of servicos) {
-      const nome = normalizarTextoIA(servico.nome);
-      const palavras = nome.split(' ').filter(x => x.length >= 3);
-      const acertos = palavras.filter(x => t.includes(x)).length;
-      const score = palavras.length ? acertos / palavras.length : 0;
-      if (score >= .6 && (!melhor || score > melhor.score)) melhor = { id: servico.id, score };
-    }
-    if (melhor) return { acao: 'contratar_servico', servico_id: melhor.id, confianca: Math.min(.98, .7 + melhor.score * .25) };
-  }
-  return null;
-}
-
-async function classificarIntencaoWhatsApp(cliente, textoOriginal) {
-  if (!WHATSAPP_AI_ENABLED || !WHATSAPP_AI_ROUTER || !GEMINI_API_KEY) return null;
-  try {
-    const servicos = await all('SELECT id, nome FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40').catch(() => []);
-    const planos = await planosEsimDisponiveis().catch(() => []);
-    const prompt = `Classifique a mensagem de um cliente da CentralUnlocker. Retorne SOMENTE JSON válido, sem markdown.\n\nAções permitidas:\nresponder_duvida, menu, listar_servicos, listar_esims, consultar_saldo, consultar_historico, adicionar_saldo, comprar_esim, contratar_servico, suporte, suporte_direto, retomar_ia, cancelar, voltar.\n\nFormato:\n{\"acao\":\"...\",\"servico_id\":null,\"plano_indice\":null,\"quantidade\":1,\"valor\":null,\"confianca\":0.0}\n\nRegras:\n- Perguntas informativas, saudações e preço sem intenção de executar: responder_duvida.\n- \"quero comprar eSIM\": comprar_esim.\n- \"tem eSIM?\" ou dúvida sobre eSIM: responder_duvida.\n- \"quero adicionar 100 reais\": adicionar_saldo com valor 100.\n- \"meu saldo\": consultar_saldo.\n- \"meus pedidos/histórico\": consultar_historico.\n- \"quero contratar desbloqueio X\": contratar_servico com servico_id correspondente.\n- Nunca escolha um serviço se não houver correspondência clara.\n\nServiços: ${JSON.stringify(servicos)}\nPlanos eSIM: ${JSON.stringify(planos.map((p,i)=>({indice:i+1,nome:p.nome_plano})))}\nMensagem: ${JSON.stringify(String(textoOriginal || '').slice(0,1000))}`;
-    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
-    const resposta = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
-      { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 180, responseMimeType: 'application/json' } },
-      { headers: { 'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json' }, timeout: WHATSAPP_AI_TIMEOUT_MS }
-    );
-    const obj = extrairJsonIA(extrairTextoRespostaGemini(resposta.data));
-    if (!obj || typeof obj.acao !== 'string') return null;
-    return obj;
-  } catch (e) {
-    console.log('⚠️ ROTEADOR IA V34:', e?.response?.data?.error?.message || e.message);
-    return null;
-  }
-}
-
-async function executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao) {
-  const acao = String(intencao?.acao || 'responder_duvida');
-  if (acao === 'menu') {
-    await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarMenuWhatsApp(from, cliente, false); return true;
-  }
-  if (acao === 'cancelar') {
-    await apagarSessaoPedido(from); await enviarTexto(from, '✅ Operação cancelada. Digite *menu* para começar novamente.'); return true;
-  }
-  if (acao === 'voltar') {
-    await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' });
-    await enviarMenuWhatsApp(from, cliente, false); return true;
-  }
-  if (acao === 'listar_servicos') {
-    pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return true;
-  }
-  if (acao === 'listar_esims' || acao === 'comprar_esim') {
-    pedidoSessao.set(from, { etapa: 'esim_escolha', quantidade: Math.max(1, Number(intencao.quantidade || 1)) });
-    await enviarListaEsim(from); return true;
-  }
-  if (acao === 'consultar_saldo') {
-    const atual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
-    await enviarTexto(from, `💰 Seu saldo atual é ${brl(atual.saldo || 0)}.\n\nPara adicionar saldo, escreva por exemplo: *adicionar 50 reais*.`); return true;
-  }
-  if (acao === 'consultar_historico') {
-    pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return true;
-  }
-  if (acao === 'adicionar_saldo') {
-    const valor = Number(intencao.valor || 0);
-    if (valor >= 10) {
-      await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
-      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números.`);
-    } else {
-      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
-      await enviarTexto(from, '💳 Qual valor deseja adicionar ao saldo?\n\nDigite somente o valor. Exemplo: 50');
-    }
-    return true;
-  }
-  if (acao === 'retomar_ia') {
-    await definirAtendimentoHumano(cliente.id, false, 'Cliente solicitou retorno à IA');
-    whatsappAiHistorico.delete(String(from));
-    await registrarMetricaIA('retorno_ia', cliente.id);
-    await enviarTexto(from, '🤖 Atendimento automático reativado. Como posso ajudar?');
-    return true;
-  }
-  if (acao === 'suporte_direto') {
-    await definirAtendimentoHumano(cliente.id, true, textoOriginal);
-    await apagarSessaoPedido(from);
-    whatsappAiHistorico.delete(String(from));
-    await registrarMetricaIA('transferencia_humano', cliente.id);
-    notificarPainel('suporte', '🆘 Atendimento humano solicitado', `${cliente.nome} - ${from} - ${String(textoOriginal || '').slice(0, 180)}`);
-    await enviarTexto(from, '✅ Já te conectei com a nossa equipe. Alguém falará com você em breve.\n\nPara voltar ao atendimento automático, digite *ativar IA*.');
-    return true;
-  }
-  if (acao === 'suporte') {
-    pedidoSessao.set(from, { etapa: 'suporte' });
-    await enviarTexto(from, '🆘 Posso te encaminhar para nossa equipe.\n\n1️⃣ Falar com o suporte\n2️⃣ Consultar pedido\n0️⃣ Voltar'); return true;
-  }
-  if (acao === 'contratar_servico' && Number(intencao.servico_id || 0) > 0) {
-    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(intencao.servico_id)]);
-    if (servico) {
-      pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
-      const valor = await precoDaRevenda(cliente.id, servico.id);
-      await enviarTexto(from, `🛠️ ${servico.nome}\n💰 Valor: ${brl(valor)}\n\n${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
-      return true;
-    }
-  }
-  return await responderComIAWhatsApp(from, cliente, textoOriginal);
-}
-
-async function responderConhecimentoLocalWhatsApp(from, cliente, textoOriginal) {
-  const t = normalizarTextoIA(textoOriginal);
-  if (!t) return false;
-
-  if (/^(oi|ola|bom dia|boa tarde|boa noite|e ai|fala chefe)/.test(t)) {
-    await enviarTexto(from, `Olá, *${cliente?.nome || 'cliente'}*! 👋 Como posso ajudar hoje? Você pode perguntar sobre serviços, preços, eSIM, saldo ou pedidos.`);
-    return true;
-  }
-
-  const servicos = await all(`SELECT s.id, s.nome, COALESCE(NULLIF(pr.preco,0), s.preco_padrao,0) preco
-    FROM servicos_catalogo s LEFT JOIN precos_revenda pr ON pr.servico_id=s.id AND pr.revenda_id=?
-    WHERE s.ativo=1 ORDER BY s.id ASC LIMIT 80`, [cliente?.id || 0]).catch(() => []);
-  const tokens = t.split(' ').filter(x => x.length >= 3 && !['qual','quais','fazer','fazem','preco','valor','quanto','custa','servico','servicos','desbloqueio'].includes(x));
-  const relacionados = servicos.map(s => {
-    const nome = normalizarTextoIA(s.nome);
-    const acertos = tokens.filter(x => nome.includes(x)).length;
-    return {...s, acertos};
-  }).filter(s => s.acertos > 0).sort((a,b) => b.acertos-a.acertos).slice(0,8);
-
-  if (relacionados.length && /(qual|quais|faz|tem|trabalha|preco|valor|quanto|custa|ssp|motorola|google|blacklist|tim|claro|xiaomi|samsung)/.test(t)) {
-    const linhas = relacionados.map((s,i) => `${i+1}️⃣ ${s.nome}${Number(s.preco || 0) > 0 ? ` — ${brl(s.preco)}` : ' — valor sob consulta'}`).join('\n');
-    await enviarTexto(from, `Encontrei estas opções relacionadas:\n\n${linhas}\n\nPara solicitar, escreva *quero contratar* seguido do nome do serviço, ou digite *1* para abrir todos os serviços.`);
-    return true;
-  }
-
-  if (/(esim|e sim)/.test(t)) {
-    const planos = await planosEsimDisponiveis().catch(() => []);
-    if (!planos.length) {
-      await enviarTexto(from, 'No momento não encontrei planos eSIM disponíveis no catálogo. Digite *6* para consultar o suporte.');
-      return true;
-    }
-    const linhas = planos.slice(0,10).map((p,i) => `${i+1}️⃣ ${p.nome_plano} — ${brl(p.preco_revenda || p.preco_cliente || 0)}`).join('\n');
-    await enviarTexto(from, `📱 Planos eSIM disponíveis:\n\n${linhas}\n\nPara comprar, escreva *quero comprar eSIM*.`);
-    return true;
-  }
-  return false;
-}
-
-async function rotearMensagemLivreWhatsApp(from, cliente, textoOriginal) {
-  const local = await detectarIntencaoLocalWhatsApp(cliente, textoOriginal);
-  if (local) {
-    console.log('⚡ INTENÇÃO LOCAL V34:', { cliente: cliente.id, ...local });
-    const executouLocal = await executarIntencaoWhatsApp(from, cliente, textoOriginal, local);
-    if (executouLocal) return true;
-  }
-  const intencao = await classificarIntencaoWhatsApp(cliente, textoOriginal);
-  if (intencao && Number(intencao.confianca || 0) >= 0.55) {
-    console.log('🧠 INTENÇÃO V34:', { cliente: cliente.id, ...intencao });
-    const executou = await executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao);
-    if (executou) return true;
-  }
-  const respondeuGemini = await responderComIAWhatsApp(from, cliente, textoOriginal);
-  if (respondeuGemini) return true;
-  return await responderConhecimentoLocalWhatsApp(from, cliente, textoOriginal);
 }
 
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
@@ -2041,24 +1739,6 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
         return;
       }
     }
-  }
-
-  // V34: quando o cliente foi transferido para uma pessoa, a IA fica pausada.
-  // Comandos essenciais continuam funcionando e o cliente pode reativar a IA.
-  if (!novo && await atendimentoHumanoAtivo(cliente.id)) {
-    const comandoRetorno = await detectarIntencaoLocalWhatsApp(cliente, textoOriginal);
-    if (comandoRetorno?.acao === 'retomar_ia' || comandoRetorno?.acao === 'menu') {
-      await definirAtendimentoHumano(cliente.id, false, 'Retorno solicitado pelo cliente');
-      await registrarMetricaIA('retorno_ia', cliente.id);
-      whatsappAiHistorico.delete(String(from));
-      pedidoSessao.set(from, { etapa: 'menu' });
-      if (comandoRetorno.acao === 'menu') await enviarMenuWhatsApp(from, cliente, false);
-      else await enviarTexto(from, '🤖 Atendimento automático reativado. Como posso ajudar?');
-      return;
-    }
-    // A mensagem fica disponível no WhatsApp para o atendente responder manualmente.
-    notificarPainel('suporte', '💬 Nova mensagem em atendimento humano', `${cliente.nome} - ${from}: ${textoOriginal.slice(0, 250)}`);
-    return;
   }
 
   // Primeiro contato: cadastro silencioso e menu automático.
@@ -2156,61 +1836,25 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   sess = pedidoSessao.get(from);
   if (!sess) {
-    // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
-    const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
-    if (!respondeuIA && WHATSAPP_AI_ENABLED) {
-      await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
-    }
+    // Cliente já cadastrado: não abre o menu com mensagens avulsas.
+    // Para iniciar, ele precisa digitar a palavra "menu".
     return;
   }
 
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (opcao === '3') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
-    if (opcao === '6') { pedidoSessao.set(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
+    if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
 2️⃣ Consultar pedido
 0️⃣ ⬅️ Voltar
 
 💬 Digite a opção desejada.`); return; }
-
-    // Perguntas escritas enquanto o menu está aberto também vão para a IA.
-    const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
-    if (!respondeuIA) {
-      await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6, escreva *menu* ou faça sua pergunta.');
-    }
-    return;
-  }
-
-
-  if (sess?.etapa === 'conta') {
-    if (opcao === '5') {
-      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return;
-    }
-    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
-    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
-    if (!respondeu) await enviarTexto(from, 'Digite 5 para adicionar saldo ou 0 para voltar.');
-    return;
-  }
-
-  if (sess?.etapa === 'historico') {
-    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
-    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
-    if (!respondeu) await enviarTexto(from, 'Digite 0 para voltar ou faça uma pergunta sobre seus pedidos.');
-    return;
-  }
-
-  if (sess?.etapa === 'suporte') {
-    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
-    if (opcao === '1') { await apagarSessaoPedido(from); await definirAtendimentoHumano(cliente.id, true, 'Opção 1 do suporte'); await registrarMetricaIA('transferencia_humano', cliente.id); whatsappAiHistorico.delete(String(from)); await enviarTexto(from, '✅ Já te conectei com a nossa equipe. Alguém falará com você em breve.\n\nPara voltar ao atendimento automático, digite *ativar IA*.'); notificarPainel('suporte', '🆘 Suporte WhatsApp', `${cliente.nome} - ${from}`); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
-    if (!respondeu) await enviarTexto(from, 'Digite 1 para suporte, 2 para consultar pedidos ou 0 para voltar.');
+    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
     return;
   }
 
@@ -2300,7 +1944,7 @@ ${brl(totalPedido)}
 
   // Fora dos fluxos do sistema, a IA responde somente no WhatsApp.
   // Pagamentos, pedidos, IMEI e menus continuam sendo tratados acima pelo código normal.
-  const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
+  const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
   if (!respondeuIA && WHATSAPP_AI_ENABLED) {
     await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
   }
@@ -4664,53 +4308,6 @@ app.post('/admin/whatsapp/conectar', async (req, res) => {
 app.post('/admin/whatsapp/desconectar', async (req, res) => {
   await desconectarWhatsApp();
   res.redirect('/admin/whatsapp');
-});
-
-app.get('/admin/ia', async (req, res) => {
-  const ativa = Boolean(WHATSAPP_AI_ENABLED);
-  const chaveOk = Boolean(GEMINI_API_KEY);
-  const metricasIA = await get(`SELECT
-    SUM(CASE WHEN tipo='resposta_ia' THEN 1 ELSE 0 END) respostas,
-    SUM(CASE WHEN tipo='transferencia_humano' THEN 1 ELSE 0 END) transferencias,
-    SUM(CASE WHEN tipo='retorno_ia' THEN 1 ELSE 0 END) retornos
-    FROM ia_metricas WHERE criado_em >= datetime('now','-30 days')`).catch(() => ({}));
-  const humanosAtivos = await get('SELECT COUNT(*) qtd FROM ia_atendimentos_humanos WHERE ativo=1').catch(() => ({qtd:0}));
-  const status = ativa ? (chaveOk ? 'ATIVA' : 'ATIVA, MAS SEM CHAVE') : 'DESATIVADA';
-  const statusClass = ativa && chaveOk ? 'green' : ativa ? 'orange' : 'red';
-  const aviso = !chaveOk ? `<div class="card"><h2>⚠️ Chave não configurada</h2><p>Adicione <b>GEMINI_API_KEY</b> no Environment do Render. O botão do painel não armazena a chave.</p></div>` : '';
-  res.send(page('Inteligência Artificial', `<h1>🤖 Inteligência Artificial</h1>
-    <div class="grid">
-      <div class="card metric"><h2>Status da IA no WhatsApp</h2><h1 style="font-size:24px">${status}</h1><span class="pill">Modelo: ${safeHtml(GEMINI_MODEL)}</span></div>
-      <div class="grid">
-        <div class="card"><h2>💬 Respostas da IA</h2><h1>${Number(metricasIA?.respostas || 0)}</h1><p class="muted">Últimos 30 dias</p></div>
-        <div class="card"><h2>🧑‍💼 Transferências</h2><h1>${Number(metricasIA?.transferencias || 0)}</h1><p class="muted">Últimos 30 dias</p></div>
-        <div class="card"><h2>⏸️ Em atendimento humano</h2><h1>${Number(humanosAtivos?.qtd || 0)}</h1><p class="muted">IA pausada por cliente</p></div>
-      </div>
-      <div class="card"><h2>Controle rápido</h2><p class="muted">A alteração é salva no banco e continua após reiniciar o serviço.</p>
-        <form class="forms-inline" method="post" action="/admin/ia/ativar"><button class="btn green" ${ativa ? 'disabled' : ''}>✅ Ativar IA</button></form>
-        <form class="forms-inline" method="post" action="/admin/ia/desativar"><button class="btn red" ${!ativa ? 'disabled' : ''} onclick="return confirm('Desativar a IA do WhatsApp? Os menus continuarão funcionando.')">⛔ Desativar IA</button></form>
-      </div>
-    </div>
-    ${aviso}
-    <div class="card"><h2>Como funciona</h2><p>Quando ativa, a IA responde mensagens livres e usa o roteador inteligente da V34. Quando desativada, o WhatsApp continua funcionando somente com menus e fluxos tradicionais.</p><p><b>Especialista:</b> ${WHATSAPP_AI_SPECIALIST ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Roteador central:</b> ${WHATSAPP_AI_ROUTER ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Perguntas gerais:</b> ${WHATSAPP_AI_ALLOW_GENERAL ? 'Permitidas ✅' : 'Bloqueadas ❌'}</p></div>`));
-});
-
-app.post('/admin/ia/ativar', async (req, res) => {
-  WHATSAPP_AI_ENABLED = true;
-  await setConfig('whatsapp_ai_enabled', 'true');
-  whatsappAiHistorico.clear();
-  notificarPainel('ia', '🤖 IA ativada', `Gemini ${GEMINI_MODEL} ativado no WhatsApp`);
-  console.log(`🤖 IA ATIVADA PELO PAINEL (${GEMINI_MODEL})`);
-  res.redirect('/admin/ia');
-});
-
-app.post('/admin/ia/desativar', async (req, res) => {
-  WHATSAPP_AI_ENABLED = false;
-  await setConfig('whatsapp_ai_enabled', 'false');
-  whatsappAiHistorico.clear();
-  notificarPainel('ia', '⛔ IA desativada', 'Atendimento por IA desativado no WhatsApp');
-  console.log('⛔ IA DESATIVADA PELO PAINEL');
-  res.redirect('/admin/ia');
 });
 
 app.get('/admin/config', async (req, res) => {
