@@ -64,6 +64,7 @@ const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
 const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
+console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
 const whatsappAiHistorico = new Map();
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
@@ -1844,8 +1845,11 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   sess = pedidoSessao.get(from);
   if (!sess) {
-    // Cliente já cadastrado: não abre o menu com mensagens avulsas.
-    // Para iniciar, ele precisa digitar a palavra "menu".
+    // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
+    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    if (!respondeuIA && WHATSAPP_AI_ENABLED) {
+      await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
+    }
     return;
   }
 
@@ -1862,7 +1866,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 0️⃣ ⬅️ Voltar
 
 💬 Digite a opção desejada.`); return; }
-    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
+
+    // Perguntas escritas enquanto o menu está aberto também vão para a IA.
+    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    if (!respondeuIA) {
+      await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6, escreva *menu* ou faça sua pergunta.');
+    }
     return;
   }
 
