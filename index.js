@@ -2052,7 +2052,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id;
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste;
     await enviarTexto(from, `✅ *PIX GERADO*\n\n💰 Valor: ${brl(valor)}\n\nVou enviar o copia e cola na próxima mensagem.\n⏳ Expira em 20 minutos.`);
-    await enviarTexto(from, qrCode ? `\`\`\`${String(qrCode).trim()}\`\`\`` : 'PIX indisponível');
+    await enviarTexto(from, qrCode ? String(qrCode).trim() : 'PIX indisponível');
     try {
       const revendaPix = await getRevendaByMsg(msg, from);
 
@@ -3065,9 +3065,39 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
     verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
   }
-  await enviarMensagem(`✅ PIX GERADO\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
+  await enviarMensagem(`✅ PIX GERADO
+
+🏦 ${nomeGateway(gateway)}
+💰 Valor: ${brl(valor)}`);
+
+  // O Mercado Pago retorna também o QR Code em Base64.
+  // A imagem é enviada antes do código copia e cola.
+  if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
+    let arquivoQr = null;
+    try {
+      const base64Limpo = String(pix.qrCodeBase64)
+        .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')
+        .replace(/\s+/g, '');
+      const bufferQr = Buffer.from(base64Limpo, 'base64');
+      if (bufferQr.length > 0) {
+        const pastaQr = path.join(DATA_DIR, 'tmp-qrcode');
+        fs.mkdirSync(pastaQr, { recursive: true });
+        arquivoQr = path.join(pastaQr, `mercadopago-${paymentId || crypto.randomUUID()}.png`);
+        fs.writeFileSync(arquivoQr, bufferQr);
+        await enviarImagem(chave, arquivoQr, '📷 Escaneie o QR Code para pagar');
+      }
+    } catch (e) {
+      console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message);
+    } finally {
+      if (arquivoQr) {
+        try { fs.unlinkSync(arquivoQr); } catch (_) {}
+      }
+    }
+  }
+
+  await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
-  await enviarMensagem(codigoMonoespacado && qrCode ? `\`\`\`${String(codigo).trim()}\`\`\`` : codigo);
+  await enviarMensagem(qrCode ? String(codigo).trim() : codigo);
   return true;
 }
 
