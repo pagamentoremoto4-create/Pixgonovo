@@ -58,32 +58,7 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
 
-// IA exclusiva do WhatsApp (Google Gemini API).
-const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
-const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
-const GEMINI_FALLBACK_MODELS = Array.from(new Set([
-  GEMINI_MODEL,
-  ...String(process.env.GEMINI_FALLBACK_MODELS || 'gemini-2.5-flash').split(',').map(v => v.trim())
-].filter(Boolean)));
-const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
-const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
-const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'true').toLowerCase() === 'true';
-const WHATSAPP_AI_ALLOW_GENERAL = String(process.env.WHATSAPP_AI_ALLOW_GENERAL || 'true').toLowerCase() === 'true';
-const WHATSAPP_AI_BUSINESS_NOTES = String(process.env.WHATSAPP_AI_BUSINESS_NOTES || '').trim();
-console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
-const whatsappAiHistorico = new Map();
-// Site do cliente removido: clientes usam Telegram ou WhatsApp.
-
-if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
-if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-if (!fs.existsSync(PUBLIC_IMG_DIR)) fs.mkdirSync(PUBLIC_IMG_DIR, { recursive: true });
-if (!fs.existsSync(ESIM_DIR)) fs.mkdirSync(ESIM_DIR, { recursive: true });
-if (!fs.existsSync(WHATSAPP_SESSION_DIR)) fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
-
-let tgBot = null;
-let qrCodeBase64 = null;
-let conectado = false;
+// Atendimento automático por IA removido. O WhatsApp usa apenas os fluxos do sistema.
 let whatsappSocket = null;
 const whatsappJidPorNumero = new Map();
 let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
@@ -1408,7 +1383,7 @@ Digite *menu* para voltar.`);
 
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)',
         [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
@@ -1421,7 +1396,7 @@ Digite *menu* para voltar.`);
 
   // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
   // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
-  // ter prioridade sobre a IA mesmo após reinício do Render.
+  // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
 
 
@@ -1623,204 +1598,6 @@ async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
   return await enviarTexto(from, menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0)));
 }
 
-async function obterContextoComercialIA(cliente) {
-  // Usa os nomes reais das colunas do banco. Antes, esta consulta tentava ler
-  // as colunas inexistentes "preco", "nome" e "estoque", causando:
-  // SQLITE_ERROR: no such column: preco.
-  const servicos = await all(`
-    SELECT
-      s.nome,
-      COALESCE(NULLIF(pr.preco, 0), s.preco_padrao, 0) AS preco
-    FROM servicos_catalogo s
-    LEFT JOIN precos_revenda pr
-      ON pr.servico_id = s.id
-     AND pr.revenda_id = ?
-    WHERE s.ativo = 1
-    ORDER BY s.id ASC
-    LIMIT 40
-  `, [cliente?.id || 0]).catch((erro) => {
-    console.error('❌ IA: erro ao carregar serviços:', erro.message);
-    return [];
-  });
-
-  const planos = await all(`
-    SELECT
-      p.nome_plano AS nome,
-      COALESCE(NULLIF(p.preco_cliente, 0), p.preco_revenda, 0) AS preco,
-      COALESCE(SUM(CASE WHEN e.status = 'DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
-    FROM esim_planos p
-    LEFT JOIN esim_estoque e
-      ON e.nome_plano = p.nome_plano
-     AND e.preco_revenda = p.preco_revenda
-    WHERE p.ativo = 1
-    GROUP BY p.id, p.nome_plano, p.preco_cliente, p.preco_revenda
-    ORDER BY p.id ASC
-    LIMIT 40
-  `).catch((erro) => {
-    console.error('❌ IA: erro ao carregar planos eSIM:', erro.message);
-    return [];
-  });
-  const suporte = String(process.env.SUPORTE_TELEGRAM || '').replace(/^@/, '').trim();
-  const linhasServicos = servicos.length
-    ? servicos.map(s => `- ${s.nome}: ${brl(s.preco || 0)}`).join('\n')
-    : '- Nenhum serviço disponível no momento.';
-  const linhasPlanos = planos.length
-    ? planos.map(p => `- ${p.nome}: ${brl(p.preco || 0)}; estoque ${Number(p.estoque || 0) > 0 ? 'disponível' : 'indisponível'}`).join('\n')
-    : '- Consulte a opção Comprar eSIM no menu.';
-  const notasExtras = WHATSAPP_AI_BUSINESS_NOTES
-    ? `\nINFORMAÇÕES ADICIONAIS CADASTRADAS PELO ADMINISTRADOR:\n${WHATSAPP_AI_BUSINESS_NOTES.slice(0, 6000)}\n`
-    : '';
-  return {
-    instrucoes: `Você é a especialista virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
-Sua especialidade inclui: desbloqueio de aparelhos, bloqueio e desbloqueio de operadora, TIM, SSP, Mi Account/Xiaomi, IMEI, eSIM, ativação de planos, pagamentos PIX, saldo, pedidos e orientação de uso do sistema.
-
-COMPORTAMENTO:
-- Responda em português do Brasil, de forma humana, educada, clara e objetiva.
-- Entenda erros de digitação, abreviações e perguntas incompletas. Faça somente uma pergunta de esclarecimento quando realmente necessário.
-- Para saudações como "oi" ou "boa noite", cumprimente pelo nome e pergunte como pode ajudar.
-- Explique termos técnicos em linguagem simples.
-- Quando a pergunta for sobre um serviço, apresente o serviço correto, o valor cadastrado e o próximo passo.
-- Quando perguntarem preço sem dizer qual serviço, mostre uma lista curta dos serviços ativos com os respectivos valores.
-- Quando perguntarem sobre eSIM, explique o que existe e informe disponibilidade real do estoque. Não peça IMEI apenas para responder uma dúvida.
-- Só oriente o cliente a iniciar uma compra quando ele demonstrar intenção clara de comprar.
-- Para abrir o fluxo correto, diga exatamente qual opção do menu deve ser usada.
-- Nunca invente preço, prazo, estoque, status, garantia, compatibilidade ou procedimento.
-- Não confirme pagamento por fotografia ou mensagem; a confirmação deve vir do sistema.
-- Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
-- Não diga que gerou PIX, alterou saldo, criou/cancelou pedido ou consultou status se o código não executou essa ação.
-- Quando houver reclamação, pagamento não confirmado, pedido atrasado, dúvida sobre um pedido específico ou necessidade de humano, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu."
-- Se não tiver informação suficiente, seja honesta e encaminhe para o suporte.
-${WHATSAPP_AI_ALLOW_GENERAL ? '- Você também pode responder perguntas gerais úteis, mas deixe claro quando o assunto não for uma informação oficial da CentralUnlocker.\n' : '- Para assuntos fora da CentralUnlocker, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.\n'}
-Cliente: ${cliente?.nome || 'Cliente'}
-Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (informe apenas se perguntado; para atualização, oriente Minha Conta)
-
-SERVIÇOS ATIVOS E PREÇOS REAIS:
-${linhasServicos}
-
-PLANOS eSIM E ESTOQUE REAL:
-${linhasPlanos}
-${notasExtras}
-CANAIS E COMANDOS:
-- Digitar "menu" abre o menu principal.
-- Opção 1: Serviços.
-- Opção 2: Comprar eSIM.
-- Opção 3: Histórico.
-- Opção 4: Minha Conta.
-- Opção 5: PIX / Pagamentos e adicionar saldo.
-- Opção 6: Suporte.${suporte ? `\n- Telegram do suporte: @${suporte}` : ''}`
-  };
-}
-
-function extrairTextoRespostaGemini(data) {
-  const candidatos = Array.isArray(data?.candidates) ? data.candidates : [];
-  const partes = candidatos
-    .flatMap(c => Array.isArray(c?.content?.parts) ? c.content.parts : [])
-    .map(p => typeof p?.text === 'string' ? p.text : '')
-    .filter(Boolean);
-  return partes.join('\n').trim();
-}
-
-async function responderLocalWhatsApp(from, cliente, textoOriginal) {
-  const texto = String(textoOriginal || '').trim();
-  const lower = texto.toLowerCase();
-
-  if (/^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eai)[!?. ]*$/.test(lower)) {
-    await enviarTexto(from, `Olá${cliente?.nome ? `, ${cliente.nome}` : ''}! 👋 Como posso ajudar? Você pode perguntar sobre serviços, eSIM, pagamentos ou digitar *menu*.`);
-    return true;
-  }
-
-  if (/(tem algu[eé]m|atendente|humano|falar com.*suporte|preciso.*suporte)/i.test(texto)) {
-    await enviarTexto(from, 'Sim. Para falar com o suporte humano, digite *6* no menu.');
-    return true;
-  }
-
-  if (/\bssp\b/i.test(texto)) {
-    const servicos = await all("SELECT nome, preco FROM servicos WHERE ativo=1 AND lower(nome) LIKE '%ssp%' ORDER BY nome LIMIT 5");
-    if (servicos.length) {
-      const linhas = servicos.map(s => `• ${s.nome}${Number(s.preco || 0) > 0 ? ` — ${brl(s.preco)}` : ''}`).join('\n');
-      await enviarTexto(from, `Sim, temos serviço relacionado a SSP:\n\n${linhas}\n\nPara solicitar, digite *menu* e escolha *1 — Serviços*.`);
-    } else {
-      await enviarTexto(from, 'No momento não encontrei um serviço SSP ativo no sistema. Digite *6* para confirmar a disponibilidade com o suporte.');
-    }
-    return true;
-  }
-
-  return false;
-}
-
-async function responderComIAWhatsApp(from, cliente, textoOriginal) {
-  if (!WHATSAPP_AI_ENABLED) return false;
-
-  if (!GEMINI_API_KEY) {
-    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas GEMINI_API_KEY não foi configurada.');
-    return responderLocalWhatsApp(from, cliente, textoOriginal);
-  }
-
-  const chave = String(from);
-  const historico = whatsappAiHistorico.get(chave) || [];
-  const contexto = await obterContextoComercialIA(cliente);
-  const contents = [
-    ...historico.slice(-8),
-    { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
-  ];
-
-  let ultimoErro = null;
-  for (const modelo of GEMINI_FALLBACK_MODELS) {
-    try {
-      const modeloSeguro = encodeURIComponent(modelo);
-      const resposta = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
-        {
-          systemInstruction: { parts: [{ text: contexto.instrucoes }] },
-          contents,
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
-          }
-        },
-        {
-          headers: {
-            'x-goog-api-key': GEMINI_API_KEY,
-            'Content-Type': 'application/json'
-          },
-          timeout: WHATSAPP_AI_TIMEOUT_MS
-        }
-      );
-
-      const textoIA = extrairTextoRespostaGemini(resposta.data);
-      if (!textoIA) {
-        const motivo = resposta.data?.promptFeedback?.blockReason || 'resposta vazia';
-        throw new Error(`Gemini retornou ${motivo}`);
-      }
-
-      await enviarTexto(from, textoIA.slice(0, 3500));
-      whatsappAiHistorico.set(chave, [
-        ...contents,
-        { role: 'model', parts: [{ text: textoIA }] }
-      ].slice(-10));
-      if (modelo !== GEMINI_MODEL) console.log(`✅ IA respondeu usando modelo alternativo: ${modelo}`);
-      return true;
-    } catch (e) {
-      ultimoErro = e;
-      const detalhe = e?.response?.data?.error?.message || e.message;
-      const codigo = e?.response?.status;
-      console.log(`❌ IA GEMINI WHATSAPP - modelo ${modelo}${codigo ? ` (${codigo})` : ''}:`, detalhe);
-
-      // Erros de autenticação/permissão não serão resolvidos trocando o modelo.
-      if ([401, 403].includes(Number(codigo))) break;
-    }
-  }
-
-  const respondeuLocal = await responderLocalWhatsApp(from, cliente, textoOriginal);
-  if (respondeuLocal) return true;
-
-  if (ultimoErro) {
-    const codigo = ultimoErro?.response?.status;
-    console.log(`⚠️ IA indisponível após tentar: ${GEMINI_FALLBACK_MODELS.join(', ')}${codigo ? `; último HTTP ${codigo}` : ''}`);
-  }
-  return false;
-}
-
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
@@ -1940,7 +1717,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
-      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ servicoId: sess.servicoId, entradas: sess.entradas || [], totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
+      const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
       await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
       verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
     }
@@ -1951,19 +1728,15 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
   // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
-  // ter prioridade sobre a IA mesmo após reinício do Render.
+  // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
   if (!sess) {
-    // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
-    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
-    if (!respondeuIA && WHATSAPP_AI_ENABLED) {
-      await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
-    }
+    await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
     return;
   }
 
 
-  // Submenus e etapas do sistema têm prioridade absoluta sobre a IA.
+  // Submenus e etapas do sistema têm prioridade absoluta.
   if (sess?.etapa === 'conta') {
     if (opcao === '5' || lower.includes('adicionar saldo') || lower.includes('colocar saldo')) {
       await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
@@ -2009,11 +1782,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
 
-    // Perguntas escritas enquanto o menu está aberto também vão para a IA.
-    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
-    if (!respondeuIA) {
-      await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6, escreva *menu* ou faça sua pergunta.');
-    }
+    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva *menu*.');
     return;
   }
 
@@ -2101,12 +1870,7 @@ ${brl(totalPedido)}
     return;
   }
 
-  // Fora dos fluxos do sistema, a IA responde somente no WhatsApp.
-  // Pagamentos, pedidos, IMEI e menus continuam sendo tratados acima pelo código normal.
-  const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
-  if (!respondeuIA && WHATSAPP_AI_ENABLED) {
-    await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
-  }
+  await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
   return;
 }
 
@@ -2469,7 +2233,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
 
   // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
   // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
-  // ter prioridade sobre a IA mesmo após reinício do Render.
+  // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
@@ -2713,6 +2477,16 @@ async function entregarEsimRevenda(from, revenda, plano) {
 
   const valor = Number(item.preco_revenda || 0);
   if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    await salvarSessaoPedido(from, {
+      etapa: 'saldo_insuficiente_servico',
+      tipo_compra: 'ESIM',
+      plano: {
+        nome_plano: item.nome_plano,
+        preco_revenda: valor
+      },
+      totalPedido: valor,
+      entradas: []
+    });
     await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
     return;
   }
@@ -3270,9 +3044,58 @@ async function consultarStatus(paymentId) {
   try { return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, { headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000 })).data; }
   catch (e) { return null; }
 }
+async function entregarEsimPagoDireto(revendaId, jid, contexto) {
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
+  const plano = contexto?.plano || {};
+  const nomePlano = String(plano.nome_plano || '').trim();
+  const valor = Number(contexto?.totalPedido || plano.preco_revenda || 0);
+  if (!cliente || !nomePlano || valor <= 0) return false;
+
+  const saldoUsado = Math.max(0, Math.min(Number(contexto?.saldoUsado || 0), valor));
+  if (saldoUsado > 0) {
+    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
+  }
+
+  const item = await get(`SELECT * FROM esim_estoque
+    WHERE status='DISPONIVEL' AND nome_plano=?
+    ORDER BY id ASC LIMIT 1`, [nomePlano]);
+
+  if (!item) {
+    const ins = await run(`INSERT INTO pedidos
+      (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome,
+       entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado)
+      VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', 1)`,
+      [cliente.id, cliente.nome, jid, cliente.whatsapp || jidToNumber(jid), `eSIM ${nomePlano}`, nomePlano, valor]);
+    const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+    await avisarNovoPedidoAdmins(pedido);
+    notificarPainel('esim', '📱 eSIM pago aguardando entrega', `${cliente.nome} - ${nomePlano}`);
+    await enviarParaCanaisCliente(cliente, `✅ Pagamento confirmado\n\n📱 ${nomePlano}\n💰 Valor: ${brl(valor)}\n\nSeu pedido foi criado e o QR Code será enviado pelo suporte.`, jid);
+    return true;
+  }
+
+  const ins = await run(`INSERT INTO pedidos
+    (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome,
+     entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`,
+    [cliente.id, cliente.nome, jid, cliente.whatsapp || jidToNumber(jid), `eSIM ${nomePlano}`, nomePlano, valor]);
+  await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`,
+    [cliente.id, cliente.nome, ins.lastID, item.id]);
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
+  await avisarEsimAutomaticoAdminTelegram(pedido, item);
+  notificarPainel('esim', '📱 eSIM vendido por PIX', `${cliente.nome} - ${nomePlano}`);
+  await enviarParaCanaisCliente(cliente, `✅ Compra aprovada\n\n📱 ${nomePlano}\n💰 Valor: ${brl(valor)}\n\n📷 QR Code enviado abaixo.`, jid);
+  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+  if (fs.existsSync(qrPath)) await enviarImagem(jid, qrPath, `📱 eSIM ${nomePlano}\n⚠️ QR Code de uso único.`);
+  await enviarTexto(jid, mensagemInstrucaoEsim());
+  return true;
+}
+
 async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   let contexto;
   try { contexto = typeof contextoJson === 'string' ? JSON.parse(contextoJson) : contextoJson; } catch (_) { contexto = null; }
+  if (String(contexto?.tipoCompra || '').toUpperCase() === 'ESIM') {
+    return entregarEsimPagoDireto(revendaId, jid, contexto);
+  }
   if (!contexto?.servicoId || !Array.isArray(contexto.entradas) || !contexto.entradas.length) return false;
   const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
   const servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [contexto.servicoId]);
