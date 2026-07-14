@@ -59,7 +59,7 @@ const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
 
 // IA exclusiva do WhatsApp (Google Gemini API).
-const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
+let WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
 const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
@@ -67,7 +67,8 @@ const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIM
 const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'true').toLowerCase() === 'true';
 const WHATSAPP_AI_ALLOW_GENERAL = String(process.env.WHATSAPP_AI_ALLOW_GENERAL || 'true').toLowerCase() === 'true';
 const WHATSAPP_AI_BUSINESS_NOTES = String(process.env.WHATSAPP_AI_BUSINESS_NOTES || '').trim();
-console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
+const WHATSAPP_AI_ROUTER = String(process.env.WHATSAPP_AI_ROUTER || 'true').toLowerCase() === 'true';
+console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})${WHATSAPP_AI_ROUTER ? ' + ROTEADOR V32' : ''}` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
 const whatsappAiHistorico = new Map();
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
@@ -635,6 +636,10 @@ async function initDB() {
   )`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
+  // O painel pode sobrescrever a configuração inicial do Render.
+  const aiPainelSalva = await getConfig('whatsapp_ai_enabled', WHATSAPP_AI_ENABLED ? 'true' : 'false');
+  WHATSAPP_AI_ENABLED = String(aiPainelSalva).toLowerCase() === 'true';
+  console.log(`🤖 IA WhatsApp após carregar painel: ${WHATSAPP_AI_ENABLED ? 'ATIVA' : 'DESATIVADA'}`);
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -734,7 +739,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/ia">🤖 Inteligência Artificial</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -1766,6 +1771,103 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   }
 }
 
+
+function extrairJsonIA(texto) {
+  const bruto = String(texto || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+  try { return JSON.parse(bruto); } catch (_) {}
+  const inicio = bruto.indexOf('{');
+  const fim = bruto.lastIndexOf('}');
+  if (inicio >= 0 && fim > inicio) {
+    try { return JSON.parse(bruto.slice(inicio, fim + 1)); } catch (_) {}
+  }
+  return null;
+}
+
+async function classificarIntencaoWhatsApp(cliente, textoOriginal) {
+  if (!WHATSAPP_AI_ENABLED || !WHATSAPP_AI_ROUTER || !GEMINI_API_KEY) return null;
+  try {
+    const servicos = await all('SELECT id, nome FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40').catch(() => []);
+    const planos = await planosEsimDisponiveis().catch(() => []);
+    const prompt = `Classifique a mensagem de um cliente da CentralUnlocker. Retorne SOMENTE JSON válido, sem markdown.\n\nAções permitidas:\nresponder_duvida, menu, listar_servicos, listar_esims, consultar_saldo, consultar_historico, adicionar_saldo, comprar_esim, contratar_servico, suporte, cancelar, voltar.\n\nFormato:\n{\"acao\":\"...\",\"servico_id\":null,\"plano_indice\":null,\"quantidade\":1,\"valor\":null,\"confianca\":0.0}\n\nRegras:\n- Perguntas informativas, saudações e preço sem intenção de executar: responder_duvida.\n- \"quero comprar eSIM\": comprar_esim.\n- \"tem eSIM?\" ou dúvida sobre eSIM: responder_duvida.\n- \"quero adicionar 100 reais\": adicionar_saldo com valor 100.\n- \"meu saldo\": consultar_saldo.\n- \"meus pedidos/histórico\": consultar_historico.\n- \"quero contratar desbloqueio X\": contratar_servico com servico_id correspondente.\n- Nunca escolha um serviço se não houver correspondência clara.\n\nServiços: ${JSON.stringify(servicos)}\nPlanos eSIM: ${JSON.stringify(planos.map((p,i)=>({indice:i+1,nome:p.nome_plano})))}\nMensagem: ${JSON.stringify(String(textoOriginal || '').slice(0,1000))}`;
+    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
+    const resposta = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
+      { contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { temperature: 0, maxOutputTokens: 180, responseMimeType: 'application/json' } },
+      { headers: { 'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json' }, timeout: WHATSAPP_AI_TIMEOUT_MS }
+    );
+    const obj = extrairJsonIA(extrairTextoRespostaGemini(resposta.data));
+    if (!obj || typeof obj.acao !== 'string') return null;
+    return obj;
+  } catch (e) {
+    console.log('⚠️ ROTEADOR IA V32:', e?.response?.data?.error?.message || e.message);
+    return null;
+  }
+}
+
+async function executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao) {
+  const acao = String(intencao?.acao || 'responder_duvida');
+  if (acao === 'menu') {
+    await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarMenuWhatsApp(from, cliente, false); return true;
+  }
+  if (acao === 'cancelar') {
+    await apagarSessaoPedido(from); await enviarTexto(from, '✅ Operação cancelada. Digite *menu* para começar novamente.'); return true;
+  }
+  if (acao === 'voltar') {
+    await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' });
+    await enviarMenuWhatsApp(from, cliente, false); return true;
+  }
+  if (acao === 'listar_servicos') {
+    pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return true;
+  }
+  if (acao === 'listar_esims' || acao === 'comprar_esim') {
+    pedidoSessao.set(from, { etapa: 'esim_escolha', quantidade: Math.max(1, Number(intencao.quantidade || 1)) });
+    await enviarListaEsim(from); return true;
+  }
+  if (acao === 'consultar_saldo') {
+    const atual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
+    await enviarTexto(from, `💰 Seu saldo atual é ${brl(atual.saldo || 0)}.\n\nPara adicionar saldo, escreva por exemplo: *adicionar 50 reais*.`); return true;
+  }
+  if (acao === 'consultar_historico') {
+    pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return true;
+  }
+  if (acao === 'adicionar_saldo') {
+    const valor = Number(intencao.valor || 0);
+    if (valor >= 10) {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_cpf_pix', valor_pix: valor, tipo_pix: 'SALDO' });
+      await enviarTexto(from, `📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(valor)}.\n\nEnvie somente os números.`);
+    } else {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
+      await enviarTexto(from, '💳 Qual valor deseja adicionar ao saldo?\n\nDigite somente o valor. Exemplo: 50');
+    }
+    return true;
+  }
+  if (acao === 'suporte') {
+    pedidoSessao.set(from, { etapa: 'suporte' });
+    await enviarTexto(from, '🆘 Vou encaminhar você ao suporte humano.\n\n1️⃣ Falar com o suporte\n2️⃣ Consultar pedido\n0️⃣ Voltar'); return true;
+  }
+  if (acao === 'contratar_servico' && Number(intencao.servico_id || 0) > 0) {
+    const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(intencao.servico_id)]);
+    if (servico) {
+      pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+      const valor = await precoDaRevenda(cliente.id, servico.id);
+      await enviarTexto(from, `🛠️ ${servico.nome}\n💰 Valor: ${brl(valor)}\n\n${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+      return true;
+    }
+  }
+  return await responderComIAWhatsApp(from, cliente, textoOriginal);
+}
+
+async function rotearMensagemLivreWhatsApp(from, cliente, textoOriginal) {
+  const intencao = await classificarIntencaoWhatsApp(cliente, textoOriginal);
+  if (intencao && Number(intencao.confianca || 0) >= 0.55) {
+    console.log('🧠 INTENÇÃO V32:', { cliente: cliente.id, ...intencao });
+    const executou = await executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao);
+    if (executou) return true;
+  }
+  return await responderComIAWhatsApp(from, cliente, textoOriginal);
+}
+
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
@@ -1897,7 +1999,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   sess = pedidoSessao.get(from);
   if (!sess) {
     // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
-    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
     if (!respondeuIA && WHATSAPP_AI_ENABLED) {
       await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
     }
@@ -1907,10 +2009,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '3') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { pedidoSessao.set(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
-    if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte
+    if (opcao === '6') { pedidoSessao.set(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
 2️⃣ Consultar pedido
@@ -1919,10 +2021,38 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 💬 Digite a opção desejada.`); return; }
 
     // Perguntas escritas enquanto o menu está aberto também vão para a IA.
-    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
     if (!respondeuIA) {
       await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6, escreva *menu* ou faça sua pergunta.');
     }
+    return;
+  }
+
+
+  if (sess?.etapa === 'conta') {
+    if (opcao === '5') {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
+      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return;
+    }
+    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
+    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
+    if (!respondeu) await enviarTexto(from, 'Digite 5 para adicionar saldo ou 0 para voltar.');
+    return;
+  }
+
+  if (sess?.etapa === 'historico') {
+    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
+    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
+    if (!respondeu) await enviarTexto(from, 'Digite 0 para voltar ou faça uma pergunta sobre seus pedidos.');
+    return;
+  }
+
+  if (sess?.etapa === 'suporte') {
+    if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
+    if (opcao === '1') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Solicitação enviada ao suporte humano. Aguarde o atendimento.'); notificarPainel('suporte', '🆘 Suporte WhatsApp', `${cliente.nome} - ${from}`); return; }
+    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
+    const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
+    if (!respondeu) await enviarTexto(from, 'Digite 1 para suporte, 2 para consultar pedidos ou 0 para voltar.');
     return;
   }
 
@@ -2012,7 +2142,7 @@ ${brl(totalPedido)}
 
   // Fora dos fluxos do sistema, a IA responde somente no WhatsApp.
   // Pagamentos, pedidos, IMEI e menus continuam sendo tratados acima pelo código normal.
-  const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+  const respondeuIA = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
   if (!respondeuIA && WHATSAPP_AI_ENABLED) {
     await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
   }
@@ -4376,6 +4506,42 @@ app.post('/admin/whatsapp/conectar', async (req, res) => {
 app.post('/admin/whatsapp/desconectar', async (req, res) => {
   await desconectarWhatsApp();
   res.redirect('/admin/whatsapp');
+});
+
+app.get('/admin/ia', async (req, res) => {
+  const ativa = Boolean(WHATSAPP_AI_ENABLED);
+  const chaveOk = Boolean(GEMINI_API_KEY);
+  const status = ativa ? (chaveOk ? 'ATIVA' : 'ATIVA, MAS SEM CHAVE') : 'DESATIVADA';
+  const statusClass = ativa && chaveOk ? 'green' : ativa ? 'orange' : 'red';
+  const aviso = !chaveOk ? `<div class="card"><h2>⚠️ Chave não configurada</h2><p>Adicione <b>GEMINI_API_KEY</b> no Environment do Render. O botão do painel não armazena a chave.</p></div>` : '';
+  res.send(page('Inteligência Artificial', `<h1>🤖 Inteligência Artificial</h1>
+    <div class="grid">
+      <div class="card metric"><h2>Status da IA no WhatsApp</h2><h1 style="font-size:24px">${status}</h1><span class="pill">Modelo: ${safeHtml(GEMINI_MODEL)}</span></div>
+      <div class="card"><h2>Controle rápido</h2><p class="muted">A alteração é salva no banco e continua após reiniciar o serviço.</p>
+        <form class="forms-inline" method="post" action="/admin/ia/ativar"><button class="btn green" ${ativa ? 'disabled' : ''}>✅ Ativar IA</button></form>
+        <form class="forms-inline" method="post" action="/admin/ia/desativar"><button class="btn red" ${!ativa ? 'disabled' : ''} onclick="return confirm('Desativar a IA do WhatsApp? Os menus continuarão funcionando.')">⛔ Desativar IA</button></form>
+      </div>
+    </div>
+    ${aviso}
+    <div class="card"><h2>Como funciona</h2><p>Quando ativa, a IA responde mensagens livres e usa o roteador inteligente da V32. Quando desativada, o WhatsApp continua funcionando somente com menus e fluxos tradicionais.</p><p><b>Especialista:</b> ${WHATSAPP_AI_SPECIALIST ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Roteador central:</b> ${WHATSAPP_AI_ROUTER ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Perguntas gerais:</b> ${WHATSAPP_AI_ALLOW_GENERAL ? 'Permitidas ✅' : 'Bloqueadas ❌'}</p></div>`));
+});
+
+app.post('/admin/ia/ativar', async (req, res) => {
+  WHATSAPP_AI_ENABLED = true;
+  await setConfig('whatsapp_ai_enabled', 'true');
+  whatsappAiHistorico.clear();
+  notificarPainel('ia', '🤖 IA ativada', `Gemini ${GEMINI_MODEL} ativado no WhatsApp`);
+  console.log(`🤖 IA ATIVADA PELO PAINEL (${GEMINI_MODEL})`);
+  res.redirect('/admin/ia');
+});
+
+app.post('/admin/ia/desativar', async (req, res) => {
+  WHATSAPP_AI_ENABLED = false;
+  await setConfig('whatsapp_ai_enabled', 'false');
+  whatsappAiHistorico.clear();
+  notificarPainel('ia', '⛔ IA desativada', 'Atendimento por IA desativado no WhatsApp');
+  console.log('⛔ IA DESATIVADA PELO PAINEL');
+  res.redirect('/admin/ia');
 });
 
 app.get('/admin/config', async (req, res) => {
