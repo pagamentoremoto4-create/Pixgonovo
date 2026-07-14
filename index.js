@@ -61,10 +61,10 @@ const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_
 // IA exclusiva do WhatsApp (Google Gemini API).
 const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 const GEMINI_FALLBACK_MODELS = Array.from(new Set([
   GEMINI_MODEL,
-  ...String(process.env.GEMINI_FALLBACK_MODELS || 'gemini-2.5-flash,gemini-2.5-flash-lite').split(',').map(v => v.trim())
+  ...String(process.env.GEMINI_FALLBACK_MODELS || 'gemini-2.5-flash').split(',').map(v => v.trim())
 ].filter(Boolean)));
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
@@ -1720,11 +1720,40 @@ function extrairTextoRespostaGemini(data) {
   return partes.join('\n').trim();
 }
 
+async function responderLocalWhatsApp(from, cliente, textoOriginal) {
+  const texto = String(textoOriginal || '').trim();
+  const lower = texto.toLowerCase();
+
+  if (/^(oi|olá|ola|bom dia|boa tarde|boa noite|e aí|eai)[!?. ]*$/.test(lower)) {
+    await enviarTexto(from, `Olá${cliente?.nome ? `, ${cliente.nome}` : ''}! 👋 Como posso ajudar? Você pode perguntar sobre serviços, eSIM, pagamentos ou digitar *menu*.`);
+    return true;
+  }
+
+  if (/(tem algu[eé]m|atendente|humano|falar com.*suporte|preciso.*suporte)/i.test(texto)) {
+    await enviarTexto(from, 'Sim. Para falar com o suporte humano, digite *6* no menu.');
+    return true;
+  }
+
+  if (/\bssp\b/i.test(texto)) {
+    const servicos = await all("SELECT nome, preco FROM servicos WHERE ativo=1 AND lower(nome) LIKE '%ssp%' ORDER BY nome LIMIT 5");
+    if (servicos.length) {
+      const linhas = servicos.map(s => `• ${s.nome}${Number(s.preco || 0) > 0 ? ` — ${brl(s.preco)}` : ''}`).join('\n');
+      await enviarTexto(from, `Sim, temos serviço relacionado a SSP:\n\n${linhas}\n\nPara solicitar, digite *menu* e escolha *1 — Serviços*.`);
+    } else {
+      await enviarTexto(from, 'No momento não encontrei um serviço SSP ativo no sistema. Digite *6* para confirmar a disponibilidade com o suporte.');
+    }
+    return true;
+  }
+
+  return false;
+}
+
 async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   if (!WHATSAPP_AI_ENABLED) return false;
+
   if (!GEMINI_API_KEY) {
     console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas GEMINI_API_KEY não foi configurada.');
-    return false;
+    return responderLocalWhatsApp(from, cliente, textoOriginal);
   }
 
   const chave = String(from);
@@ -1735,24 +1764,20 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
     { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
   ];
 
-  const payload = {
-    systemInstruction: {
-      parts: [{ text: contexto.instrucoes }]
-    },
-    contents,
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
-    }
-  };
-
   let ultimoErro = null;
   for (const modelo of GEMINI_FALLBACK_MODELS) {
     try {
       const modeloSeguro = encodeURIComponent(modelo);
       const resposta = await axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
-        payload,
+        {
+          systemInstruction: { parts: [{ text: contexto.instrucoes }] },
+          contents,
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
+          }
+        },
         {
           headers: {
             'x-goog-api-key': GEMINI_API_KEY,
@@ -1764,8 +1789,8 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
 
       const textoIA = extrairTextoRespostaGemini(resposta.data);
       if (!textoIA) {
-        console.log(`⚠️ IA GEMINI WHATSAPP (${modelo}): resposta vazia.`);
-        continue;
+        const motivo = resposta.data?.promptFeedback?.blockReason || 'resposta vazia';
+        throw new Error(`Gemini retornou ${motivo}`);
       }
 
       await enviarTexto(from, textoIA.slice(0, 3500));
@@ -1781,16 +1806,17 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
       const codigo = e?.response?.status;
       console.log(`❌ IA GEMINI WHATSAPP - modelo ${modelo}${codigo ? ` (${codigo})` : ''}:`, detalhe);
 
-      // Tenta o próximo modelo somente quando o modelo não existe/não está disponível.
-      // Para chave inválida, limite, bloqueio ou erro de rede, repetir não ajudaria.
-      if (![400, 404].includes(Number(codigo))) break;
+      // Erros de autenticação/permissão não serão resolvidos trocando o modelo.
+      if ([401, 403].includes(Number(codigo))) break;
     }
   }
 
+  const respondeuLocal = await responderLocalWhatsApp(from, cliente, textoOriginal);
+  if (respondeuLocal) return true;
+
   if (ultimoErro) {
     const codigo = ultimoErro?.response?.status;
-    if (codigo === 401 || codigo === 403) console.log('⚠️ Verifique a GEMINI_API_KEY configurada no Render.');
-    if (codigo === 429) console.log('⚠️ Limite da API Gemini atingido. Aguarde ou revise a cota da chave.');
+    console.log(`⚠️ IA indisponível após tentar: ${GEMINI_FALLBACK_MODELS.join(', ')}${codigo ? `; último HTTP ${codigo}` : ''}`);
   }
   return false;
 }
