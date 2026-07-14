@@ -3070,34 +3070,45 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
 🏦 ${nomeGateway(gateway)}
 💰 Valor: ${brl(valor)}`);
 
-  // O Mercado Pago retorna também o QR Code em Base64.
-  // A imagem é enviada antes do código copia e cola.
+  // O Mercado Pago retorna o QR Code em Base64.
+  // Enviamos diretamente pelo canal correto. Números do WhatsApp também
+  // contêm apenas dígitos e não podem passar pela detecção genérica de Telegram.
   if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
-    let arquivoQr = null;
     try {
       const base64Limpo = String(pix.qrCodeBase64)
         .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')
         .replace(/\s+/g, '');
       const bufferQr = Buffer.from(base64Limpo, 'base64');
-      if (bufferQr.length > 0) {
-        const pastaQr = path.join(DATA_DIR, 'tmp-qrcode');
-        fs.mkdirSync(pastaQr, { recursive: true });
-        arquivoQr = path.join(pastaQr, `mercadopago-${paymentId || crypto.randomUUID()}.png`);
-        fs.writeFileSync(arquivoQr, bufferQr);
-        await enviarImagem(chave, arquivoQr, '📷 Escaneie o QR Code para pagar');
+
+      if (!bufferQr.length) throw new Error('QR Code Base64 vazio');
+
+      if (String(chave).startsWith('tg:')) {
+        if (!tgBot) throw new Error('Telegram não inicializado');
+        await tgBot.sendPhoto(tgIdFromJid(chave), bufferQr, {
+          caption: '📷 Escaneie o QR Code para pagar'
+        });
+      } else {
+        if (!whatsappSocket || !conectado) throw new Error('WhatsApp não conectado');
+        const numeroWhatsApp = String(chave).startsWith('wa:')
+          ? String(chave).slice(3)
+          : (String(chave).includes('@s.whatsapp.net') ? jidToNumber(chave) : String(chave));
+        await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(numeroWhatsApp)), {
+          image: bufferQr,
+          mimetype: 'image/png',
+          caption: '📷 Escaneie o QR Code para pagar'
+        });
       }
+      console.log(`✅ QR Code Mercado Pago enviado por ${String(chave).startsWith('tg:') ? 'Telegram' : 'WhatsApp'}`);
     } catch (e) {
+      // O copia e cola continua sendo enviado mesmo se a imagem falhar.
       console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message);
-    } finally {
-      if (arquivoQr) {
-        try { fs.unlinkSync(arquivoQr); } catch (_) {}
-      }
     }
   }
 
   await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
-  await enviarMensagem(qrCode ? String(codigo).trim() : codigo);
+  // Enviado sozinho, sem crases, aspas ou caracteres extras.
+  await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
   return true;
 }
 
@@ -3282,10 +3293,47 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
       }
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
-      await enviarTexto(jid, `✅ Pagamento confirmado
 
-💰 Valor pago: ${brl(valorPix)}`);
-      if (pagamentoServico) await criarPedidoPagoDireto(revendaId, jid, contextoJson);
+      if (pagamentoServico) {
+        await enviarTexto(jid, `✅ Pagamento confirmado
+
+💰 Valor pago: ${brl(valorPix)}
+
+🔄 Seu pedido foi liberado para processamento.`);
+
+        await criarPedidoPagoDireto(revendaId, jid, contextoJson);
+
+        if (revendaId) {
+          const contaAtual = await get('SELECT saldo FROM revendas WHERE id=?', [revendaId]);
+          const pedidosAbertos = await get(`SELECT COUNT(*) AS total FROM pedidos
+            WHERE revenda_id=? AND status IN ('PENDENTE','EM PROCESSO')`, [revendaId]);
+
+          await enviarTexto(jid, `💳 Situação da conta:
+
+💵 Saldo disponível: ${brl(Number(contaAtual?.saldo || 0))}
+📦 Pedidos em aberto: ${Number(pedidosAbertos?.total || 0)}`);
+        }
+      } else {
+        const contaAtual = revendaId
+          ? await get('SELECT saldo FROM revendas WHERE id=?', [revendaId])
+          : null;
+        const pedidosAbertos = revendaId
+          ? await get(`SELECT COUNT(*) AS total FROM pedidos
+              WHERE revenda_id=? AND status IN ('PENDENTE','EM PROCESSO')`, [revendaId])
+          : null;
+
+        let mensagemConfirmacao = `✅ Pagamento confirmado
+
+💰 Valor pago: ${brl(valorPix)}`;
+        if (revendaId) {
+          mensagemConfirmacao += `
+
+💳 Situação da conta:
+💵 Saldo disponível: ${brl(Number(contaAtual?.saldo || novo || 0))}
+📦 Pedidos em aberto: ${Number(pedidosAbertos?.total || 0)}`;
+        }
+        await enviarTexto(jid, mensagemConfirmacao);
+      }
     }
     if (status?.success && status.data?.status === 'expired') {
       clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
