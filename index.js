@@ -1415,13 +1415,18 @@ Digite *menu* para voltar.`);
     return;
   }
 
-  sess = pedidoSessao.get(from);
+  // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
+  // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
+  // ter prioridade sobre a IA mesmo após reinício do Render.
+  sess = sess || await carregarSessaoPedido(from);
+
+
 
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarServicosBotoesTelegram(msg.chat.id, cliente); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarEsimBotoesTelegram(msg.chat.id); return; }
-    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
     if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await tgBot.sendMessage(msg.chat.id, `╔══════════════════════╗
        💳 ADICIONAR SALDO
 ╚══════════════════════╝
@@ -1452,15 +1457,15 @@ Exemplo: *50*
     const planos = await planosEsimDisponiveis();
     const plano = planos[Number(opcao) - 1];
     if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
-    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
     await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (opcao === '2' || texto === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (opcao === '2' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
     if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     await entregarEsimRevenda(from, revAtual || cliente, sess.plano);
     return;
@@ -1470,7 +1475,7 @@ Exemplo: *50*
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[Number(opcao) - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     if (tipoEntrada === 'IMEI') {
       await enviarTexto(from, `📱 Envie os IMEIs\n\n• Máximo 5 IMEIs\n• 1 IMEI por linha\n• Cada IMEI precisa ter 15 números\n\nExemplo:\n353625361425365\n353625361425366`);
@@ -1494,7 +1499,7 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
 
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
-    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
 
@@ -1803,7 +1808,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   // Primeiro contato: cadastro silencioso e menu automático.
   if (novo) {
-    pedidoSessao.set(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, true);
     return;
   }
@@ -1816,7 +1821,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   if (lower === 'menu') {
     await apagarSessaoPedido(from);
-    pedidoSessao.set(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
@@ -1846,7 +1851,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   if (opcao === '0' && sess && sess.etapa !== 'menu') {
     await apagarSessaoPedido(from);
-    pedidoSessao.set(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
@@ -1894,7 +1899,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
-  sess = pedidoSessao.get(from);
+  // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
+  // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
+  // ter prioridade sobre a IA mesmo após reinício do Render.
+  sess = sess || await carregarSessaoPedido(from);
   if (!sess) {
     // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
     const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
@@ -1904,13 +1912,46 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
+
+  // Submenus e etapas do sistema têm prioridade absoluta sobre a IA.
+  if (sess?.etapa === 'conta') {
+    if (opcao === '5' || lower.includes('adicionar saldo') || lower.includes('colocar saldo')) {
+      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
+      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nValor mínimo: R$ 10,00\nExemplo: 50');
+      return;
+    }
+    await enviarTexto(from, 'Escolha 5 para adicionar saldo ou 0 para voltar.');
+    return;
+  }
+
+  if (sess?.etapa === 'historico') {
+    await enviarTexto(from, 'Digite 0 para voltar ao menu.');
+    return;
+  }
+
+  if (sess?.etapa === 'suporte') {
+    if (opcao === '1' || lower.includes('atendente') || lower.includes('suporte')) {
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '👨‍💻 Sua solicitação foi encaminhada ao suporte humano. Aguarde o retorno de um atendente.');
+      notificarPainel('suporte', '🆘 Solicitação de suporte', `${cliente.nome} - +${numeroNorm}`);
+      return;
+    }
+    if (opcao === '2') {
+      await salvarSessaoPedido(from, { etapa: 'historico' });
+      await enviarHistoricoRevenda(from, cliente);
+      return;
+    }
+    await enviarTexto(from, 'Escolha 1 para falar com o suporte, 2 para consultar pedido ou 0 para voltar.');
+    return;
+  }
+
   if (sess?.etapa === 'menu') {
-    if (opcao === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
-    if (opcao === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (opcao === '3') { pedidoSessao.delete(from); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { pedidoSessao.delete(from); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { pedidoSessao.set(from, { etapa: 'aguardando_valor_pix' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
-    if (opcao === '6') { pedidoSessao.delete(from); await enviarTexto(from, `🆘 Suporte
+    if (opcao === '1') { await salvarSessaoPedido(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
+    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
+    if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
+    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
+    if (opcao === '6') { await salvarSessaoPedido(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
 2️⃣ Consultar pedido
@@ -1930,7 +1971,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const planos = await planosEsimDisponiveis();
     const plano = planos[Number(opcao) - 1];
     if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
-    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
     await enviarTexto(from, `📱 Confirmar eSIM
 
 📦 Plano: ${plano.nome_plano}
@@ -1944,9 +1985,9 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (opcao === '2' || lower === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (opcao === '2' || lower === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
     if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     await entregarEsimRevenda(from, revAtual || cliente, sess.plano);
     return;
@@ -1956,14 +1997,14 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[Number(opcao) - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
     return;
   }
 
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
-    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
@@ -1974,7 +2015,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
     }
-    pedidoSessao.delete(from);
+    await apagarSessaoPedido(from);
     const criados = [];
     for (const entrada of validacao.entradas) {
       const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0)`, [cliente.id, cliente.nome, from, numeroNorm, servico.id, servico.nome, entrada, entrada, normalizarTipoEntrada(servico.tipo_entrada), labelEntradaServico(servico), valor]);
@@ -2184,7 +2225,7 @@ Somente este documento poderá efetuar o pagamento do QR Code.`
         if (servMatch) {
           const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
           if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
-          pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+          await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
           const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
           if (tipoEntrada === 'IMEI') {
             return tgBot.sendMessage(chatId, `📱 Envie os IMEIs
@@ -2205,7 +2246,7 @@ Exemplo:
             FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
             WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
-          pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+          await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
           return tgBot.sendMessage(chatId, `📱 ${plano.nome_plano}
 
 💰 Valor: ${brl(plano.preco_revenda)}
@@ -2376,7 +2417,10 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
   if (texto === 'historico' || texto === '/historico') { await enviarHistoricoRevenda(from, revenda); return; }
   if (texto === 'conta' || texto === '/conta' || texto === 'saldo' || texto === '/saldo') { await enviarContaRevenda(from, revenda); return; }
 
-  sess = pedidoSessao.get(from);
+  // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
+  // pois estados críticos persistidos (pagamento, saldo, CPF/CNPJ) precisam
+  // ter prioridade sobre a IA mesmo após reinício do Render.
+  sess = sess || await carregarSessaoPedido(from);
   if (sess?.etapa === 'menu') {
     if (texto === '1') { pedidoSessao.set(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(revenda)); return; }
     if (texto === '2') { pedidoSessao.set(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
@@ -2388,7 +2432,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const planos = await planosEsimDisponiveis();
     const plano = planos[Number(texto) - 1];
     if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
-    pedidoSessao.set(from, { etapa: 'esim_confirmar', plano });
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
     await enviarTexto(from, `📱 *${plano.nome_plano}*
 
 💰 Valor: ${brl(plano.preco_revenda)}
@@ -2401,7 +2445,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (texto === '2' || texto === 'cancelar') { pedidoSessao.delete(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
+    if (texto === '2' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
     if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
     const plano = sess.plano;
     pedidoSessao.delete(from);
@@ -2414,7 +2458,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[pos - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    pedidoSessao.set(from, { etapa: 'entrada', servicoId: servico.id });
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     if (tipoEntrada === 'IMEI') {
       await enviarTexto(from, `📱 Informe o IMEI:
@@ -2428,7 +2472,7 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
 
   if (sess?.etapa === 'entrada' || sess?.etapa === 'imei') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
-    if (!servico) { pedidoSessao.delete(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
 
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) {
