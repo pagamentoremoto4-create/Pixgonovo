@@ -230,33 +230,18 @@ function textoSaldoInsuficiente(revenda, valor, item='serviço', entradas=[]) {
   const falta = Math.max(0, Number(valor || 0) - saldo);
   const lista = Array.isArray(entradas) ? entradas.filter(Boolean) : [entradas].filter(Boolean);
   const imeiTexto = lista.length ? `
-📱 IMEI:
-${lista.join('\n')}` : '';
-  return `╔══════════════════════╗
-  ❌ SALDO INSUFICIENTE
-╚══════════════════════╝
+📱 IMEI: ${lista.join(', ')}` : '';
+  return `❌ Saldo insuficiente
 
-🛠 Serviço:
-${item}${imeiTexto}
+🛠 Serviço: ${item}${imeiTexto}
 
-💰 Valor:
-${brl(valor)}
+💰 Valor: ${brl(valor)}
+💳 Saldo: ${brl(saldo)}
+💵 Falta: ${brl(falta)}
 
-💳 Saldo atual:
-${brl(saldo)}
-
-💵 Falta pagar:
-${brl(falta)}
-
-══════════════════════
-
-1️⃣ 💳 Pagar este serviço
-
-2️⃣ ➕ Adicionar saldo
-
-3️⃣ ❌ Cancelar pedido
-
-══════════════════════
+1️⃣ Pagar este serviço
+2️⃣ Adicionar saldo
+3️⃣ Cancelar pedido
 
 💬 Digite o número da opção.`;
 }
@@ -1513,7 +1498,7 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido Telegram', `${cliente.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(cliente, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`, from);
+      await enviarParaCanaisCliente(cliente, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
       return;
     }
     notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
@@ -1867,25 +1852,14 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const detalhesEntradas = criados.length === 1
       ? `${entradaIcone} ${entradaLabel}: ${criados[0].entrada}`
       : `${entradaIcone} ${entradaLabel}s:\n${criados.map(item => item.entrada).join('\n')}`;
-    await enviarParaCanaisCliente(cliente, `╔══════════════════════╗
-     📦 PEDIDO RECEBIDO
-╚══════════════════════╝
+    await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço:
-${servico.nome}
-
+🛠 Serviço: ${servico.nome}
 ${detalhesEntradas}
+📦 Quantidade: ${criados.length}
+💰 Valor: ${brl(totalPedido)}
 
-📦 Quantidade:
-${criados.length}
-
-💰 Total:
-${brl(totalPedido)}
-
-📍 Status:
-⏳ PENDENTE
-
-══════════════════════`, from);
+📍 Status: PENDENTE`, from);
     return;
   }
 
@@ -2356,7 +2330,7 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `✅ Pedido recebido\n\n🛠 ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n💰 Valor: ${brl(valor)}\n\n📍 Pendente`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
       return;
     }
 
@@ -3088,7 +3062,7 @@ async function entregarEsimPagoDireto(revendaId, jid, contexto) {
     const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
     await avisarNovoPedidoAdmins(pedido);
     notificarPainel('esim', '📱 eSIM pago aguardando entrega', `${cliente.nome} - ${nomePlano}`);
-    await enviarParaCanaisCliente(cliente, `✅ Pagamento confirmado\n\n📱 ${nomePlano}\n💰 Valor: ${brl(valor)}\n\nSeu pedido foi criado e o QR Code será enviado pelo suporte.`, jid);
+    await enviarParaCanaisCliente(cliente, `✅ Pagamento confirmado\n\n📱 Plano: ${nomePlano}\n💰 Valor: ${brl(valor)}\n\n📦 Pedido criado com sucesso. O QR Code será enviado pelo suporte.`, jid);
     return true;
   }
 
@@ -3149,26 +3123,14 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   notificarPainel('pedido', '🔔 Novo pedido pago por PIX', `${cliente.nome} - ${servico.nome}`);
   const total = valorUnitario * criados.length;
   const entradasTexto = criados.map(c => c.entrada).join('\n');
-  await enviarParaCanaisCliente(cliente, `╔══════════════════════╗
-     📦 PEDIDO RECEBIDO
-╚══════════════════════╝
+  await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço:
-${servico.nome}
+🛠 Serviço: ${servico.nome}
+${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
+📦 Quantidade: ${criados.length}
+💰 Valor: ${brl(total)}
 
-${iconeEntradaServico(servico)} ${entradaLabel}:
-${entradasTexto}
-
-📦 Quantidade:
-${criados.length}
-
-💰 Total:
-${brl(total)}
-
-📍 Status:
-⏳ PENDENTE
-
-══════════════════════`, jid);
+📍 Status: PENDENTE`, jid);
   return true;
 }
 
@@ -3198,14 +3160,9 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
       }
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
-      await enviarTexto(jid, `╔══════════════════════╗
-  ✅ PAGAMENTO CONFIRMADO
-╚══════════════════════╝
+      await enviarTexto(jid, `✅ Pagamento confirmado
 
-💳 Valor pago:
-${brl(valorPix)}
-
-══════════════════════`);
+💰 Valor pago: ${brl(valorPix)}`);
       if (pagamentoServico) await criarPedidoPagoDireto(revendaId, jid, contextoJson);
     }
     if (status?.success && status.data?.status === 'expired') {
@@ -3259,15 +3216,35 @@ async function notificarPedido(pedido, tipo, motivo = '') {
   if (!destinos.size) return;
 
   let mensagem = '';
-  if (tipo === 'processo') mensagem = `🔄 Serviço em processo\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n💰 Valor: ${brl(pedido.valor)}`;
+  if (tipo === 'processo') mensagem = `🔄 Serviço em processo
+
+🛠 Serviço: ${pedido.servico_nome}
+📱 IMEI: ${pedido.imei || pedido.entrada_valor || '-'}
+💰 Valor: ${brl(pedido.valor)}`;
   if (tipo === 'finalizar') {
     if (pedido.tipo === 'REVENDA') {
-      mensagem = `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\n💰 Valor: ${brl(pedido.valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}\n\n🏢 CentralUnlocker`;
+      mensagem = `✅ Serviço concluído
+
+🛠 Serviço: ${pedido.servico_nome}
+📱 IMEI: ${pedido.imei || pedido.entrada_valor || '-'}
+💰 Valor: ${brl(pedido.valor)}
+
+💳 ${textoSaldoCurto(rev?.saldo || 0)}`;
     } else {
-      mensagem = `✅ Serviço concluído\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\nPara pagar digite:\npagar ${Number(pedido.valor).toFixed(2)}\n\n🏢 CentralUnlocker`;
+      mensagem = `✅ Serviço concluído
+
+🛠 Serviço: ${pedido.servico_nome}
+📱 IMEI: ${pedido.imei || pedido.entrada_valor || '-'}
+💰 Valor: ${brl(pedido.valor)}
+
+💳 Para pagar, digite: pagar ${Number(pedido.valor).toFixed(2)}`;
     }
   }
-  if (tipo === 'cancelar') mensagem = `❌ Serviço cancelado\n\n🛠 ${pedido.servico_nome}\n📱 ${pedido.imei || pedido.entrada_valor || '-'}\n\nMotivo:\n${motivo || 'Não informado'}\n\n🏢 CentralUnlocker`;
+  if (tipo === 'cancelar') mensagem = `❌ Serviço cancelado
+
+🛠 Serviço: ${pedido.servico_nome}
+📱 IMEI: ${pedido.imei || pedido.entrada_valor || '-'}
+📝 Motivo: ${motivo || 'Não informado'}`;
   if (!mensagem) return;
   for (const destino of destinos) {
     try { await enviarTexto(destino, mensagem); }
