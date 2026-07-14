@@ -68,8 +68,37 @@ const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'tru
 const WHATSAPP_AI_ALLOW_GENERAL = String(process.env.WHATSAPP_AI_ALLOW_GENERAL || 'true').toLowerCase() === 'true';
 const WHATSAPP_AI_BUSINESS_NOTES = String(process.env.WHATSAPP_AI_BUSINESS_NOTES || '').trim();
 const WHATSAPP_AI_ROUTER = String(process.env.WHATSAPP_AI_ROUTER || 'true').toLowerCase() === 'true';
-console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})${WHATSAPP_AI_ROUTER ? ' + ROTEADOR V32' : ''}` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
+console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})${WHATSAPP_AI_ROUTER ? ' + ROTEADOR V34' : ''}` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
 const whatsappAiHistorico = new Map();
+const WHATSAPP_AI_HISTORY_LIMIT = Math.max(4, Number(process.env.WHATSAPP_AI_HISTORY_LIMIT || 12));
+const WHATSAPP_AI_HUMAN_TIMEOUT_MIN = Math.max(15, Number(process.env.WHATSAPP_AI_HUMAN_TIMEOUT_MIN || 120));
+
+async function registrarMetricaIA(tipo, clienteId=null) {
+  try {
+    await run('INSERT INTO ia_metricas (tipo, revenda_id, criado_em) VALUES (?, ?, CURRENT_TIMESTAMP)', [String(tipo || 'evento'), clienteId || null]);
+  } catch (_) {}
+}
+
+async function atendimentoHumanoAtivo(clienteId) {
+  if (!clienteId) return false;
+  const row = await get(`SELECT ativo, atualizado_em FROM ia_atendimentos_humanos WHERE revenda_id=?`, [clienteId]).catch(() => null);
+  if (!row || Number(row.ativo || 0) !== 1) return false;
+  const atualizado = Date.parse(String(row.atualizado_em || '').replace(' ', 'T') + 'Z');
+  if (Number.isFinite(atualizado) && Date.now() - atualizado > WHATSAPP_AI_HUMAN_TIMEOUT_MIN * 60000) {
+    await run('UPDATE ia_atendimentos_humanos SET ativo=0, atualizado_em=CURRENT_TIMESTAMP WHERE revenda_id=?', [clienteId]).catch(() => {});
+    return false;
+  }
+  return true;
+}
+
+async function definirAtendimentoHumano(clienteId, ativo, motivo='') {
+  if (!clienteId) return;
+  await run(`INSERT INTO ia_atendimentos_humanos (revenda_id, ativo, motivo, atualizado_em)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(revenda_id) DO UPDATE SET ativo=excluded.ativo, motivo=excluded.motivo, atualizado_em=CURRENT_TIMESTAMP`,
+    [clienteId, ativo ? 1 : 0, String(motivo || '').slice(0, 500)]);
+}
+
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
@@ -620,6 +649,20 @@ async function initDB() {
   await run(`CREATE TABLE IF NOT EXISTS configs (
     chave TEXT PRIMARY KEY,
     valor TEXT,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS ia_metricas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tipo TEXT NOT NULL,
+    revenda_id INTEGER,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS ia_atendimentos_humanos (
+    revenda_id INTEGER PRIMARY KEY,
+    ativo INTEGER DEFAULT 0,
+    motivo TEXT,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
@@ -1727,7 +1770,7 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   const historico = whatsappAiHistorico.get(chave) || [];
   const contexto = await obterContextoComercialIA(cliente);
   const contents = [
-    ...historico.slice(-8),
+    ...historico.slice(-WHATSAPP_AI_HISTORY_LIMIT),
     { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
   ];
 
@@ -1761,7 +1804,8 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
     whatsappAiHistorico.set(chave, [
       ...contents,
       { role: 'model', parts: [{ text: textoIA }] }
-    ].slice(-10));
+    ].slice(-(WHATSAPP_AI_HISTORY_LIMIT + 2)));
+    await registrarMetricaIA('resposta_ia', cliente?.id);
     return true;
   } catch (e) {
     const detalhe = e?.response?.data?.error?.message || e.message;
@@ -1783,12 +1827,46 @@ function extrairJsonIA(texto) {
   return null;
 }
 
+function normalizarTextoIA(texto) {
+  return String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9$.,\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function detectarIntencaoLocalWhatsApp(cliente, textoOriginal) {
+  const t = normalizarTextoIA(textoOriginal);
+  if (!t) return null;
+  if (/^(menu|inicio|iniciar|voltar ao menu)$/.test(t)) return { acao: 'menu', confianca: 1 };
+  if (/^(cancelar|cancela|parar|desistir)$/.test(t)) return { acao: 'cancelar', confianca: 1 };
+  if (/(atendimento humano|atendente|falar com humano|falar com alguem|suporte humano|quero suporte)/.test(t)) return { acao: 'suporte_direto', confianca: 1 };
+  if (/(voltar para ia|ativar ia|retomar ia|sair do atendimento humano)/.test(t)) return { acao: 'retomar_ia', confianca: 1 };
+  if (/^(saldo|meu saldo|quanto tenho|ver saldo)$/.test(t)) return { acao: 'consultar_saldo', confianca: .99 };
+  if (/(meus pedidos|meu pedido|historico|acompanhar pedido|status do pedido)/.test(t)) return { acao: 'consultar_historico', confianca: .95 };
+  const valor = t.match(/(?:adicionar|colocar|recarregar|depositar)\s+(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/);
+  if (valor) return { acao: 'adicionar_saldo', valor: Number(valor[1].replace(',', '.')), confianca: .99 };
+  if (/(listar|mostrar|ver|quais).*(servicos|servico)/.test(t) || /^(servicos|servico)$/.test(t)) return { acao: 'listar_servicos', confianca: .95 };
+  if (/(comprar|quero|preciso).*(esim|e sim)/.test(t)) return { acao: 'comprar_esim', confianca: .9 };
+
+  // Detecta intenção clara de contratar um serviço pelo nome, tolerando pequenas frases.
+  if (/(quero|preciso|fazer|contratar|solicitar|pedir|desbloquear|bloquear)/.test(t)) {
+    const servicos = await all('SELECT id, nome FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 80').catch(() => []);
+    let melhor = null;
+    for (const servico of servicos) {
+      const nome = normalizarTextoIA(servico.nome);
+      const palavras = nome.split(' ').filter(x => x.length >= 3);
+      const acertos = palavras.filter(x => t.includes(x)).length;
+      const score = palavras.length ? acertos / palavras.length : 0;
+      if (score >= .6 && (!melhor || score > melhor.score)) melhor = { id: servico.id, score };
+    }
+    if (melhor) return { acao: 'contratar_servico', servico_id: melhor.id, confianca: Math.min(.98, .7 + melhor.score * .25) };
+  }
+  return null;
+}
+
 async function classificarIntencaoWhatsApp(cliente, textoOriginal) {
   if (!WHATSAPP_AI_ENABLED || !WHATSAPP_AI_ROUTER || !GEMINI_API_KEY) return null;
   try {
     const servicos = await all('SELECT id, nome FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40').catch(() => []);
     const planos = await planosEsimDisponiveis().catch(() => []);
-    const prompt = `Classifique a mensagem de um cliente da CentralUnlocker. Retorne SOMENTE JSON válido, sem markdown.\n\nAções permitidas:\nresponder_duvida, menu, listar_servicos, listar_esims, consultar_saldo, consultar_historico, adicionar_saldo, comprar_esim, contratar_servico, suporte, cancelar, voltar.\n\nFormato:\n{\"acao\":\"...\",\"servico_id\":null,\"plano_indice\":null,\"quantidade\":1,\"valor\":null,\"confianca\":0.0}\n\nRegras:\n- Perguntas informativas, saudações e preço sem intenção de executar: responder_duvida.\n- \"quero comprar eSIM\": comprar_esim.\n- \"tem eSIM?\" ou dúvida sobre eSIM: responder_duvida.\n- \"quero adicionar 100 reais\": adicionar_saldo com valor 100.\n- \"meu saldo\": consultar_saldo.\n- \"meus pedidos/histórico\": consultar_historico.\n- \"quero contratar desbloqueio X\": contratar_servico com servico_id correspondente.\n- Nunca escolha um serviço se não houver correspondência clara.\n\nServiços: ${JSON.stringify(servicos)}\nPlanos eSIM: ${JSON.stringify(planos.map((p,i)=>({indice:i+1,nome:p.nome_plano})))}\nMensagem: ${JSON.stringify(String(textoOriginal || '').slice(0,1000))}`;
+    const prompt = `Classifique a mensagem de um cliente da CentralUnlocker. Retorne SOMENTE JSON válido, sem markdown.\n\nAções permitidas:\nresponder_duvida, menu, listar_servicos, listar_esims, consultar_saldo, consultar_historico, adicionar_saldo, comprar_esim, contratar_servico, suporte, suporte_direto, retomar_ia, cancelar, voltar.\n\nFormato:\n{\"acao\":\"...\",\"servico_id\":null,\"plano_indice\":null,\"quantidade\":1,\"valor\":null,\"confianca\":0.0}\n\nRegras:\n- Perguntas informativas, saudações e preço sem intenção de executar: responder_duvida.\n- \"quero comprar eSIM\": comprar_esim.\n- \"tem eSIM?\" ou dúvida sobre eSIM: responder_duvida.\n- \"quero adicionar 100 reais\": adicionar_saldo com valor 100.\n- \"meu saldo\": consultar_saldo.\n- \"meus pedidos/histórico\": consultar_historico.\n- \"quero contratar desbloqueio X\": contratar_servico com servico_id correspondente.\n- Nunca escolha um serviço se não houver correspondência clara.\n\nServiços: ${JSON.stringify(servicos)}\nPlanos eSIM: ${JSON.stringify(planos.map((p,i)=>({indice:i+1,nome:p.nome_plano})))}\nMensagem: ${JSON.stringify(String(textoOriginal || '').slice(0,1000))}`;
     const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
     const resposta = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
@@ -1799,7 +1877,7 @@ async function classificarIntencaoWhatsApp(cliente, textoOriginal) {
     if (!obj || typeof obj.acao !== 'string') return null;
     return obj;
   } catch (e) {
-    console.log('⚠️ ROTEADOR IA V32:', e?.response?.data?.error?.message || e.message);
+    console.log('⚠️ ROTEADOR IA V34:', e?.response?.data?.error?.message || e.message);
     return null;
   }
 }
@@ -1842,9 +1920,25 @@ async function executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao) 
     }
     return true;
   }
+  if (acao === 'retomar_ia') {
+    await definirAtendimentoHumano(cliente.id, false, 'Cliente solicitou retorno à IA');
+    whatsappAiHistorico.delete(String(from));
+    await registrarMetricaIA('retorno_ia', cliente.id);
+    await enviarTexto(from, '🤖 Atendimento automático reativado. Como posso ajudar?');
+    return true;
+  }
+  if (acao === 'suporte_direto') {
+    await definirAtendimentoHumano(cliente.id, true, textoOriginal);
+    await apagarSessaoPedido(from);
+    whatsappAiHistorico.delete(String(from));
+    await registrarMetricaIA('transferencia_humano', cliente.id);
+    notificarPainel('suporte', '🆘 Atendimento humano solicitado', `${cliente.nome} - ${from} - ${String(textoOriginal || '').slice(0, 180)}`);
+    await enviarTexto(from, '✅ Já te conectei com a nossa equipe. Alguém falará com você em breve.\n\nPara voltar ao atendimento automático, digite *ativar IA*.');
+    return true;
+  }
   if (acao === 'suporte') {
     pedidoSessao.set(from, { etapa: 'suporte' });
-    await enviarTexto(from, '🆘 Vou encaminhar você ao suporte humano.\n\n1️⃣ Falar com o suporte\n2️⃣ Consultar pedido\n0️⃣ Voltar'); return true;
+    await enviarTexto(from, '🆘 Posso te encaminhar para nossa equipe.\n\n1️⃣ Falar com o suporte\n2️⃣ Consultar pedido\n0️⃣ Voltar'); return true;
   }
   if (acao === 'contratar_servico' && Number(intencao.servico_id || 0) > 0) {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(intencao.servico_id)]);
@@ -1858,14 +1952,60 @@ async function executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao) 
   return await responderComIAWhatsApp(from, cliente, textoOriginal);
 }
 
+async function responderConhecimentoLocalWhatsApp(from, cliente, textoOriginal) {
+  const t = normalizarTextoIA(textoOriginal);
+  if (!t) return false;
+
+  if (/^(oi|ola|bom dia|boa tarde|boa noite|e ai|fala chefe)/.test(t)) {
+    await enviarTexto(from, `Olá, *${cliente?.nome || 'cliente'}*! 👋 Como posso ajudar hoje? Você pode perguntar sobre serviços, preços, eSIM, saldo ou pedidos.`);
+    return true;
+  }
+
+  const servicos = await all(`SELECT s.id, s.nome, COALESCE(NULLIF(pr.preco,0), s.preco_padrao,0) preco
+    FROM servicos_catalogo s LEFT JOIN precos_revenda pr ON pr.servico_id=s.id AND pr.revenda_id=?
+    WHERE s.ativo=1 ORDER BY s.id ASC LIMIT 80`, [cliente?.id || 0]).catch(() => []);
+  const tokens = t.split(' ').filter(x => x.length >= 3 && !['qual','quais','fazer','fazem','preco','valor','quanto','custa','servico','servicos','desbloqueio'].includes(x));
+  const relacionados = servicos.map(s => {
+    const nome = normalizarTextoIA(s.nome);
+    const acertos = tokens.filter(x => nome.includes(x)).length;
+    return {...s, acertos};
+  }).filter(s => s.acertos > 0).sort((a,b) => b.acertos-a.acertos).slice(0,8);
+
+  if (relacionados.length && /(qual|quais|faz|tem|trabalha|preco|valor|quanto|custa|ssp|motorola|google|blacklist|tim|claro|xiaomi|samsung)/.test(t)) {
+    const linhas = relacionados.map((s,i) => `${i+1}️⃣ ${s.nome}${Number(s.preco || 0) > 0 ? ` — ${brl(s.preco)}` : ' — valor sob consulta'}`).join('\n');
+    await enviarTexto(from, `Encontrei estas opções relacionadas:\n\n${linhas}\n\nPara solicitar, escreva *quero contratar* seguido do nome do serviço, ou digite *1* para abrir todos os serviços.`);
+    return true;
+  }
+
+  if (/(esim|e sim)/.test(t)) {
+    const planos = await planosEsimDisponiveis().catch(() => []);
+    if (!planos.length) {
+      await enviarTexto(from, 'No momento não encontrei planos eSIM disponíveis no catálogo. Digite *6* para consultar o suporte.');
+      return true;
+    }
+    const linhas = planos.slice(0,10).map((p,i) => `${i+1}️⃣ ${p.nome_plano} — ${brl(p.preco_revenda || p.preco_cliente || 0)}`).join('\n');
+    await enviarTexto(from, `📱 Planos eSIM disponíveis:\n\n${linhas}\n\nPara comprar, escreva *quero comprar eSIM*.`);
+    return true;
+  }
+  return false;
+}
+
 async function rotearMensagemLivreWhatsApp(from, cliente, textoOriginal) {
+  const local = await detectarIntencaoLocalWhatsApp(cliente, textoOriginal);
+  if (local) {
+    console.log('⚡ INTENÇÃO LOCAL V34:', { cliente: cliente.id, ...local });
+    const executouLocal = await executarIntencaoWhatsApp(from, cliente, textoOriginal, local);
+    if (executouLocal) return true;
+  }
   const intencao = await classificarIntencaoWhatsApp(cliente, textoOriginal);
   if (intencao && Number(intencao.confianca || 0) >= 0.55) {
-    console.log('🧠 INTENÇÃO V32:', { cliente: cliente.id, ...intencao });
+    console.log('🧠 INTENÇÃO V34:', { cliente: cliente.id, ...intencao });
     const executou = await executarIntencaoWhatsApp(from, cliente, textoOriginal, intencao);
     if (executou) return true;
   }
-  return await responderComIAWhatsApp(from, cliente, textoOriginal);
+  const respondeuGemini = await responderComIAWhatsApp(from, cliente, textoOriginal);
+  if (respondeuGemini) return true;
+  return await responderConhecimentoLocalWhatsApp(from, cliente, textoOriginal);
 }
 
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
@@ -1901,6 +2041,24 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
         return;
       }
     }
+  }
+
+  // V34: quando o cliente foi transferido para uma pessoa, a IA fica pausada.
+  // Comandos essenciais continuam funcionando e o cliente pode reativar a IA.
+  if (!novo && await atendimentoHumanoAtivo(cliente.id)) {
+    const comandoRetorno = await detectarIntencaoLocalWhatsApp(cliente, textoOriginal);
+    if (comandoRetorno?.acao === 'retomar_ia' || comandoRetorno?.acao === 'menu') {
+      await definirAtendimentoHumano(cliente.id, false, 'Retorno solicitado pelo cliente');
+      await registrarMetricaIA('retorno_ia', cliente.id);
+      whatsappAiHistorico.delete(String(from));
+      pedidoSessao.set(from, { etapa: 'menu' });
+      if (comandoRetorno.acao === 'menu') await enviarMenuWhatsApp(from, cliente, false);
+      else await enviarTexto(from, '🤖 Atendimento automático reativado. Como posso ajudar?');
+      return;
+    }
+    // A mensagem fica disponível no WhatsApp para o atendente responder manualmente.
+    notificarPainel('suporte', '💬 Nova mensagem em atendimento humano', `${cliente.nome} - ${from}: ${textoOriginal.slice(0, 250)}`);
+    return;
   }
 
   // Primeiro contato: cadastro silencioso e menu automático.
@@ -2049,7 +2207,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   if (sess?.etapa === 'suporte') {
     if (opcao === '0') { await apagarSessaoPedido(from); pedidoSessao.set(from, { etapa: 'menu' }); await enviarMenuWhatsApp(from, cliente, false); return; }
-    if (opcao === '1') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Solicitação enviada ao suporte humano. Aguarde o atendimento.'); notificarPainel('suporte', '🆘 Suporte WhatsApp', `${cliente.nome} - ${from}`); return; }
+    if (opcao === '1') { await apagarSessaoPedido(from); await definirAtendimentoHumano(cliente.id, true, 'Opção 1 do suporte'); await registrarMetricaIA('transferencia_humano', cliente.id); whatsappAiHistorico.delete(String(from)); await enviarTexto(from, '✅ Já te conectei com a nossa equipe. Alguém falará com você em breve.\n\nPara voltar ao atendimento automático, digite *ativar IA*.'); notificarPainel('suporte', '🆘 Suporte WhatsApp', `${cliente.nome} - ${from}`); return; }
     if (opcao === '2') { pedidoSessao.set(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
     const respondeu = await rotearMensagemLivreWhatsApp(from, cliente, textoOriginal);
     if (!respondeu) await enviarTexto(from, 'Digite 1 para suporte, 2 para consultar pedidos ou 0 para voltar.');
@@ -4511,19 +4669,30 @@ app.post('/admin/whatsapp/desconectar', async (req, res) => {
 app.get('/admin/ia', async (req, res) => {
   const ativa = Boolean(WHATSAPP_AI_ENABLED);
   const chaveOk = Boolean(GEMINI_API_KEY);
+  const metricasIA = await get(`SELECT
+    SUM(CASE WHEN tipo='resposta_ia' THEN 1 ELSE 0 END) respostas,
+    SUM(CASE WHEN tipo='transferencia_humano' THEN 1 ELSE 0 END) transferencias,
+    SUM(CASE WHEN tipo='retorno_ia' THEN 1 ELSE 0 END) retornos
+    FROM ia_metricas WHERE criado_em >= datetime('now','-30 days')`).catch(() => ({}));
+  const humanosAtivos = await get('SELECT COUNT(*) qtd FROM ia_atendimentos_humanos WHERE ativo=1').catch(() => ({qtd:0}));
   const status = ativa ? (chaveOk ? 'ATIVA' : 'ATIVA, MAS SEM CHAVE') : 'DESATIVADA';
   const statusClass = ativa && chaveOk ? 'green' : ativa ? 'orange' : 'red';
   const aviso = !chaveOk ? `<div class="card"><h2>⚠️ Chave não configurada</h2><p>Adicione <b>GEMINI_API_KEY</b> no Environment do Render. O botão do painel não armazena a chave.</p></div>` : '';
   res.send(page('Inteligência Artificial', `<h1>🤖 Inteligência Artificial</h1>
     <div class="grid">
       <div class="card metric"><h2>Status da IA no WhatsApp</h2><h1 style="font-size:24px">${status}</h1><span class="pill">Modelo: ${safeHtml(GEMINI_MODEL)}</span></div>
+      <div class="grid">
+        <div class="card"><h2>💬 Respostas da IA</h2><h1>${Number(metricasIA?.respostas || 0)}</h1><p class="muted">Últimos 30 dias</p></div>
+        <div class="card"><h2>🧑‍💼 Transferências</h2><h1>${Number(metricasIA?.transferencias || 0)}</h1><p class="muted">Últimos 30 dias</p></div>
+        <div class="card"><h2>⏸️ Em atendimento humano</h2><h1>${Number(humanosAtivos?.qtd || 0)}</h1><p class="muted">IA pausada por cliente</p></div>
+      </div>
       <div class="card"><h2>Controle rápido</h2><p class="muted">A alteração é salva no banco e continua após reiniciar o serviço.</p>
         <form class="forms-inline" method="post" action="/admin/ia/ativar"><button class="btn green" ${ativa ? 'disabled' : ''}>✅ Ativar IA</button></form>
         <form class="forms-inline" method="post" action="/admin/ia/desativar"><button class="btn red" ${!ativa ? 'disabled' : ''} onclick="return confirm('Desativar a IA do WhatsApp? Os menus continuarão funcionando.')">⛔ Desativar IA</button></form>
       </div>
     </div>
     ${aviso}
-    <div class="card"><h2>Como funciona</h2><p>Quando ativa, a IA responde mensagens livres e usa o roteador inteligente da V32. Quando desativada, o WhatsApp continua funcionando somente com menus e fluxos tradicionais.</p><p><b>Especialista:</b> ${WHATSAPP_AI_SPECIALIST ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Roteador central:</b> ${WHATSAPP_AI_ROUTER ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Perguntas gerais:</b> ${WHATSAPP_AI_ALLOW_GENERAL ? 'Permitidas ✅' : 'Bloqueadas ❌'}</p></div>`));
+    <div class="card"><h2>Como funciona</h2><p>Quando ativa, a IA responde mensagens livres e usa o roteador inteligente da V34. Quando desativada, o WhatsApp continua funcionando somente com menus e fluxos tradicionais.</p><p><b>Especialista:</b> ${WHATSAPP_AI_SPECIALIST ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Roteador central:</b> ${WHATSAPP_AI_ROUTER ? 'Ativo ✅' : 'Inativo ❌'}<br><b>Perguntas gerais:</b> ${WHATSAPP_AI_ALLOW_GENERAL ? 'Permitidas ✅' : 'Bloqueadas ❌'}</p></div>`));
 });
 
 app.post('/admin/ia/ativar', async (req, res) => {
