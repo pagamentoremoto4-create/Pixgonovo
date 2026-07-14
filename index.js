@@ -58,12 +58,16 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
 
-// IA exclusiva do WhatsApp (OpenAI Responses API).
+// IA exclusiva do WhatsApp (Google Gemini API).
 const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
-const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
+const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'true').toLowerCase() === 'true';
+const WHATSAPP_AI_ALLOW_GENERAL = String(process.env.WHATSAPP_AI_ALLOW_GENERAL || 'true').toLowerCase() === 'true';
+const WHATSAPP_AI_BUSINESS_NOTES = String(process.env.WHATSAPP_AI_BUSINESS_NOTES || '').trim();
+console.log(`🤖 IA WhatsApp: ${WHATSAPP_AI_ENABLED ? (GEMINI_API_KEY ? `ATIVA (${GEMINI_MODEL})` : 'ATIVA, MAS SEM GEMINI_API_KEY') : 'DESATIVADA'}`);
 const whatsappAiHistorico = new Map();
 // Site do cliente removido: clientes usam Telegram ou WhatsApp.
 
@@ -1611,8 +1615,42 @@ async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
 }
 
 async function obterContextoComercialIA(cliente) {
-  const servicos = await all(`SELECT nome, preco FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40`);
-  const planos = await all(`SELECT nome, preco, estoque FROM esim_planos WHERE ativo=1 ORDER BY id ASC LIMIT 40`).catch(() => []);
+  // Usa os nomes reais das colunas do banco. Antes, esta consulta tentava ler
+  // as colunas inexistentes "preco", "nome" e "estoque", causando:
+  // SQLITE_ERROR: no such column: preco.
+  const servicos = await all(`
+    SELECT
+      s.nome,
+      COALESCE(NULLIF(pr.preco, 0), s.preco_padrao, 0) AS preco
+    FROM servicos_catalogo s
+    LEFT JOIN precos_revenda pr
+      ON pr.servico_id = s.id
+     AND pr.revenda_id = ?
+    WHERE s.ativo = 1
+    ORDER BY s.id ASC
+    LIMIT 40
+  `, [cliente?.id || 0]).catch((erro) => {
+    console.error('❌ IA: erro ao carregar serviços:', erro.message);
+    return [];
+  });
+
+  const planos = await all(`
+    SELECT
+      p.nome_plano AS nome,
+      COALESCE(NULLIF(p.preco_cliente, 0), p.preco_revenda, 0) AS preco,
+      COALESCE(SUM(CASE WHEN e.status = 'DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
+    FROM esim_planos p
+    LEFT JOIN esim_estoque e
+      ON e.nome_plano = p.nome_plano
+     AND e.preco_revenda = p.preco_revenda
+    WHERE p.ativo = 1
+    GROUP BY p.id, p.nome_plano, p.preco_cliente, p.preco_revenda
+    ORDER BY p.id ASC
+    LIMIT 40
+  `).catch((erro) => {
+    console.error('❌ IA: erro ao carregar planos eSIM:', erro.message);
+    return [];
+  });
   const suporte = String(process.env.SUPORTE_TELEGRAM || '').replace(/^@/, '').trim();
   const linhasServicos = servicos.length
     ? servicos.map(s => `- ${s.nome}: ${brl(s.preco || 0)}`).join('\n')
@@ -1620,25 +1658,39 @@ async function obterContextoComercialIA(cliente) {
   const linhasPlanos = planos.length
     ? planos.map(p => `- ${p.nome}: ${brl(p.preco || 0)}; estoque ${Number(p.estoque || 0) > 0 ? 'disponível' : 'indisponível'}`).join('\n')
     : '- Consulte a opção Comprar eSIM no menu.';
+  const notasExtras = WHATSAPP_AI_BUSINESS_NOTES
+    ? `\nINFORMAÇÕES ADICIONAIS CADASTRADAS PELO ADMINISTRADOR:\n${WHATSAPP_AI_BUSINESS_NOTES.slice(0, 6000)}\n`
+    : '';
   return {
-    instrucoes: `Você é a assistente virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
-Responda em português do Brasil, com educação, objetividade e mensagens curtas próprias para WhatsApp.
-Use exclusivamente as informações fornecidas abaixo. Nunca invente preço, prazo, estoque, status, garantia ou procedimento.
-Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
-Não tente gerar PIX, alterar saldo, criar/cancelar pedidos ou consultar status por conta própria. Para essas ações, oriente o cliente a usar o menu.
-Quando o cliente quiser atendimento humano, tiver reclamação, problema de pagamento, confirmação de PIX, pedido atrasado, ou quando você não souber, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu.".
-Não responda assuntos fora da CentralUnlocker. Nesse caso, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.
-Não diga que executou uma ação que não executou.
+    instrucoes: `Você é a especialista virtual da CentralUnlocker e atende SOMENTE pelo WhatsApp.
+Sua especialidade inclui: desbloqueio de aparelhos, bloqueio e desbloqueio de operadora, TIM, SSP, Mi Account/Xiaomi, IMEI, eSIM, ativação de planos, pagamentos PIX, saldo, pedidos e orientação de uso do sistema.
 
+COMPORTAMENTO:
+- Responda em português do Brasil, de forma humana, educada, clara e objetiva.
+- Entenda erros de digitação, abreviações e perguntas incompletas. Faça somente uma pergunta de esclarecimento quando realmente necessário.
+- Para saudações como "oi" ou "boa noite", cumprimente pelo nome e pergunte como pode ajudar.
+- Explique termos técnicos em linguagem simples.
+- Quando a pergunta for sobre um serviço, apresente o serviço correto, o valor cadastrado e o próximo passo.
+- Quando perguntarem preço sem dizer qual serviço, mostre uma lista curta dos serviços ativos com os respectivos valores.
+- Quando perguntarem sobre eSIM, explique o que existe e informe disponibilidade real do estoque. Não peça IMEI apenas para responder uma dúvida.
+- Só oriente o cliente a iniciar uma compra quando ele demonstrar intenção clara de comprar.
+- Para abrir o fluxo correto, diga exatamente qual opção do menu deve ser usada.
+- Nunca invente preço, prazo, estoque, status, garantia, compatibilidade ou procedimento.
+- Não confirme pagamento por fotografia ou mensagem; a confirmação deve vir do sistema.
+- Não solicite senha, token, chave de API, código bancário ou dados completos de cartão.
+- Não diga que gerou PIX, alterou saldo, criou/cancelou pedido ou consultou status se o código não executou essa ação.
+- Quando houver reclamação, pagamento não confirmado, pedido atrasado, dúvida sobre um pedido específico ou necessidade de humano, diga: "Vou encaminhar você para o suporte humano. Digite 6 no menu."
+- Se não tiver informação suficiente, seja honesta e encaminhe para o suporte.
+${WHATSAPP_AI_ALLOW_GENERAL ? '- Você também pode responder perguntas gerais úteis, mas deixe claro quando o assunto não for uma informação oficial da CentralUnlocker.\n' : '- Para assuntos fora da CentralUnlocker, redirecione gentilmente para serviços, eSIM, pagamentos ou suporte.\n'}
 Cliente: ${cliente?.nome || 'Cliente'}
-Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (apenas informe se ele perguntar; para atualização mande usar Minha Conta)
+Saldo exibido no cadastro: ${brl(cliente?.saldo || 0)} (informe apenas se perguntado; para atualização, oriente Minha Conta)
 
-SERVIÇOS ATIVOS:
+SERVIÇOS ATIVOS E PREÇOS REAIS:
 ${linhasServicos}
 
-PLANOS eSIM:
+PLANOS eSIM E ESTOQUE REAL:
 ${linhasPlanos}
-
+${notasExtras}
 CANAIS E COMANDOS:
 - Digitar "menu" abre o menu principal.
 - Opção 1: Serviços.
@@ -1650,58 +1702,66 @@ CANAIS E COMANDOS:
   };
 }
 
-function extrairTextoRespostaOpenAI(data) {
-  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
-  const partes = [];
-  for (const item of (data?.output || [])) {
-    for (const conteudo of (item?.content || [])) {
-      if (conteudo?.type === 'output_text' && conteudo?.text) partes.push(conteudo.text);
-    }
-  }
+function extrairTextoRespostaGemini(data) {
+  const candidatos = Array.isArray(data?.candidates) ? data.candidates : [];
+  const partes = candidatos
+    .flatMap(c => Array.isArray(c?.content?.parts) ? c.content.parts : [])
+    .map(p => typeof p?.text === 'string' ? p.text : '')
+    .filter(Boolean);
   return partes.join('\n').trim();
 }
 
 async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   if (!WHATSAPP_AI_ENABLED) return false;
-  if (!OPENAI_API_KEY) {
-    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas OPENAI_API_KEY não foi configurada.');
+  if (!GEMINI_API_KEY) {
+    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas GEMINI_API_KEY não foi configurada.');
     return false;
   }
 
   const chave = String(from);
   const historico = whatsappAiHistorico.get(chave) || [];
   const contexto = await obterContextoComercialIA(cliente);
-  const mensagens = [
+  const contents = [
     ...historico.slice(-8),
-    { role: 'user', content: String(textoOriginal || '').slice(0, 1500) }
+    { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
   ];
 
   try {
-    const resposta = await axios.post('https://api.openai.com/v1/responses', {
-      model: OPENAI_MODEL,
-      instructions: contexto.instrucoes,
-      input: mensagens,
-      max_output_tokens: WHATSAPP_AI_MAX_TOKENS,
-      temperature: 0.3
-    }, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
+    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
+    const resposta = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
+      {
+        systemInstruction: {
+          parts: [{ text: contexto.instrucoes }]
+        },
+        contents,
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
+        }
       },
-      timeout: WHATSAPP_AI_TIMEOUT_MS
-    });
+      {
+        headers: {
+          'x-goog-api-key': GEMINI_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        timeout: WHATSAPP_AI_TIMEOUT_MS
+      }
+    );
 
-    const textoIA = extrairTextoRespostaOpenAI(resposta.data);
+    const textoIA = extrairTextoRespostaGemini(resposta.data);
     if (!textoIA) return false;
+
     await enviarTexto(from, textoIA.slice(0, 3500));
     whatsappAiHistorico.set(chave, [
-      ...mensagens,
-      { role: 'assistant', content: textoIA }
+      ...contents,
+      { role: 'model', parts: [{ text: textoIA }] }
     ].slice(-10));
     return true;
   } catch (e) {
     const detalhe = e?.response?.data?.error?.message || e.message;
-    console.log('❌ IA WHATSAPP:', detalhe);
+    const codigo = e?.response?.status;
+    console.log(`❌ IA GEMINI WHATSAPP${codigo ? ` (${codigo})` : ''}:`, detalhe);
     return false;
   }
 }
@@ -1836,8 +1896,11 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   sess = pedidoSessao.get(from);
   if (!sess) {
-    // Cliente já cadastrado: não abre o menu com mensagens avulsas.
-    // Para iniciar, ele precisa digitar a palavra "menu".
+    // Fora de qualquer fluxo do sistema, encaminha mensagens livres para o Gemini.
+    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    if (!respondeuIA && WHATSAPP_AI_ENABLED) {
+      await enviarTexto(from, 'Não consegui responder agora. Digite *menu* para usar as opções ou digite *6* para falar com o suporte.');
+    }
     return;
   }
 
@@ -1854,7 +1917,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 0️⃣ ⬅️ Voltar
 
 💬 Digite a opção desejada.`); return; }
-    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva menu.');
+
+    // Perguntas escritas enquanto o menu está aberto também vão para a IA.
+    const respondeuIA = await responderComIAWhatsApp(from, cliente, textoOriginal);
+    if (!respondeuIA) {
+      await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6, escreva *menu* ou faça sua pergunta.');
+    }
     return;
   }
 
