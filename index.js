@@ -2972,25 +2972,55 @@ async function gerarPixPixGo(valor, cliente, documento) {
   };
 }
 
+function obterTokenMercadoPago() {
+  // Aceita o token puro ou salvo por engano como "Bearer APP_USR-...".
+  const token = String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+
+  if (!token) {
+    throw new Error('MERCADO_PAGO_ACCESS_TOKEN não configurado no Render');
+  }
+  if (!token.startsWith('APP_USR-') && !token.startsWith('TEST-')) {
+    throw new Error('MERCADO_PAGO_ACCESS_TOKEN possui formato inválido');
+  }
+  return token;
+}
+
+function clienteMercadoPago() {
+  const token = obterTokenMercadoPago();
+  return axios.create({
+    baseURL: MERCADO_PAGO_API,
+    timeout: 30000,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json'
+    }
+  });
+}
+
 async function gerarPixMercadoPago(valor, cliente) {
-  const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
-  if (!token) throw new Error('MERCADO_PAGO_ACCESS_TOKEN não configurado');
-  const response = await axios.post(`${MERCADO_PAGO_API}/v1/payments`, {
+  const mp = clienteMercadoPago();
+  console.log('🔐 Mercado Pago: token carregado e cabeçalho Authorization preparado');
+
+  const response = await mp.post('/v1/payments', {
     transaction_amount: Number(valor),
     description: `Pagamento CentralUnlocker ${cliente}`.slice(0, 255),
     payment_method_id: 'pix',
     payer: {
-      email: process.env.MERCADO_PAGO_PAYER_EMAIL || 'cliente@centralunlocker.com.br',
+      email: String(process.env.MERCADO_PAGO_PAYER_EMAIL || 'cliente@centralunlocker.com.br').trim(),
       first_name: String(cliente || 'Cliente').slice(0, 50)
     },
     external_reference: `centralunlocker_${Date.now()}`,
     notification_url: BASE_URL ? `${BASE_URL}/webhook/mercadopago` : undefined
   }, {
     headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
+      // Mantido também na chamada para impedir que qualquer configuração global remova o token.
+      Authorization: `Bearer ${obterTokenMercadoPago()}`,
       'X-Idempotency-Key': crypto.randomUUID()
-    }, timeout: 30000
+    }
   });
   const d = response.data;
   return {
@@ -3065,9 +3095,10 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
 async function consultarStatus(paymentId, gateway='pixgo') {
   try {
     if (gateway === 'mercadopago') {
-      const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
-      const d = (await axios.get(`${MERCADO_PAGO_API}/v1/payments/${paymentId}`, {
-        headers: { Authorization: `Bearer ${token}` }, timeout: 15000
+      const mp = clienteMercadoPago();
+      const d = (await mp.get(`/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: `Bearer ${obterTokenMercadoPago()}` },
+        timeout: 15000
       })).data;
       const status = d?.status === 'approved' ? 'completed' : (['cancelled','rejected','refunded','charged_back'].includes(d?.status) ? 'expired' : d?.status);
       return { success: true, data: { status, raw_status: d?.status } };
