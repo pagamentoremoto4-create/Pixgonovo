@@ -61,7 +61,11 @@ const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_
 // IA exclusiva do WhatsApp (Google Gemini API).
 const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
 const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
-const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+const GEMINI_FALLBACK_MODELS = Array.from(new Set([
+  GEMINI_MODEL,
+  ...String(process.env.GEMINI_FALLBACK_MODELS || 'gemini-2.5-flash,gemini-2.5-flash-lite').split(',').map(v => v.trim())
+].filter(Boolean)));
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
 const WHATSAPP_AI_SPECIALIST = String(process.env.WHATSAPP_AI_SPECIALIST || 'true').toLowerCase() === 'true';
@@ -1731,44 +1735,64 @@ async function responderComIAWhatsApp(from, cliente, textoOriginal) {
     { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
   ];
 
-  try {
-    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
-    const resposta = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
-      {
-        systemInstruction: {
-          parts: [{ text: contexto.instrucoes }]
-        },
-        contents,
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: contexto.instrucoes }]
+    },
+    contents,
+    generationConfig: {
+      temperature: 0.3,
+      maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
+    }
+  };
+
+  let ultimoErro = null;
+  for (const modelo of GEMINI_FALLBACK_MODELS) {
+    try {
+      const modeloSeguro = encodeURIComponent(modelo);
+      const resposta = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
+        payload,
+        {
+          headers: {
+            'x-goog-api-key': GEMINI_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          timeout: WHATSAPP_AI_TIMEOUT_MS
         }
-      },
-      {
-        headers: {
-          'x-goog-api-key': GEMINI_API_KEY,
-          'Content-Type': 'application/json'
-        },
-        timeout: WHATSAPP_AI_TIMEOUT_MS
+      );
+
+      const textoIA = extrairTextoRespostaGemini(resposta.data);
+      if (!textoIA) {
+        console.log(`⚠️ IA GEMINI WHATSAPP (${modelo}): resposta vazia.`);
+        continue;
       }
-    );
 
-    const textoIA = extrairTextoRespostaGemini(resposta.data);
-    if (!textoIA) return false;
+      await enviarTexto(from, textoIA.slice(0, 3500));
+      whatsappAiHistorico.set(chave, [
+        ...contents,
+        { role: 'model', parts: [{ text: textoIA }] }
+      ].slice(-10));
+      if (modelo !== GEMINI_MODEL) console.log(`✅ IA respondeu usando modelo alternativo: ${modelo}`);
+      return true;
+    } catch (e) {
+      ultimoErro = e;
+      const detalhe = e?.response?.data?.error?.message || e.message;
+      const codigo = e?.response?.status;
+      console.log(`❌ IA GEMINI WHATSAPP - modelo ${modelo}${codigo ? ` (${codigo})` : ''}:`, detalhe);
 
-    await enviarTexto(from, textoIA.slice(0, 3500));
-    whatsappAiHistorico.set(chave, [
-      ...contents,
-      { role: 'model', parts: [{ text: textoIA }] }
-    ].slice(-10));
-    return true;
-  } catch (e) {
-    const detalhe = e?.response?.data?.error?.message || e.message;
-    const codigo = e?.response?.status;
-    console.log(`❌ IA GEMINI WHATSAPP${codigo ? ` (${codigo})` : ''}:`, detalhe);
-    return false;
+      // Tenta o próximo modelo somente quando o modelo não existe/não está disponível.
+      // Para chave inválida, limite, bloqueio ou erro de rede, repetir não ajudaria.
+      if (![400, 404].includes(Number(codigo))) break;
+    }
   }
+
+  if (ultimoErro) {
+    const codigo = ultimoErro?.response?.status;
+    if (codigo === 401 || codigo === 403) console.log('⚠️ Verifique a GEMINI_API_KEY configurada no Render.');
+    if (codigo === 429) console.log('⚠️ Limite da API Gemini atingido. Aguarde ou revise a cota da chave.');
+  }
+  return false;
 }
 
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
