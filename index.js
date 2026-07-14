@@ -25,6 +25,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 10000;
 const PIXGO_API = 'https://pixgo.org/api/v1';
+const MERCADO_PAGO_API = 'https://api.mercadopago.com';
 
 // Tudo que precisa sobreviver a restart/deploy do Render fica no Persistent Disk.
 // Configure DATA_DIR=/data no Render e crie o Disk com mount path /data.
@@ -534,6 +535,7 @@ async function initDB() {
   await addColumnIfMissing('pix_pedidos', 'cliente_jid', 'TEXT');
   await addColumnIfMissing('pix_pedidos', 'tipo_pagamento', "TEXT DEFAULT 'SALDO'");
   await addColumnIfMissing('pix_pedidos', 'contexto_json', 'TEXT');
+  await addColumnIfMissing('pix_pedidos', 'gateway', "TEXT DEFAULT 'pixgo'");
 
   await run(`CREATE TABLE IF NOT EXISTS pedido_sessoes (
     chave TEXT PRIMARY KEY,
@@ -698,7 +700,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -1343,6 +1345,17 @@ Digite *menu* para voltar.`);
     await enviarTexto(from, 'Escolha 1 para pagar o serviço, 2 para adicionar saldo ou 3 para cancelar.');
     return;
   }
+  if (sess?.etapa === 'aguardando_gateway_pix') {
+    const gateway = gatewayDaOpcao(textoOriginal);
+    const cfg = await gatewaysPagamentoAtivos();
+    if (!gateway || !cfg.lista.includes(gateway)) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');
+      return;
+    }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway });
+    await tgBot.sendMessage(msg.chat.id, `✅ ${nomeGateway(gateway)} selecionado.\n\n📄 Envie novamente o CPF ou CNPJ do pagador.`);
+    return;
+  }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
 
@@ -1352,7 +1365,9 @@ Digite *menu* para voltar.`);
     }
 
     await tgBot.sendMessage(msg.chat.id, '⏳ Gerando PIX...');
-    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, documento);
+    const gateway = sess.gateway || await escolherGatewayParaSessao(from, { ...sess, documento_pix: documento }, async (m) => tgBot.sendMessage(msg.chat.id, m));
+    if (!gateway) return;
+    const pix = await gerarPix(sess.valor_pix, `Telegram ${cliente.nome}`, documento, gateway);
 
     if (!pix) {
       await tgBot.sendMessage(msg.chat.id, '❌ Erro ao gerar PIX.');
@@ -1363,15 +1378,15 @@ Digite *menu* para voltar.`);
     await apagarSessaoPedido(from);
 
     const valor = sess.valor_pix;
-    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
-    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+    const paymentId = pix?.paymentId;
+    const qrCode = pix?.qrCode;
 
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
       const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)',
-        [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
-      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
+        [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson, gateway]);
+      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson, gateway);
     }
 
     await tgBot.sendMessage(msg.chat.id, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
@@ -1709,21 +1724,34 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     await enviarTexto(from, 'Escolha 1 para pagar o serviço, 2 para adicionar saldo ou 3 para cancelar.');
     return;
   }
+  if (sess?.etapa === 'aguardando_gateway_pix') {
+    const gateway = gatewayDaOpcao(textoOriginal);
+    const cfg = await gatewaysPagamentoAtivos();
+    if (!gateway || !cfg.lista.includes(gateway)) {
+      await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');
+      return;
+    }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway });
+    await enviarTexto(from, `✅ ${nomeGateway(gateway)} selecionado.\n\n📄 Envie novamente o CPF ou CNPJ do pagador.`);
+    return;
+  }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
     if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
     await enviarTexto(from, '⏳ Gerando PIX...');
-    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, documento);
+    const gateway = sess.gateway || await escolherGatewayParaSessao(from, { ...sess, documento_pix: documento }, async (m) => enviarTexto(from, m));
+    if (!gateway) return;
+    const pix = await gerarPix(sess.valor_pix, `WhatsApp ${cliente.nome}`, documento, gateway);
     await apagarSessaoPedido(from);
     if (!pix) { await enviarTexto(from, '❌ Erro ao gerar PIX.'); return; }
     const valor = sess.valor_pix;
-    const paymentId = pix?.data?.payment_id || pix?.payment_id || pix?.data?.id || pix?.id || pix?.transaction_id;
-    const qrCode = pix?.data?.qr_code || pix?.data?.qr_code_text || pix?.data?.pix_code || pix?.data?.copy_paste || pix?.data?.pix_copy_paste || pix?.qr_code || pix?.copy_paste || pix?.brcode;
+    const paymentId = pix?.paymentId;
+    const qrCode = pix?.qrCode;
     if (paymentId) {
       const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
       const contextoJson = tipoPagamento === 'SERVICO' ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) }) : null;
-      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json) VALUES (?, ?, ?, ?, ?, "pending", ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson]);
-      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson);
+      await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)', [paymentId, cliente.id, from, from, valor, tipoPagamento, contextoJson, gateway]);
+      verificarPagamento(paymentId, cliente.id, from, valor, tipoPagamento, contextoJson, gateway);
     }
     await enviarTexto(from, `✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}\n\nCopia e cola abaixo:`);
     await enviarTexto(from, qrCode ? `\`\`\`${String(qrCode).trim()}\`\`\`` : 'PIX indisponível');
@@ -3022,21 +3050,121 @@ async function textoBackups() {
   return '💾 *BACKUPS*\n\n' + backs.slice(0, 10).map((b,i)=>`${i+1}. ${b}`).join('\n');
 }
 
-async function gerarPix(valor, cliente, documento) {
+async function getPagamentoConfig() {
+  const pixgoAtivo = (await getConfig('pagamento_pixgo_ativo', '1')) === '1';
+  const mercadoPagoAtivo = (await getConfig('pagamento_mercadopago_ativo', '0')) === '1';
+  let padrao = String(await getConfig('pagamento_gateway_padrao', 'pixgo')).toLowerCase();
+  if (!['pixgo', 'mercadopago'].includes(padrao)) padrao = 'pixgo';
+  return { pixgoAtivo, mercadoPagoAtivo, padrao };
+}
+
+async function gatewaysPagamentoAtivos() {
+  const c = await getPagamentoConfig();
+  const lista = [];
+  if (c.pixgoAtivo) lista.push('pixgo');
+  if (c.mercadoPagoAtivo) lista.push('mercadopago');
+  return { ...c, lista };
+}
+
+function nomeGateway(gateway) {
+  return gateway === 'mercadopago' ? 'Mercado Pago' : 'PixGo';
+}
+
+async function gerarPixPixGo(valor, cliente, documento) {
+  if (!process.env.PIXGO_API_KEY) throw new Error('PIXGO_API_KEY não configurada');
+  const response = await axios.post(`${PIXGO_API}/payment/create`, {
+    amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
+    customer_name: 'Cliente', receiver_cpf: documento,
+    payer_name: cliente, payer_document: documento,
+    customer_email: 'cliente@exemplo.com', customer_phone: '11999999999',
+    customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
+  }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
+  const d = response.data;
+  return {
+    gateway: 'pixgo', raw: d,
+    paymentId: d?.data?.payment_id || d?.payment_id || d?.data?.id || d?.id || d?.transaction_id,
+    qrCode: d?.data?.qr_code || d?.data?.qr_code_text || d?.data?.pix_code || d?.data?.copy_paste || d?.data?.pix_copy_paste || d?.qr_code || d?.copy_paste || d?.brcode
+  };
+}
+
+async function gerarPixMercadoPago(valor, cliente, documento) {
+  const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+  if (!token) throw new Error('MERCADO_PAGO_ACCESS_TOKEN não configurado');
+  const tipoDoc = String(documento).length === 14 ? 'CNPJ' : 'CPF';
+  const response = await axios.post(`${MERCADO_PAGO_API}/v1/payments`, {
+    transaction_amount: Number(valor),
+    description: `Pagamento CentralUnlocker ${cliente}`.slice(0, 255),
+    payment_method_id: 'pix',
+    payer: {
+      email: process.env.MERCADO_PAGO_PAYER_EMAIL || 'cliente@centralunlocker.com.br',
+      first_name: String(cliente || 'Cliente').slice(0, 50),
+      identification: { type: tipoDoc, number: String(documento) }
+    },
+    external_reference: `centralunlocker_${Date.now()}`,
+    notification_url: BASE_URL ? `${BASE_URL}/webhook/mercadopago` : undefined
+  }, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'X-Idempotency-Key': crypto.randomUUID()
+    }, timeout: 30000
+  });
+  const d = response.data;
+  return {
+    gateway: 'mercadopago', raw: d,
+    paymentId: String(d?.id || ''),
+    qrCode: d?.point_of_interaction?.transaction_data?.qr_code || '',
+    qrCodeBase64: d?.point_of_interaction?.transaction_data?.qr_code_base64 || ''
+  };
+}
+
+async function gerarPix(valor, cliente, documento, gateway='pixgo') {
   try {
-    const response = await axios.post(`${PIXGO_API}/payment/create`, {
-      amount: Number(valor), description: `Pagamento CentralUnlocker ${cliente}`,
-      customer_name: 'Cliente', receiver_cpf: documento,
-      payer_name: cliente,
-      payer_document: documento, customer_email: 'cliente@exemplo.com', customer_phone: '11999999999', customer_address: 'Rua Principal, 123', external_id: `pedido_${Date.now()}`
-    }, { headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 30000 });
-    return response.data;
-  } catch (e) { console.log('ERRO PIXGO:', e.response?.data || e.message); return null; }
+    return gateway === 'mercadopago'
+      ? await gerarPixMercadoPago(valor, cliente, documento)
+      : await gerarPixPixGo(valor, cliente, documento);
+  } catch (e) {
+    console.log(`ERRO ${nomeGateway(gateway).toUpperCase()}:`, e.response?.data || e.message);
+    return null;
+  }
 }
-async function consultarStatus(paymentId) {
-  try { return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, { headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000 })).data; }
-  catch (e) { return null; }
+
+async function consultarStatus(paymentId, gateway='pixgo') {
+  try {
+    if (gateway === 'mercadopago') {
+      const token = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+      const d = (await axios.get(`${MERCADO_PAGO_API}/v1/payments/${paymentId}`, {
+        headers: { Authorization: `Bearer ${token}` }, timeout: 15000
+      })).data;
+      const status = d?.status === 'approved' ? 'completed' : (['cancelled','rejected','refunded','charged_back'].includes(d?.status) ? 'expired' : d?.status);
+      return { success: true, data: { status, raw_status: d?.status } };
+    }
+    return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, {
+      headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000
+    })).data;
+  } catch (e) { return null; }
 }
+
+async function escolherGatewayParaSessao(chave, sessao, enviarMensagem) {
+  const cfg = await gatewaysPagamentoAtivos();
+  if (!cfg.lista.length) {
+    await apagarSessaoPedido(chave);
+    await enviarMensagem('⚠️ Pagamentos temporariamente indisponíveis. Entre em contato com o suporte.');
+    return null;
+  }
+  if (cfg.lista.length === 1) return cfg.lista[0];
+  await salvarSessaoPedido(chave, { ...sessao, etapa: 'aguardando_gateway_pix' });
+  await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+  return null;
+}
+
+function gatewayDaOpcao(texto) {
+  const t = String(texto || '').toLowerCase().trim();
+  if (['1','pixgo','pix go'].includes(t)) return 'pixgo';
+  if (['2','mercado pago','mercadopago','mp'].includes(t)) return 'mercadopago';
+  return '';
+}
+
 async function entregarEsimPagoDireto(revendaId, jid, contexto) {
   const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
   const plano = contexto?.plano || {};
@@ -3134,11 +3262,11 @@ ${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
   return true;
 }
 
-async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagamento='SALDO', contextoJson=null) {
+async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagamento='SALDO', contextoJson=null, gateway='pixgo') {
   let tentativas = 0;
   const interval = setInterval(async () => {
     tentativas++;
-    const status = await consultarStatus(paymentId);
+    const status = await consultarStatus(paymentId, gateway);
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
@@ -3154,10 +3282,10 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
             novo = Number(rev.saldo || 0) + Number(valorPix || 0);
             await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
           }
-          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
+          await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
         }
       } else {
-        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? 'pixgo_servico' : 'pixgo']);
+        await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
       }
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
       await enviarTexto(jid, `✅ Pagamento confirmado
@@ -3477,6 +3605,17 @@ app.get('/', (req, res) => {
 app.get('/cliente', (req, res) => {
   res.send(adminPage('Cliente via Telegram', `<div class="card"><h1>🤖 Atendimento pelo Telegram</h1><p>O painel do cliente foi removido.</p><p>Agora os clientes solicitam serviços, compram eSIM, consultam histórico, veem conta e geram PIX diretamente pelo bot do Telegram.</p><p>Digite <b>/start</b> ou <b>/menu</b> no bot.</p></div>`));
 });
+
+app.post('/webhook/mercadopago', async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const paymentId = String(req.body?.data?.id || req.query?.['data.id'] || req.query?.id || '');
+    if (!paymentId) return;
+    const p = await get('SELECT * FROM pix_pedidos WHERE payment_id=? AND gateway="mercadopago"', [paymentId]);
+    if (p && p.status !== 'completed') verificarPagamento(paymentId, p.revenda_id, p.cliente_jid || p.revenda_jid, p.valor, p.tipo_pagamento || 'SALDO', p.contexto_json, 'mercadopago');
+  } catch (e) { console.log('⚠️ WEBHOOK MERCADO PAGO:', e.message); }
+});
+
 app.get('/cliente/*', (req, res) => res.redirect('/cliente'));
 
 app.get('/admin', async (req, res) => {
@@ -4260,6 +4399,33 @@ app.post('/admin/servico/:id/editar', async (req, res) => {
 app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
 app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
+
+
+app.get('/admin/pagamentos-config', async (req, res) => {
+  const cfg = await getPagamentoConfig();
+  const pixgoCred = !!process.env.PIXGO_API_KEY;
+  const mpCred = !!process.env.MERCADO_PAGO_ACCESS_TOKEN;
+  res.send(page('Formas de pagamento', `<h1>💳 Formas de pagamento</h1>
+  <div class="grid">
+    <div class="card"><h2>PixGo</h2><p>Status: <b>${cfg.pixgoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${pixgoCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="pixgo"><input type="hidden" name="ativo" value="${cfg.pixgoAtivo ? '0' : '1'}"><button class="btn ${cfg.pixgoAtivo ? 'red' : 'green'}">${cfg.pixgoAtivo ? 'Desativar' : 'Ativar'} PixGo</button></form></div>
+    <div class="card"><h2>Mercado Pago</h2><p>Status: <b>${cfg.mercadoPagoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mpCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="mercadopago"><input type="hidden" name="ativo" value="${cfg.mercadoPagoAtivo ? '0' : '1'}"><button class="btn ${cfg.mercadoPagoAtivo ? 'red' : 'green'}">${cfg.mercadoPagoAtivo ? 'Desativar' : 'Ativar'} Mercado Pago</button></form></div>
+  </div>
+  <div class="card"><h2>Gateway padrão</h2><p class="muted">Usado quando somente um gateway estiver disponível. Com os dois ativos, o cliente escolhe.</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway"><option value="pixgo" ${cfg.padrao==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${cfg.padrao==='mercadopago'?'selected':''}>Mercado Pago</option></select><br><br><button class="btn green">Salvar padrão</button></form></div>
+  <div class="card"><h2>Variáveis no Render</h2><p><code>PIXGO_API_KEY</code></p><p><code>MERCADO_PAGO_ACCESS_TOKEN</code></p><p class="muted">As chaves não aparecem no painel por segurança.</p></div>`));
+});
+app.post('/admin/pagamentos-config/toggle', async (req, res) => {
+  const gateway = String(req.body.gateway || '');
+  const ativo = req.body.ativo === '1' ? '1' : '0';
+  if (gateway === 'pixgo') await setConfig('pagamento_pixgo_ativo', ativo);
+  if (gateway === 'mercadopago') await setConfig('pagamento_mercadopago_ativo', ativo);
+  notificarPainel('config', '💳 Forma de pagamento atualizada', `${nomeGateway(gateway)}: ${ativo==='1'?'ATIVO':'DESATIVADO'}`);
+  res.redirect('/admin/pagamentos-config');
+});
+app.post('/admin/pagamentos-config/padrao', async (req, res) => {
+  const gateway = ['pixgo','mercadopago'].includes(req.body.gateway) ? req.body.gateway : 'pixgo';
+  await setConfig('pagamento_gateway_padrao', gateway);
+  res.redirect('/admin/pagamentos-config');
+});
 
 app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY saldo DESC'); const pags = await all('SELECT * FROM pagamentos ORDER BY id DESC LIMIT 50'); let total = 0; let html = '<h1>💰 Financeiro</h1><div class="card"><h2>Saldos das Revendas</h2><table><tr><th>Revenda</th><th>Saldo</th><th>Ação</th></tr>'; for (const r of revs) { total += Number(r.saldo || 0); html += `<tr><td>${safeHtml(r.nome)}</td><td>${brl(r.saldo)}</td><td><a class="btn" href="/admin/revenda/${r.id}/conta">Conta</a></td></tr>`; } html += `</table><h2>Total em aberto: ${brl(total)}</h2></div><div class="card"><h2>Últimos pagamentos</h2><table><tr><th>Data</th><th>Revenda/Cliente</th><th>Valor</th><th>Origem</th></tr>`; for (const p of pags) html += `<tr><td>${dateBR(p.criado_em)}</td><td>${safeHtml(p.revenda_nome || p.cliente_numero || '-')}</td><td>${brl(p.valor)}</td><td>${safeHtml(p.origem)}</td></tr>`; html += '</table></div>'; res.send(page('Financeiro', html)); });
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
