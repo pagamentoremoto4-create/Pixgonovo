@@ -58,10 +58,10 @@ const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
 const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
 
-// IA exclusiva do WhatsApp (OpenAI Responses API).
+// IA exclusiva do WhatsApp (Google Gemini API).
 const WHATSAPP_AI_ENABLED = String(process.env.WHATSAPP_AI_ENABLED || 'false').toLowerCase() === 'true';
-const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '').trim();
-const OPENAI_MODEL = String(process.env.OPENAI_MODEL || 'gpt-4.1-mini').trim();
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+const GEMINI_MODEL = String(process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 const WHATSAPP_AI_MAX_TOKENS = Math.max(100, Number(process.env.WHATSAPP_AI_MAX_TOKENS || 350));
 const WHATSAPP_AI_TIMEOUT_MS = Math.max(5000, Number(process.env.WHATSAPP_AI_TIMEOUT_MS || 25000));
 const whatsappAiHistorico = new Map();
@@ -1650,58 +1650,66 @@ CANAIS E COMANDOS:
   };
 }
 
-function extrairTextoRespostaOpenAI(data) {
-  if (typeof data?.output_text === 'string' && data.output_text.trim()) return data.output_text.trim();
-  const partes = [];
-  for (const item of (data?.output || [])) {
-    for (const conteudo of (item?.content || [])) {
-      if (conteudo?.type === 'output_text' && conteudo?.text) partes.push(conteudo.text);
-    }
-  }
+function extrairTextoRespostaGemini(data) {
+  const candidatos = Array.isArray(data?.candidates) ? data.candidates : [];
+  const partes = candidatos
+    .flatMap(c => Array.isArray(c?.content?.parts) ? c.content.parts : [])
+    .map(p => typeof p?.text === 'string' ? p.text : '')
+    .filter(Boolean);
   return partes.join('\n').trim();
 }
 
 async function responderComIAWhatsApp(from, cliente, textoOriginal) {
   if (!WHATSAPP_AI_ENABLED) return false;
-  if (!OPENAI_API_KEY) {
-    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas OPENAI_API_KEY não foi configurada.');
+  if (!GEMINI_API_KEY) {
+    console.log('⚠️ WHATSAPP_AI_ENABLED=true, mas GEMINI_API_KEY não foi configurada.');
     return false;
   }
 
   const chave = String(from);
   const historico = whatsappAiHistorico.get(chave) || [];
   const contexto = await obterContextoComercialIA(cliente);
-  const mensagens = [
+  const contents = [
     ...historico.slice(-8),
-    { role: 'user', content: String(textoOriginal || '').slice(0, 1500) }
+    { role: 'user', parts: [{ text: String(textoOriginal || '').slice(0, 1500) }] }
   ];
 
   try {
-    const resposta = await axios.post('https://api.openai.com/v1/responses', {
-      model: OPENAI_MODEL,
-      instructions: contexto.instrucoes,
-      input: mensagens,
-      max_output_tokens: WHATSAPP_AI_MAX_TOKENS,
-      temperature: 0.3
-    }, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
+    const modeloSeguro = encodeURIComponent(GEMINI_MODEL);
+    const resposta = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/${modeloSeguro}:generateContent`,
+      {
+        systemInstruction: {
+          parts: [{ text: contexto.instrucoes }]
+        },
+        contents,
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: WHATSAPP_AI_MAX_TOKENS
+        }
       },
-      timeout: WHATSAPP_AI_TIMEOUT_MS
-    });
+      {
+        headers: {
+          'x-goog-api-key': GEMINI_API_KEY,
+          'Content-Type': 'application/json'
+        },
+        timeout: WHATSAPP_AI_TIMEOUT_MS
+      }
+    );
 
-    const textoIA = extrairTextoRespostaOpenAI(resposta.data);
+    const textoIA = extrairTextoRespostaGemini(resposta.data);
     if (!textoIA) return false;
+
     await enviarTexto(from, textoIA.slice(0, 3500));
     whatsappAiHistorico.set(chave, [
-      ...mensagens,
-      { role: 'assistant', content: textoIA }
+      ...contents,
+      { role: 'model', parts: [{ text: textoIA }] }
     ].slice(-10));
     return true;
   } catch (e) {
     const detalhe = e?.response?.data?.error?.message || e.message;
-    console.log('❌ IA WHATSAPP:', detalhe);
+    const codigo = e?.response?.status;
+    console.log(`❌ IA GEMINI WHATSAPP${codigo ? ` (${codigo})` : ''}:`, detalhe);
     return false;
   }
 }
