@@ -1612,8 +1612,42 @@ async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
 }
 
 async function obterContextoComercialIA(cliente) {
-  const servicos = await all(`SELECT nome, preco FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC LIMIT 40`);
-  const planos = await all(`SELECT nome, preco, estoque FROM esim_planos WHERE ativo=1 ORDER BY id ASC LIMIT 40`).catch(() => []);
+  // Usa os nomes reais das colunas do banco. Antes, esta consulta tentava ler
+  // as colunas inexistentes "preco", "nome" e "estoque", causando:
+  // SQLITE_ERROR: no such column: preco.
+  const servicos = await all(`
+    SELECT
+      s.nome,
+      COALESCE(NULLIF(pr.preco, 0), s.preco_padrao, 0) AS preco
+    FROM servicos_catalogo s
+    LEFT JOIN precos_revenda pr
+      ON pr.servico_id = s.id
+     AND pr.revenda_id = ?
+    WHERE s.ativo = 1
+    ORDER BY s.id ASC
+    LIMIT 40
+  `, [cliente?.id || 0]).catch((erro) => {
+    console.error('❌ IA: erro ao carregar serviços:', erro.message);
+    return [];
+  });
+
+  const planos = await all(`
+    SELECT
+      p.nome_plano AS nome,
+      COALESCE(NULLIF(p.preco_cliente, 0), p.preco_revenda, 0) AS preco,
+      COALESCE(SUM(CASE WHEN e.status = 'DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
+    FROM esim_planos p
+    LEFT JOIN esim_estoque e
+      ON e.nome_plano = p.nome_plano
+     AND e.preco_revenda = p.preco_revenda
+    WHERE p.ativo = 1
+    GROUP BY p.id, p.nome_plano, p.preco_cliente, p.preco_revenda
+    ORDER BY p.id ASC
+    LIMIT 40
+  `).catch((erro) => {
+    console.error('❌ IA: erro ao carregar planos eSIM:', erro.message);
+    return [];
+  });
   const suporte = String(process.env.SUPORTE_TELEGRAM || '').replace(/^@/, '').trim();
   const linhasServicos = servicos.length
     ? servicos.map(s => `- ${s.nome}: ${brl(s.preco || 0)}`).join('\n')
