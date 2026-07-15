@@ -384,6 +384,84 @@ function temCor() { return TEMAS_PAINEL[temaAtual()].cor; }
 async function getConfig(chave, padrao='') { const r = await get('SELECT valor FROM configs WHERE chave=?', [chave]); return r ? r.valor : padrao; }
 async function setConfig(chave, valor) { await run('INSERT OR REPLACE INTO configs (chave, valor, atualizado_em) VALUES (?, ?, CURRENT_TIMESTAMP)', [chave, valor]); }
 
+
+const historicoIAWhatsApp = new Map();
+const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
+const IA_INSTRUCAO_PADRAO = `Você é a atendente virtual da CentralUnlocker e responde em português do Brasil.
+Seja educada, objetiva e profissional.
+Ajude com dúvidas gerais sobre eSIM, pedidos, serviços, pagamentos e uso do sistema.
+Nunca invente preços, prazos, disponibilidade, status de pedidos ou confirmação de pagamentos.
+Para comprar, pagar, consultar pedido ou abrir o menu, oriente o cliente a digitar "menu" e usar as opções do bot.
+Quando o cliente pedir atendimento humano, diga para digitar 6 no menu.
+Não peça senhas, códigos de verificação, dados bancários completos ou informações sensíveis.
+Responda em no máximo 5 parágrafos curtos.`;
+
+async function configuracaoIAWhatsApp() {
+  return {
+    ativa: (await getConfig('ia_ativa', process.env.IA_ENABLED === 'true' ? '1' : '0')) === '1',
+    modelo: await getConfig('ia_modelo', process.env.OPENAI_MODEL || 'gpt-5-mini'),
+    instrucao: await getConfig('ia_instrucao', IA_INSTRUCAO_PADRAO),
+    maxTokens: Math.max(80, Math.min(800, Number(await getConfig('ia_max_tokens', process.env.OPENAI_MAX_OUTPUT_TOKENS || '300')) || 300))
+  };
+}
+
+function mensagemPodeIrParaIA(texto, sessao) {
+  const t = String(texto || '').trim();
+  if (!t || t.length < 2 || /^\d+$/.test(t)) return false;
+  const etapa = String(sessao?.etapa || '');
+  return !etapa || ['menu', 'suporte'].includes(etapa);
+}
+
+async function responderComOpenAIWhatsApp(numero, texto, cliente) {
+  const cfg = await configuracaoIAWhatsApp();
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (!cfg.ativa || !apiKey) return { respondeu: false };
+
+  const chave = normalizarNumeroWhatsApp(numero);
+  const anterior = historicoIAWhatsApp.get(chave) || [];
+  const contexto = anterior.slice(-8);
+  const input = [
+    ...contexto,
+    { role: 'user', content: String(texto).slice(0, 2500) }
+  ];
+
+  try {
+    const resp = await axios.post(OPENAI_API_URL, {
+      model: cfg.modelo,
+      instructions: `${cfg.instrucao}\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.`,
+      input,
+      max_output_tokens: cfg.maxTokens,
+      store: false
+    }, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 30000
+    });
+
+    const data = resp.data || {};
+    let resposta = String(data.output_text || '').trim();
+    if (!resposta && Array.isArray(data.output)) {
+      resposta = data.output.flatMap(o => Array.isArray(o.content) ? o.content : [])
+        .filter(c => c && (c.type === 'output_text' || c.text))
+        .map(c => c.text || '')
+        .join('\n').trim();
+    }
+    if (!resposta) throw new Error('A OpenAI não retornou texto.');
+    resposta = resposta.slice(0, 3500);
+
+    historicoIAWhatsApp.set(chave, [
+      ...contexto,
+      { role: 'user', content: String(texto).slice(0, 2500) },
+      { role: 'assistant', content: resposta }
+    ].slice(-10));
+
+    return { respondeu: true, texto: resposta };
+  } catch (e) {
+    const detalhe = e?.response?.data?.error?.message || e.message;
+    console.log('❌ OPENAI WHATSAPP:', detalhe);
+    return { respondeu: false, erro: detalhe };
+  }
+}
+
 function normalizarTelegramSuporte(valor) {
   let v = String(valor || '').trim();
   if (!v) return '';
@@ -1885,6 +1963,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
   if (!sess) {
+    if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+      const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+      if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+    }
     await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
     return;
   }
@@ -1936,6 +2018,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
 
+    if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+      const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+      if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+    }
     await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva *menu*.');
     return;
   }
@@ -2013,6 +2099,10 @@ ${detalhesEntradas}
     return;
   }
 
+  if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+    if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+  }
   await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
   return;
 }
@@ -2172,6 +2262,7 @@ async function responderBotaoAdminTelegram(chatId, data) {
   if (data === 'admin_banners') return menuBannersTG(chatId);
   if (data === 'admin_relatorios') return relatoriosTG(chatId);
   if (data === 'admin_configuracoes') return configuracoesTG(chatId);
+  if (data === 'admin_ia_toggle') { const atual=await getConfig('ia_ativa','0'); await setConfig('ia_ativa',atual==='1'?'0':'1'); return configuracoesTG(chatId); }
   if (data === 'admin_estoque') return menuEstoqueTG(chatId);
   if (data === 'admin_backup') { const dbPath=DB_PATH; if(fs.existsSync(dbPath)) return tgBot.sendDocument(chatId,dbPath,{caption:'💾 Backup do banco de dados'}); return tgBot.sendMessage(chatId,'❌ Banco de dados não encontrado.'); }
   if (data === 'admin_menucliente') { const c=await get('SELECT * FROM revendas WHERE telegram_id=?',[String(chatId)]); return c?enviarMenuTelegram(chatId,c):tgBot.sendMessage(chatId,'Envie /start como cliente para criar a conta.'); }
@@ -5028,7 +5119,19 @@ app.post('/admin/whatsapp/desconectar', async (req, res) => {
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
-  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+  const iaCfg = await configuracaoIAWhatsApp();
+  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="80" max="800" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
+  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+});
+app.post('/admin/config/ia', async (req, res) => {
+  await setConfig('ia_ativa', String(req.body.ia_ativa || '0') === '1' ? '1' : '0');
+  await setConfig('ia_modelo', String(req.body.ia_modelo || 'gpt-5-mini').trim().slice(0, 80));
+  await setConfig('ia_max_tokens', String(Math.max(80, Math.min(800, Number(req.body.ia_max_tokens || 300)))));
+  const instrucao = String(req.body.ia_instrucao || IA_INSTRUCAO_PADRAO).trim().slice(0, 8000);
+  await setConfig('ia_instrucao', instrucao || IA_INSTRUCAO_PADRAO);
+  historicoIAWhatsApp.clear();
+  notificarPainel('ia', '🤖 Configuração da IA atualizada', (await getConfig('ia_ativa','0')) === '1' ? 'Ativada no WhatsApp' : 'Desativada');
+  res.redirect('/admin/config');
 });
 app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/config'); });
 app.post('/admin/config/suporte', async (req, res) => {
