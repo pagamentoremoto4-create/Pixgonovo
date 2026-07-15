@@ -391,15 +391,22 @@ const historicoIAWhatsApp = new Map();
 // não são capturadas pelo menu tradicional.
 const sessoesIAWhatsApp = new Map();
 const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
-const IA_INSTRUCAO_PADRAO = `Você é a atendente virtual da CentralUnlocker e responde em português do Brasil.
-Seja educada, objetiva e profissional.
-Ajude com dúvidas gerais sobre eSIM, pedidos, serviços, pagamentos e uso do sistema.
-Nunca invente preços, prazos, disponibilidade, status de pedidos ou confirmação de pagamentos.
-Para comprar, pagar, consultar pedido ou abrir o menu, oriente o cliente a digitar "menu" e usar as opções do bot.
-Quando a mensagem vier após o menu mas não for uma opção válida, responda normalmente como atendente, sem dizer que houve erro no menu.
-Quando o cliente pedir atendimento humano, diga para digitar 6 no menu.
-Não peça senhas, códigos de verificação, dados bancários completos ou informações sensíveis.
-Responda em no máximo 5 parágrafos curtos.`;
+const IA_INSTRUCAO_PADRAO = `Você é a atendente virtual e vendedora da CentralUnlocker. Responda sempre em português do Brasil, com educação, objetividade e linguagem simples para WhatsApp.
+
+REGRAS COMERCIAIS OBRIGATÓRIAS:
+1. Para preços, planos, produtos, categorias, estoque e disponibilidade, use SOMENTE o bloco "CATÁLOGO ATUAL DO SISTEMA" fornecido em cada atendimento.
+2. O catálogo atual tem prioridade sobre qualquer informação anterior da conversa. Nunca use preços memorizados.
+3. Nunca invente preço, desconto, prazo, estoque, promoção, serviço ou condição de pagamento.
+4. Quando perguntarem "tem eSIM?", "quais planos?", preço ou valor, mostre as opções disponíveis com nome e preço em uma lista curta e organizada.
+5. Se o estoque estiver zerado, informe claramente que o item está indisponível no momento.
+6. Se um produto não existir no catálogo, diga que não o encontrou na lista atual e ofereça atendimento humano.
+7. Quando houver várias opções, apresente no máximo 8 por resposta e pergunte qual interessa ao cliente.
+8. Ao identificar intenção real de compra, oriente o cliente a digitar COMPRAR para abrir o catálogo e concluir pelo fluxo seguro do bot.
+9. Não confirme pagamentos, não altere pedidos e não afirme que um pedido foi aprovado sem informação do sistema.
+10. Para consultar pedido, pagar ou abrir opções, oriente a digitar MENU.
+11. Para atendimento humano, oriente a digitar ATENDENTE.
+12. Não peça senha, código de verificação, dados bancários completos ou informação sensível.
+13. Responda em no máximo 5 parágrafos curtos. Evite textos longos e não use tabelas.`;
 
 async function configuracaoIAWhatsApp() {
   return {
@@ -430,11 +437,70 @@ function comandoSaidaIAWhatsApp(texto) {
     .replace(/[!?.,;:]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (!t) return '';
   if (['menu', 'inicio', 'start', 'voltar ao menu', 'sair da ia'].includes(t)) return 'menu';
-  if (['comprar', 'comprar esim', 'quero comprar', 'esim', 'ver produtos'].includes(t)) return 'comprar';
+  if (['comprar', 'comprar esim', 'quero comprar', 'esim', 'ver produtos', 'catalogo', 'catálogo'].includes(t) || detectarIntencaoCompraIA(t)) return 'comprar';
   if (['cancelar', 'sair', 'parar', 'encerrar'].includes(t)) return 'cancelar';
   if (t === '6' || t.includes('falar com atendente') || t.includes('atendimento humano') || t === 'atendente' || t === 'suporte') return 'suporte';
   return '';
 }
+async function montarContextoComercialIA() {
+  try {
+    const produtos = await all(`
+      SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, p.descricao,
+             COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sem categoria') AS categoria,
+             p.ativo,
+             COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
+      FROM esim_planos p
+      LEFT JOIN esim_estoque e ON e.nome_plano = p.nome_plano
+      WHERE COALESCE(p.ativo, 1)=1
+      GROUP BY p.id
+      ORDER BY categoria, p.nome_plano
+      LIMIT 100
+    `);
+
+    let campanhas = [];
+    try {
+      campanhas = await all(`
+        SELECT c.nome, c.produto_id, c.ativo, p.nome_plano
+        FROM campanhas_anuncios c
+        LEFT JOIN esim_planos p ON p.id=c.produto_id
+        WHERE COALESCE(c.ativo,0)=1
+        ORDER BY c.id DESC
+        LIMIT 20
+      `);
+    } catch (_) {}
+
+    const destaques = new Set(campanhas.map(c => Number(c.produto_id)).filter(Boolean));
+    if (!produtos.length) {
+      return `CATÁLOGO ATUAL DO SISTEMA\nAtualizado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\nNenhum produto ativo cadastrado no momento.`;
+    }
+
+    const linhas = produtos.map(p => {
+      const preco = Number(p.preco_cliente || p.preco_revenda || 0);
+      const estoque = Number(p.estoque || 0);
+      const disponibilidade = estoque > 0 ? `DISPONÍVEL (${estoque} unidade${estoque === 1 ? '' : 's'})` : 'SEM ESTOQUE';
+      const descricao = String(p.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      return [
+        `ID ${p.id} | ${p.nome_plano}`,
+        `Categoria: ${p.categoria}`,
+        `Preço atual: ${brl(preco)}`,
+        `Disponibilidade: ${disponibilidade}`,
+        destaques.has(Number(p.id)) ? 'Campanha ativa: SIM (produto em destaque)' : 'Campanha ativa: NÃO',
+        descricao ? `Descrição: ${descricao}` : ''
+      ].filter(Boolean).join(' | ');
+    });
+
+    return `CATÁLOGO ATUAL DO SISTEMA\nAtualizado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\nUse exclusivamente estes dados para preços e disponibilidade:\n${linhas.join('\n')}`;
+  } catch (e) {
+    console.log('⚠️ IA CONTEXTO COMERCIAL:', e.message);
+    return 'CATÁLOGO ATUAL DO SISTEMA\nNão foi possível consultar o catálogo agora. Não informe preços nem disponibilidade; encaminhe o cliente ao atendimento humano.';
+  }
+}
+
+function detectarIntencaoCompraIA(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  return /\b(quero comprar|quero esse|vou levar|pode fechar|pode fazer o pedido|como compro|como faco para comprar|como pagar|quero contratar|fechar pedido)\b/.test(t);
+}
+
 function mensagemPodeIrParaIA(texto, sessao, numero='') {
   const t = String(texto || '').trim();
   if (!t) return false;
@@ -456,15 +522,16 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
   const chave = normalizarNumeroWhatsApp(numero);
   const anterior = historicoIAWhatsApp.get(chave) || [];
   const contexto = anterior.slice(-8);
+  const intencaoCompra = detectarIntencaoCompraIA(texto);
   const input = [
     ...contexto,
-    { role: 'user', content: String(texto).slice(0, 2500) }
+    { role: 'user', content: `${String(texto).slice(0, 2500)}${intencaoCompra ? '\n\n[SISTEMA: Foi detectada intenção de compra. Oriente de forma breve a digitar COMPRAR para abrir o catálogo e concluir pelo fluxo do bot.]' : ''}` }
   ];
 
   try {
     const resp = await axios.post(OPENAI_API_URL, {
       model: cfg.modelo,
-      instructions: `${cfg.instrucao}\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.`,
+      instructions: `${cfg.instrucao}\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.\n\n${await montarContextoComercialIA()}`,
       input,
       max_output_tokens: cfg.maxTokens,
       reasoning: { effort: 'minimal' },
@@ -5211,7 +5278,7 @@ app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
   const iaCfg = await configuracaoIAWhatsApp();
-  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
+  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp e consulta automaticamente produtos, preços, categorias, estoque e campanhas ativas no banco. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
   res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/ia', async (req, res) => {
