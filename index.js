@@ -610,6 +610,10 @@ async function initDB() {
   )`);
 
 
+  await addColumnIfMissing('mensagens_envio', 'enviar_whatsapp', 'INTEGER DEFAULT 1');
+  await addColumnIfMissing('mensagens_envio', 'enviar_telegram', 'INTEGER DEFAULT 1');
+
+
   await run(`CREATE TABLE IF NOT EXISTS campanhas_anuncios (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
@@ -975,22 +979,35 @@ async function enviarParaAdmins(texto) {
     catch (e) { console.log('⚠️ Falha ao avisar admin Telegram:', e.message); }
   }
 }
-async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null }) {
+async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null, enviarWhatsapp=true, enviarTelegram=true }) {
   const rows = revendaId
     ? await all('SELECT * FROM revendas WHERE id=? AND status="ATIVA"', [revendaId])
     : await all('SELECT * FROM revendas WHERE status="ATIVA"');
-  let enviadas = 0, falhas = 0;
+  let total = 0, enviadas = 0, falhas = 0;
   for (const r of rows) {
-    const jid = r.jid || numberToJid(r.whatsapp);
-    if (!jid) { falhas++; continue; }
-    try {
-      if (imagemPath) await enviarImagem(jid, imagemPath, texto);
-      else await enviarTexto(jid, texto);
-      enviadas++;
-      await new Promise(resolve => setTimeout(resolve, 350));
-    } catch (e) { falhas++; console.log('⚠️ Falha mensagem revenda:', r.id, e.message); }
+    if (enviarWhatsapp) {
+      const jid = r.jid || numberToJid(r.whatsapp);
+      if (jid) {
+        total++;
+        try {
+          if (imagemPath) await enviarImagem(jid, imagemPath, texto);
+          else await enviarTexto(jid, texto);
+          enviadas++;
+        } catch (e) { falhas++; console.log('⚠️ Falha mensagem WhatsApp:', r.id, e.message); }
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    }
+    if (enviarTelegram && r.telegram_id && tgBot) {
+      total++;
+      try {
+        if (imagemPath && fs.existsSync(imagemPath)) await tgBot.sendPhoto(String(r.telegram_id), fs.createReadStream(imagemPath), { caption: texto });
+        else await tgBot.sendMessage(String(r.telegram_id), texto);
+        enviadas++;
+      } catch (e) { falhas++; console.log('⚠️ Falha mensagem Telegram:', r.id, e.message); }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
   }
-  return { total: rows.length, enviadas, falhas };
+  return { total, enviadas, falhas };
 }
 function caminhoImagemCampanha(imagemRel) {
   if (!imagemRel) return null;
@@ -1400,7 +1417,7 @@ async function processarMensagemTelegram(msg) {
     if(sessAdmin.etapa==='categoria_nome'){const old=await get('SELECT nome FROM categorias_produtos WHERE id=?',[sessAdmin.id]);await run('UPDATE categorias_produtos SET nome=? WHERE id=?',[txt,sessAdmin.id]);if(old)await run('UPDATE esim_planos SET categoria=? WHERE categoria=?',[txt,old.nome]);adminSessao.delete(fromAdmin);return verCategoriaTG(msg.chat.id,sessAdmin.id)}
     if(sessAdmin.etapa==='cliente_saldo'){const v=Number(txt.replace(',','.'));if(!Number.isFinite(v))return tgBot.sendMessage(msg.chat.id,'❌ Valor inválido.');await run('UPDATE revendas SET saldo=? WHERE id=?',[v,sessAdmin.id]);adminSessao.delete(fromAdmin);return verClienteTG(msg.chat.id,sessAdmin.id)}
     if(sessAdmin.etapa==='cliente_msg'){const c=await get('SELECT * FROM revendas WHERE id=?',[sessAdmin.id]);adminSessao.delete(fromAdmin);if(!c)return;await enviarParaCanaisCliente(c,txt,c.jid||null);return tgBot.sendMessage(msg.chat.id,'✅ Mensagem enviada.')}
-    if(sessAdmin.etapa==='broadcast_texto'){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'⏳ Enviando mensagem para todos...');const r=await transmitirTodosTG(txt);return tgBot.sendMessage(msg.chat.id,`✅ Concluído. Enviadas: ${r.enviadas}. Falhas: ${r.falhas}.`)}
+    if(sessAdmin.etapa==='broadcast_texto'){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'⏳ Enviando mensagem para todos...');const r=await transmitirTodosTG(txt,null,sessAdmin.canais||{whatsapp:true,telegram:true});return tgBot.sendMessage(msg.chat.id,`✅ Concluído. Enviadas: ${r.enviadas}. Falhas: ${r.falhas}.`)}
     if(sessAdmin.etapa==='camp_grupo'){if(!txt)return tgBot.sendMessage(msg.chat.id,'❌ Envie um ID ou @usuario válido.');await setConfig('telegram_grupo_canal',txt);adminSessao.delete(fromAdmin);return enviarMenuCampanhasTelegram(msg.chat.id)}
     if(sessAdmin.etapa==='camp_intervalo'){const h=Math.max(1,Number(txt));if(!Number.isFinite(h))return tgBot.sendMessage(msg.chat.id,'❌ Digite um número de horas.');await run('UPDATE campanhas_anuncios SET intervalo_horas=?,proximo_envio=datetime("now",?) WHERE id=?',[h,`+${h} hours`,sessAdmin.id]);adminSessao.delete(fromAdmin);return verCampanhaTG(msg.chat.id,sessAdmin.id)}
     if(sessAdmin.etapa==='estoque_add'){if(low==='finalizar'){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,`✅ Estoque finalizado. Itens adicionados: ${sessAdmin.qtd||0}`);return menuEstoqueTG(msg.chat.id)}const arq=await salvarArquivoTelegramEmEsim(msg);if(!arq)return tgBot.sendMessage(msg.chat.id,'📷 Envie uma imagem/documento de QR Code ou digite FINALIZAR.');const p=await get('SELECT * FROM esim_planos WHERE id=?',[sessAdmin.produto_id]);await run('INSERT INTO esim_estoque(nome_plano,preco_revenda,preco_cliente,arquivo_qr,status) VALUES(?,?,?,?,"DISPONIVEL")',[p.nome_plano,p.preco_revenda,p.preco_cliente,arq.rel]);adminSessao.set(fromAdmin,{...sessAdmin,qtd:(sessAdmin.qtd||0)+1});return tgBot.sendMessage(msg.chat.id,`✅ QR Code adicionado (${(sessAdmin.qtd||0)+1}). Envie outro ou digite FINALIZAR.`)}
@@ -2065,9 +2082,11 @@ async function verCampanhaTG(chatId,id){
   if(!c)return tgBot.sendMessage(chatId,'❌ Campanha não encontrada.');
   const estoque=await estoqueDisponivelCampanha(c.produto_id);
   const destinos=[]; if(Number(c.destino_clientes??1))destinos.push('clientes privados'); if(Number(c.destino_grupo||0))destinos.push('grupo/canal');
-  const legenda=`📣 *CAMPANHA AUTOMÁTICA*\n\n📦 ${c.nome_plano||c.nome}\n📥 Estoque: ${estoque??'-'}\n⏱ Intervalo: ${c.intervalo_horas||2} hora(s)\n📍 Destino: ${destinos.join(' + ')||'nenhum'}\n🔄 Alternar texto: ${Number(c.variar_texto??1)?'sim':'não'}\n⛔ Parar sem estoque: ${Number(c.parar_sem_estoque??1)?'sim':'não'}\n📊 Status: ${c.ativo?'🟢 Ativa':'⏸️ Pausada'}\n📨 Ciclos enviados: ${c.ciclos_enviados||c.total_envios||0}\n🕒 Próximo: ${c.proximo_envio||'aguardando ativação'}`;
+  const canais=[]; if(Number(c.enviar_whatsapp||0))canais.push('WhatsApp'); if(Number(c.enviar_telegram||0))canais.push('Telegram');
+  const legenda=`📣 *CAMPANHA AUTOMÁTICA*\n\n📦 ${c.nome_plano||c.nome}\n📥 Estoque: ${estoque??'-'}\n⏱ Intervalo: ${c.intervalo_horas||2} hora(s)\n📍 Destino: ${destinos.join(' + ')||'nenhum'}\n📲 Canal: ${canais.join(' + ')||'nenhum'}\n🔄 Alternar texto: ${Number(c.variar_texto??1)?'sim':'não'}\n⛔ Parar sem estoque: ${Number(c.parar_sem_estoque??1)?'sim':'não'}\n📊 Status: ${c.ativo?'🟢 Ativa':'⏸️ Pausada'}\n📨 Ciclos enviados: ${c.ciclos_enviados||c.total_envios||0}\n🕒 Próximo: ${c.proximo_envio||'aguardando ativação'}`;
   const kb={inline_keyboard:[
     [{text:`${Number(c.destino_clientes??1)?'✅':'⬜'} 👥 Clientes`,callback_data:`admcamp_clientes_${id}`},{text:`${Number(c.destino_grupo||0)?'✅':'⬜'} 📡 Grupo/Canal`,callback_data:`admcamp_grupot_${id}`}],
+    [{text:`${Number(c.enviar_whatsapp||0)?'✅':'⬜'} WhatsApp`,callback_data:`admcamp_wa_${id}`},{text:`${Number(c.enviar_telegram||0)?'✅':'⬜'} Telegram`,callback_data:`admcamp_tg_${id}`}],
     [{text:'⏱ 1h',callback_data:`admcamp_h_1_${id}`},{text:'⏱ 2h',callback_data:`admcamp_h_2_${id}`}],
     [{text:'⏱ 4h',callback_data:`admcamp_h_4_${id}`}],
     [{text:'⏱ 12h',callback_data:`admcamp_h_12_${id}`},{text:'⏱ 24h',callback_data:`admcamp_h_24_${id}`}],
@@ -2105,10 +2124,10 @@ async function menuPedidosTG(chatId){const rows=await all('SELECT * FROM pedidos
 async function verPedidoTG(chatId,id){const x=await get('SELECT * FROM pedidos WHERE id=?',[id]);if(!x)return tgBot.sendMessage(chatId,'❌ Pedido não encontrado.');return tgBot.sendMessage(chatId,`📋 *PEDIDO #${x.id}*\n\n👤 ${x.revenda_nome||'-'}\n🛠 ${x.servico_nome||x.tipo||'-'}\n📱 ${x.imei||x.entrada_valor||'-'}\n💰 ${brl(x.valor||0)}\n📍 ${x.status}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'✅ Concluir',callback_data:`admped_status_${id}_CONCLUIDO`},{text:'❌ Cancelar',callback_data:`admped_status_${id}_CANCELADO`}],[{text:'🟡 Pendente',callback_data:`admped_status_${id}_PENDENTE`}],[{text:'⬅️ Pedidos',callback_data:'admin_pedidos'}]]}})}
 async function menuClientesTG(chatId){const rows=await all('SELECT * FROM revendas ORDER BY id DESC LIMIT 60');const kb=rows.map(x=>[{text:`👤 ${x.nome||x.numero||x.id} — ${brl(x.saldo||0)}`,callback_data:`admcli_${x.id}`}]);kb.push([{text:'⬅️ Painel',callback_data:'admin_inicio'}]);return tgBot.sendMessage(chatId,`👥 *CLIENTES*\n\nTotal exibido: ${rows.length}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}})}
 async function verClienteTG(chatId,id){const x=await get('SELECT * FROM revendas WHERE id=?',[id]);if(!x)return tgBot.sendMessage(chatId,'❌ Cliente não encontrado.');return tgBot.sendMessage(chatId,`👤 *${x.nome||'Cliente'}*\n\n📱 ${x.numero||'-'}\n✈️ Telegram: ${x.telegram_id||'-'}\n💰 Saldo: ${brl(x.saldo||0)}\n📍 Status: ${x.status||'ATIVA'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'💰 Alterar saldo',callback_data:`admcli_saldo_${id}`}],[{text:'📨 Enviar mensagem',callback_data:`admcli_msg_${id}`}],[{text:'⬅️ Clientes',callback_data:'admin_clientes'}]]}})}
-async function menuMensagensTG(chatId){return tgBot.sendMessage(chatId,'📢 *MENSAGENS*\n\nEscolha o tipo de disparo:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'📝 Texto para todos',callback_data:'admmsg_texto'}],[{text:'📦 Anunciar produto agora',callback_data:'admcamp_escolher'}],[{text:'⬅️ Painel',callback_data:'admin_inicio'}]]}})}
+async function menuMensagensTG(chatId){return tgBot.sendMessage(chatId,'📢 *MENSAGENS LIVRES*\n\nEscolha por onde deseja enviar:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'WhatsApp',callback_data:'admmsg_canal_wa'},{text:'Telegram',callback_data:'admmsg_canal_tg'}],[{text:'WhatsApp + Telegram',callback_data:'admmsg_canal_ambos'}],[{text:'📦 Anunciar produto agora',callback_data:'admcamp_escolher'}],[{text:'⬅️ Painel',callback_data:'admin_inicio'}]]}})}
 async function menuBannersTG(chatId){const rows=await all('SELECT * FROM banners_catalogo ORDER BY id DESC');const kb=[[{text:'➕ Novo banner',callback_data:'admban_novo'}]];rows.forEach(x=>kb.push([{text:`${x.ativo?'✅':'⛔'} ${x.nome}`,callback_data:`admban_${x.id}`}])) ;kb.push([{text:'⬅️ Painel',callback_data:'admin_inicio'}]);return tgBot.sendMessage(chatId,'🖼️ *BANNERS*\n\nCadastre imagens para reutilizar em anúncios.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}})}
 async function verBannerTG(chatId,id){const x=await get('SELECT * FROM banners_catalogo WHERE id=?',[id]);if(!x)return tgBot.sendMessage(chatId,'❌ Banner não encontrado.');const fp=caminhoImagemCampanha(x.imagem);const opts={caption:`🖼️ *${x.nome}*\n\n${x.legenda||''}`,parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'📣 Enviar agora',callback_data:`admban_send_${id}`}],[{text:'🗑️ Excluir',callback_data:`admban_del_${id}`}],[{text:'⬅️ Banners',callback_data:'admin_banners'}]]}};if(fp&&fs.existsSync(fp))return tgBot.sendPhoto(chatId,fs.createReadStream(fp),opts);return tgBot.sendMessage(chatId,opts.caption,opts)}
-async function transmitirTodosTG(texto,imagem=null){const cs=await all('SELECT * FROM revendas WHERE status="ATIVA" OR status IS NULL');let enviadas=0,falhas=0;const fp=caminhoImagemCampanha(imagem);for(const c of cs){try{if(c.numero){if(fp&&fs.existsSync(fp))await enviarImagemWhatsApp(c.numero,fp,texto);else await enviarWhatsAppTexto(c.numero,texto);enviadas++}if(c.telegram_id&&tgBot){if(fp&&fs.existsSync(fp))await tgBot.sendPhoto(String(c.telegram_id),fs.createReadStream(fp),{caption:texto});else await tgBot.sendMessage(String(c.telegram_id),texto);enviadas++}}catch(e){falhas++}await new Promise(r=>setTimeout(r,80))}return{enviadas,falhas}}
+async function transmitirTodosTG(texto,imagem=null,canais={whatsapp:true,telegram:true}){const cs=await all('SELECT * FROM revendas WHERE status="ATIVA" OR status IS NULL');let total=0,enviadas=0,falhas=0;const fp=caminhoImagemCampanha(imagem);for(const c of cs){if(canais.whatsapp){const numero=c.whatsapp||c.numero||jidToNumber(c.jid||'');if(numero){total++;try{if(fp&&fs.existsSync(fp))await enviarImagemWhatsApp(numero,fp,texto);else await enviarWhatsAppTexto(numero,texto);enviadas++}catch(e){falhas++}}}if(canais.telegram&&c.telegram_id&&tgBot){total++;try{if(fp&&fs.existsSync(fp))await tgBot.sendPhoto(String(c.telegram_id),fs.createReadStream(fp),{caption:texto});else await tgBot.sendMessage(String(c.telegram_id),texto);enviadas++}catch(e){falhas++}}await new Promise(r=>setTimeout(r,100))}return{total,enviadas,falhas}}
 async function relatoriosTG(chatId){const [p,c,e,v]=await Promise.all([get('SELECT COUNT(*) qtd FROM pedidos'),get('SELECT COUNT(*) qtd FROM revendas'),get("SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL'"),get("SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE status='approved' OR status='PAGO'")]);return tgBot.sendMessage(chatId,`📊 *RELATÓRIOS*\n\n📋 Pedidos: ${p?.qtd||0}\n👥 Clientes: ${c?.qtd||0}\n📥 Estoque disponível: ${e?.qtd||0}\n💰 Pagamentos: ${brl(v?.total||0)}`,{parse_mode:'Markdown',reply_markup:adminVoltar()})}
 async function configuracoesTG(chatId){const ai=await getConfig('ia_ativa','0');return tgBot.sendMessage(chatId,`⚙️ *CONFIGURAÇÕES*\n\n🤖 IA: ${ai==='1'?'Ativada':'Desativada'}\n🌐 Painel: ${BASE_URL||'-'}\n🔐 Admin ID: ${ADMIN_TELEGRAM_ID||'não definido'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'💾 Fazer backup',callback_data:'admin_backup'}],[{text:'⬅️ Painel',callback_data:'admin_inicio'}]]}})}
 
@@ -2240,7 +2259,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if(data==='admcamp_escolher'){await escolherProdutoCampanhaTelegram(chatId);return;}
         m=data.match(/^admcamp_prod_(\d+)$/); if(m){await criarCampanhaProdutoTelegram(chatId,Number(m[1]));return;}
         if(data==='admcamp_grupo'){adminSessao.set(adminKey,{etapa:'camp_grupo'});await tgBot.sendMessage(chatId,'📡 Envie o ID do grupo/canal (ex.: -1001234567890 ou @canal). O bot precisa ser administrador no canal.');return;}
-        m=data.match(/^admcamp_(clientes|grupot|var|stop)_(\d+)$/); if(m){const col={clientes:'destino_clientes',grupot:'destino_grupo',var:'variar_texto',stop:'parar_sem_estoque'}[m[1]],id=Number(m[2]);const c=await get(`SELECT ${col} valor FROM campanhas_anuncios WHERE id=?`,[id]);await run(`UPDATE campanhas_anuncios SET ${col}=? WHERE id=?`,[Number(c?.valor||0)?0:1,id]);return verCampanhaTG(chatId,id);}
+        m=data.match(/^admcamp_(clientes|grupot|var|stop|wa|tg)_(\d+)$/); if(m){const col={clientes:'destino_clientes',grupot:'destino_grupo',var:'variar_texto',stop:'parar_sem_estoque',wa:'enviar_whatsapp',tg:'enviar_telegram'}[m[1]],id=Number(m[2]);const c=await get(`SELECT ${col} valor FROM campanhas_anuncios WHERE id=?`,[id]);await run(`UPDATE campanhas_anuncios SET ${col}=? WHERE id=?`,[Number(c?.valor||0)?0:1,id]);return verCampanhaTG(chatId,id);}
         m=data.match(/^admcamp_h_(1|2|4|12|24)_(\d+)$/); if(m){const h=Number(m[1]),id=Number(m[2]);await run(`UPDATE campanhas_anuncios SET intervalo_horas=?,proximo_envio=CASE WHEN ativo=1 THEN datetime('now',?) ELSE proximo_envio END WHERE id=?`,[h,`+${h} hours`,id]);return verCampanhaTG(chatId,id);}
         m=data.match(/^admcamp_agora_(\d+)$/); if(m){const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[Number(m[1])]);if(!c)return tgBot.sendMessage(chatId,'❌ Campanha não encontrada.');const est=await estoqueDisponivelCampanha(c.produto_id);if(est!==null&&est<=0&&Number(c.parar_sem_estoque??1))return tgBot.sendMessage(chatId,'⛔ Estoque zerado. A campanha não foi enviada.');await tgBot.sendMessage(chatId,'⏳ Enviando campanha...');const r=await enviarCampanhaAnuncio(c);await run('UPDATE campanhas_anuncios SET ultimo_envio=CURRENT_TIMESTAMP,total_envios=total_envios+1,ciclos_enviados=ciclos_enviados+1,ultima_enviadas=?,ultima_falhas=? WHERE id=?',[r.enviadas,r.falhas,c.id]);await tgBot.sendMessage(chatId,`✅ Envio concluído: ${r.enviadas}/${r.total}. Falhas: ${r.falhas}.`);return;}
         let z;
@@ -2257,13 +2276,14 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         z=data.match(/^admcli_(\d+)$/);if(z){await verClienteTG(chatId,Number(z[1]));return;}
         z=data.match(/^admcli_saldo_(\d+)$/);if(z){adminSessao.set(adminKey,{etapa:'cliente_saldo',id:Number(z[1])});await tgBot.sendMessage(chatId,'Digite o novo saldo total do cliente:');return;}
         z=data.match(/^admcli_msg_(\d+)$/);if(z){adminSessao.set(adminKey,{etapa:'cliente_msg',id:Number(z[1])});await tgBot.sendMessage(chatId,'Digite a mensagem para este cliente:');return;}
-        if(data==='admmsg_texto'){adminSessao.set(adminKey,{etapa:'broadcast_texto'});await tgBot.sendMessage(chatId,'Digite a mensagem que será enviada a todos os clientes ativos:');return;}
+        if(data==='admmsg_texto'){adminSessao.set(adminKey,{etapa:'broadcast_texto',canais:{whatsapp:true,telegram:true}});await tgBot.sendMessage(chatId,'Digite a mensagem que será enviada a todos os clientes ativos:');return;}
+        if(data==='admmsg_canal_wa'||data==='admmsg_canal_tg'||data==='admmsg_canal_ambos'){const canais={whatsapp:data!=='admmsg_canal_tg',telegram:data!=='admmsg_canal_wa'};adminSessao.set(adminKey,{etapa:'broadcast_texto',canais});await tgBot.sendMessage(chatId,`Digite a mensagem livre para enviar por ${canais.whatsapp&&canais.telegram?'WhatsApp + Telegram':canais.whatsapp?'WhatsApp':'Telegram'}:`);return;}
         if(data==='admban_novo'){adminSessao.set(adminKey,{etapa:'banner_nome'});await tgBot.sendMessage(chatId,'Digite um nome para o banner:');return;}
         z=data.match(/^admban_(\d+)$/);if(z){await verBannerTG(chatId,Number(z[1]));return;}
         z=data.match(/^admban_del_(\d+)$/);if(z){await run('DELETE FROM banners_catalogo WHERE id=?',[Number(z[1])]);return menuBannersTG(chatId);}
         z=data.match(/^admban_send_(\d+)$/);if(z){const b=await get('SELECT * FROM banners_catalogo WHERE id=?',[Number(z[1])]);await tgBot.sendMessage(chatId,'⏳ Enviando banner...');const r=await transmitirTodosTG(b.legenda||b.nome,b.imagem);return tgBot.sendMessage(chatId,`✅ Enviadas: ${r.enviadas}. Falhas: ${r.falhas}.`);}
         z=data.match(/^admcamp_ver_(\d+)$/);if(z){await verCampanhaTG(chatId,Number(z[1]));return;}
-        z=data.match(/^admcamp_toggle_(\d+)$/);if(z){const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[Number(z[1])]);if(!c?.ativo&&!Number(c?.destino_clientes??1)&&!Number(c?.destino_grupo||0))return tgBot.sendMessage(chatId,'❌ Selecione pelo menos um destino: Clientes ou Grupo/Canal.');await run('UPDATE campanhas_anuncios SET ativo=?,proximo_envio=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE proximo_envio END WHERE id=?',[c?.ativo?0:1,c?.ativo?0:1,Number(z[1])]);return verCampanhaTG(chatId,Number(z[1]));}
+        z=data.match(/^admcamp_toggle_(\d+)$/);if(z){const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[Number(z[1])]);if(!c?.ativo&&!Number(c?.destino_clientes??1)&&!Number(c?.destino_grupo||0))return tgBot.sendMessage(chatId,'❌ Selecione pelo menos um destino: Clientes ou Grupo/Canal.');if(!c?.ativo&&!Number(c?.enviar_whatsapp||0)&&!Number(c?.enviar_telegram||0))return tgBot.sendMessage(chatId,'❌ Selecione pelo menos um canal: WhatsApp ou Telegram.');await run('UPDATE campanhas_anuncios SET ativo=?,proximo_envio=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE proximo_envio END WHERE id=?',[c?.ativo?0:1,c?.ativo?0:1,Number(z[1])]);return verCampanhaTG(chatId,Number(z[1]));}
         z=data.match(/^admcamp_int_(\d+)$/);if(z){adminSessao.set(adminKey,{etapa:'camp_intervalo',id:Number(z[1])});await tgBot.sendMessage(chatId,'Digite o intervalo em horas (ex.: 2):');return;}
         z=data.match(/^admcamp_del_(\d+)$/);if(z){await run('DELETE FROM campanhas_anuncios WHERE id=?',[Number(z[1])]);return enviarMenuCampanhasTelegram(chatId);}
         await responderBotaoAdminTelegram(chatId, data);
@@ -4321,7 +4341,7 @@ app.get('/admin/mensagens', async (req, res) => {
   let table = '<table><tr><th>Data</th><th>Destino</th><th>Mensagem</th><th>Resultado</th></tr>';
   for (const h of hist) table += `<tr><td>${dateBR(h.criado_em)}</td><td>${safeHtml(h.destino || '-')}</td><td>${safeHtml(String(h.mensagem || '').slice(0,120))}</td><td>${h.enviadas || 0}/${h.total || 0} enviadas<br><span class="muted">Falhas: ${h.falhas || 0}</span></td></tr>`;
   table += '</table>';
-  const body = `<h1>📢 Mensagens</h1><div class="card"><h2>Enviar mensagem livre</h2><form method="post" enctype="multipart/form-data"><label>Destino</label><select name="destino" onchange="document.getElementById('revendaBox').style.display=this.value==='revenda'?'block':'none'"><option value="todas">Todas as revendas ativas</option><option value="revenda">Revenda específica</option></select><div id="revendaBox" style="display:none;margin-top:10px"><label>Revenda</label><select name="revenda_id">${opts}</select></div><br><br><label>Mensagem</label><textarea name="mensagem" rows="8" placeholder="Digite sua mensagem livre aqui..." required></textarea><br><br><label>Imagem opcional</label><input type="file" name="imagem" accept="image/*"><br><br><button class="btn green" onclick="return confirm('Enviar mensagem agora?')">📤 Enviar</button></form></div><div class="card"><h2>Histórico de envios</h2>${table}</div>`;
+  const body = `<h1>📢 Mensagens</h1><div class="card"><h2>Enviar mensagem livre</h2><form method="post" enctype="multipart/form-data"><label>Destino</label><select name="destino" onchange="document.getElementById('revendaBox').style.display=this.value==='revenda'?'block':'none'"><option value="todas">Todas as revendas ativas</option><option value="revenda">Revenda específica</option></select><div id="revendaBox" style="display:none;margin-top:10px"><label>Revenda</label><select name="revenda_id">${opts}</select></div><br><br><label>Canais de envio</label><br><label><input type="checkbox" name="enviar_whatsapp" value="1" checked> WhatsApp</label><br><label><input type="checkbox" name="enviar_telegram" value="1" checked> Telegram</label><br><br><label>Mensagem</label><textarea name="mensagem" rows="8" placeholder="Digite sua mensagem livre aqui..." required></textarea><br><br><label>Imagem opcional</label><input type="file" name="imagem" accept="image/*"><br><br><button class="btn green" onclick="return confirm('Enviar mensagem agora?')">📤 Enviar</button></form></div><div class="card"><h2>Histórico de envios</h2>${table}</div>`;
   res.send(page('Mensagens', body));
 });
 
@@ -4329,11 +4349,14 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
   const mensagem = String(req.body.mensagem || '').trim();
   const destino = req.body.destino === 'revenda' ? 'REVENDA_ESPECIFICA' : 'TODAS_REVENDAS';
   const revendaId = req.body.destino === 'revenda' ? Number(req.body.revenda_id || 0) : null;
+  const enviarWhatsapp = Boolean(req.body.enviar_whatsapp);
+  const enviarTelegram = Boolean(req.body.enviar_telegram);
+  if (!enviarWhatsapp && !enviarTelegram) return res.status(400).send(page('Canal obrigatório', '<h1>❌ Selecione WhatsApp ou Telegram.</h1><a class="btn" href="/admin/mensagens">Voltar</a>'));
   const imagemRel = req.file ? `esim/${req.file.filename}` : null;
   const imagemPath = req.file ? path.join(ESIM_DIR, req.file.filename) : null;
   if (mensagem) {
-    const r = await enviarMensagemRevendas({ texto: mensagem, revendaId, imagemPath });
-    await run('INSERT INTO mensagens_envio (destino, revenda_id, mensagem, imagem, total, enviadas, falhas) VALUES (?, ?, ?, ?, ?, ?, ?)', [destino, revendaId, mensagem, imagemRel, r.total, r.enviadas, r.falhas]);
+    const r = await enviarMensagemRevendas({ texto: mensagem, revendaId, imagemPath, enviarWhatsapp, enviarTelegram });
+    await run('INSERT INTO mensagens_envio (destino, revenda_id, mensagem, imagem, total, enviadas, falhas, enviar_whatsapp, enviar_telegram) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [destino, revendaId, mensagem, imagemRel, r.total, r.enviadas, r.falhas, enviarWhatsapp?1:0, enviarTelegram?1:0]);
     notificarPainel('mensagem', '📢 Mensagem enviada', `${r.enviadas}/${r.total} enviadas`);
   }
   res.redirect('/admin/mensagens');
