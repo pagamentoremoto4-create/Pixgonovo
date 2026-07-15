@@ -397,11 +397,11 @@ REGRAS COMERCIAIS OBRIGATÓRIAS:
 1. Para preços, planos, produtos, categorias, estoque e disponibilidade, use SOMENTE o bloco "CATÁLOGO ATUAL DO SISTEMA" fornecido em cada atendimento.
 2. O catálogo atual tem prioridade sobre qualquer informação anterior da conversa. Nunca use preços memorizados.
 3. Nunca invente preço, desconto, prazo, estoque, promoção, serviço ou condição de pagamento.
-4. Quando perguntarem "tem eSIM?", "quais planos?", preço ou valor, mostre as opções disponíveis com nome e preço em uma lista curta e organizada.
+4. Quando perguntarem sobre eSIM, planos, produtos, serviços, SSP, blacklist, desbloqueio, bloqueio, preço, valor ou prazo, consulte os DADOS COMERCIAIS ATUAIS e responda com nome, preço, prazo e disponibilidade quando existirem.
 5. Se o estoque estiver zerado, informe claramente que o item está indisponível no momento.
-6. Se um produto não existir no catálogo, diga que não o encontrou na lista atual e ofereça atendimento humano.
+6. Se um produto ou serviço não existir nos dados atuais, diga que não o encontrou na lista e ofereça atendimento humano. Nunca invente serviço, preço, prazo ou disponibilidade.
 7. Quando houver várias opções, apresente no máximo 8 por resposta e pergunte qual interessa ao cliente.
-8. Ao identificar intenção real de compra, oriente o cliente a digitar COMPRAR para abrir o catálogo e concluir pelo fluxo seguro do bot.
+8. Ao identificar intenção de comprar eSIM/produto, oriente a digitar COMPRAR. Ao identificar intenção de contratar um serviço, oriente a digitar SERVICOS para abrir a lista de serviços e iniciar o pedido pelo fluxo seguro do bot.
 9. Não confirme pagamentos, não altere pedidos e não afirme que um pedido foi aprovado sem informação do sistema.
 10. Para consultar pedido, pagar ou abrir opções, oriente a digitar MENU.
 11. Para atendimento humano, oriente a digitar ATENDENTE.
@@ -437,6 +437,7 @@ function comandoSaidaIAWhatsApp(texto) {
     .replace(/[!?.,;:]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (!t) return '';
   if (['menu', 'inicio', 'start', 'voltar ao menu', 'sair da ia'].includes(t)) return 'menu';
+  if (['servicos', 'serviço', 'servico', 'contratar serviço', 'contratar servico', 'ver serviços', 'ver servicos'].includes(t)) return 'servicos';
   if (['comprar', 'comprar esim', 'quero comprar', 'esim', 'ver produtos', 'catalogo', 'catálogo'].includes(t) || detectarIntencaoCompraIA(t)) return 'comprar';
   if (['cancelar', 'sair', 'parar', 'encerrar'].includes(t)) return 'cancelar';
   if (t === '6' || t.includes('falar com atendente') || t.includes('atendimento humano') || t === 'atendente' || t === 'suporte') return 'suporte';
@@ -556,7 +557,7 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
       throw new Error(`A OpenAI não retornou texto (${motivo}).`);
     }
     resposta = resposta.slice(0, 3200);
-    const rodape = '\n\nDigite *menu* para voltar, *comprar* para ver os eSIMs ou *atendente* para falar com uma pessoa.';
+    const rodape = '\n\nDigite *menu* para voltar, *comprar* para ver os eSIMs, *servicos* para contratar um serviço ou *atendente* para falar com uma pessoa.';
     if (!/digite \*?menu\*?/i.test(resposta)) resposta += rodape;
 
     ativarSessaoIAWhatsApp(numero);
@@ -659,6 +660,9 @@ async function initDB() {
   )`);
   await addColumnIfMissing('servicos_catalogo', 'tipo_entrada', "TEXT DEFAULT 'IMEI'");
   await addColumnIfMissing('servicos_catalogo', 'entrada_label', "TEXT DEFAULT 'IMEI'");
+  await addColumnIfMissing('servicos_catalogo', 'categoria', "TEXT DEFAULT 'Serviços'");
+  await addColumnIfMissing('servicos_catalogo', 'descricao', "TEXT DEFAULT ''");
+  await addColumnIfMissing('servicos_catalogo', 'prazo', "TEXT DEFAULT ''");
 
   await run(`CREATE TABLE IF NOT EXISTS precos_revenda (
     revenda_id INTEGER,
@@ -1988,6 +1992,13 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       encerrarSessaoIAWhatsApp(numeroNorm);
       await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
       await enviarListaEsim(from);
+      return;
+    }
+    if (comandoIA === 'servicos') {
+      encerrarSessaoIAWhatsApp(numeroNorm);
+      await salvarSessaoPedido(from, { etapa: 'servico_escolha' });
+      const revendaAtual = await getRevendaByJidOrNumber(from);
+      await enviarTexto(from, await listarServicosTexto(revendaAtual));
       return;
     }
     if (comandoIA === 'suporte') {
@@ -5184,20 +5195,20 @@ ${textoSituacaoSaldo(novo)}
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
   let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O Telegram solicita a entrada conforme o tipo escolhido.</p></div>
-  <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Samsung FRP, iCloud FMI OFF" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 25"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
+  <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Blacklist SSP" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 200"></div><div><label>Categoria</label><input name="categoria" placeholder="Ex: SSP, Desbloqueios"></div><div><label>Prazo</label><input name="prazo" placeholder="Ex: 7 a 15 dias úteis"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div><div style="grid-column:span 2"><label>Descrição</label><textarea name="descricao" rows="3" placeholder="Explique o serviço para a IA e para o cliente"></textarea></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
   html += `<div class="topbar"><h1>Serviços cadastrados</h1><span class="muted">${rows.length} serviço(s)</span></div>`;
   if (!rows.length) html += `<div class="card empty">Nenhum serviço cadastrado ainda.</div>`;
   for (const s of rows) {
     const tipo = normalizarTipoEntrada(s.tipo_entrada);
     const icon = tipo === 'LOCK_CODE' ? '🔑' : tipo === 'OUTRO' ? '✍️' : '📱';
-    html += `<div class="service-card"><div><div class="service-title">${icon} ${safeHtml(s.nome)}</div><div class="service-meta"><span class="tag">Entrada: ${safeHtml(tituloTipoEntrada(s.tipo_entrada))}</span><span class="tag">Campo: ${safeHtml(labelEntradaServico(s))}</span><span class="tag">Preço: ${brl(s.preco_padrao)}</span><span class="tag">Pedidos: ${s.total}</span><span class="tag">${s.ativo ? '✅ Ativo' : '⛔ Inativo'}</span></div></div><div class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📋 Pedidos</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️</button></form></div></div>`;
+    html += `<div class="service-card"><div><div class="service-title">${icon} ${safeHtml(s.nome)}</div><div class="service-meta"><span class="tag">Entrada: ${safeHtml(tituloTipoEntrada(s.tipo_entrada))}</span><span class="tag">Campo: ${safeHtml(labelEntradaServico(s))}</span><span class="tag">Preço: ${brl(s.preco_padrao)}</span>${s.categoria?`<span class="tag">Categoria: ${safeHtml(s.categoria)}</span>`:''}${s.prazo?`<span class="tag">Prazo: ${safeHtml(s.prazo)}</span>`:''}<span class="tag">Pedidos: ${s.total}</span><span class="tag">${s.ativo ? '✅ Ativo' : '⛔ Inativo'}</span></div></div><div class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📋 Pedidos</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️</button></form></div></div>`;
   }
   res.send(page('Serviços', html));
 });
 app.post('/admin/servicos', async (req, res) => {
   const tipoEntrada = normalizarTipoEntrada(req.body.tipo_entrada);
   const label = String(req.body.entrada_label || '').trim() || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
-  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, ativo) VALUES (?, ?, ?, ?, 1)', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label]);
+  await run('INSERT INTO servicos_catalogo (nome, preco_padrao, tipo_entrada, entrada_label, categoria, descricao, prazo, ativo) VALUES (?, ?, ?, ?, ?, ?, ?, 1)', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label, String(req.body.categoria || 'Serviços').trim(), String(req.body.descricao || '').trim(), String(req.body.prazo || '').trim()]);
   notificarPainel('servico', '🛠 Novo serviço', req.body.nome);
   const revs = await all('SELECT * FROM revendas WHERE status="ATIVA" AND jid IS NOT NULL');
   for (const r of revs) await enviarTexto(r.jid, `🆕 Novo serviço disponível\n\n🛠 ${req.body.nome}\n🔎 Entrada: ${tituloTipoEntrada(tipoEntrada)}\n\nDigite menu para ver sua tabela.`);
@@ -5205,12 +5216,12 @@ app.post('/admin/servicos', async (req, res) => {
 });
 app.get('/admin/servico/:id/editar', async (req, res) => {
   const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]);
-  res.send(page('Editar Serviço', `<h1>✏️ Editar Serviço</h1><div class="card"><form method="post"><label>Nome</label><input name="nome" value="${safeHtml(s.nome)}" required><br><br><label>Preço padrão</label><input name="preco" value="${s.preco_padrao}"><br><br><label>Tipo de entrada</label><select name="tipo_entrada"><option value="IMEI" ${normalizarTipoEntrada(s.tipo_entrada)==='IMEI'?'selected':''}>IMEI</option><option value="LOCK_CODE" ${normalizarTipoEntrada(s.tipo_entrada)==='LOCK_CODE'?'selected':''}>Lock Code</option><option value="OUTRO" ${normalizarTipoEntrada(s.tipo_entrada)==='OUTRO'?'selected':''}>Outro</option></select><br><br><label>Nome da entrada</label><input name="entrada_label" value="${safeHtml(labelEntradaServico(s))}" placeholder="Ex: Serial, CPF, Login"><br><br><button class="btn green">Salvar</button></form></div>`));
+  res.send(page('Editar Serviço', `<h1>✏️ Editar Serviço</h1><div class="card"><form method="post"><label>Nome</label><input name="nome" value="${safeHtml(s.nome)}" required><br><br><label>Preço padrão</label><input name="preco" value="${s.preco_padrao}"><br><br><label>Categoria</label><input name="categoria" value="${safeHtml(s.categoria || 'Serviços')}"><br><br><label>Prazo</label><input name="prazo" value="${safeHtml(s.prazo || '')}" placeholder="Ex: até 40 minutos"><br><br><label>Descrição</label><textarea name="descricao" rows="5">${safeHtml(s.descricao || '')}</textarea><br><br><label>Tipo de entrada</label><select name="tipo_entrada"><option value="IMEI" ${normalizarTipoEntrada(s.tipo_entrada)==='IMEI'?'selected':''}>IMEI</option><option value="LOCK_CODE" ${normalizarTipoEntrada(s.tipo_entrada)==='LOCK_CODE'?'selected':''}>Lock Code</option><option value="OUTRO" ${normalizarTipoEntrada(s.tipo_entrada)==='OUTRO'?'selected':''}>Outro</option></select><br><br><label>Nome da entrada</label><input name="entrada_label" value="${safeHtml(labelEntradaServico(s))}" placeholder="Ex: Serial, CPF, Login"><br><br><button class="btn green">Salvar</button></form></div>`));
 });
 app.post('/admin/servico/:id/editar', async (req, res) => {
   const tipoEntrada = normalizarTipoEntrada(req.body.tipo_entrada);
   const label = String(req.body.entrada_label || '').trim() || (tipoEntrada === 'LOCK_CODE' ? 'Lock Code' : tipoEntrada === 'OUTRO' ? 'Informação' : 'IMEI');
-  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=?, tipo_entrada=?, entrada_label=? WHERE id=?', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label, req.params.id]);
+  await run('UPDATE servicos_catalogo SET nome=?, preco_padrao=?, tipo_entrada=?, entrada_label=?, categoria=?, descricao=?, prazo=? WHERE id=?', [req.body.nome, Number(String(req.body.preco || '0').replace(',', '.')), tipoEntrada, label, String(req.body.categoria || 'Serviços').trim(), String(req.body.descricao || '').trim(), String(req.body.prazo || '').trim(), req.params.id]);
   res.redirect('/admin/servicos');
 });
 app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
