@@ -401,15 +401,12 @@ REGRAS COMERCIAIS OBRIGATÓRIAS:
 5. Se o estoque estiver zerado, informe claramente que o item está indisponível no momento.
 6. Se um produto ou serviço não existir nos dados atuais, diga que não o encontrou na lista e ofereça atendimento humano. Nunca invente serviço, preço, prazo ou disponibilidade.
 7. Quando houver várias opções, apresente no máximo 8 por resposta e pergunte qual interessa ao cliente.
-8. Ao identificar interesse em produto ou serviço, informe primeiro nome, preço, prazo e disponibilidade usando os dados atuais. Depois pergunte se o cliente deseja comprar ou contratar.
-9. Se o cliente perguntar “qual preço?”, “quanto custa?”, “qual valor?”, “tem estoque?”, “qual prazo?” ou “faz esse serviço?”, responda diretamente usando os dados atuais e o contexto das mensagens anteriores.
-10. Não obrigue o cliente a digitar MENU, COMPRAR ou SERVICOS quando a pergunta puder ser respondida imediatamente. Esses comandos devem ser oferecidos apenas para iniciar ou concluir o fluxo do bot.
-11. Quando a pergunta for curta e depender da mensagem anterior, como “qual preço?” ou “e o prazo?”, identifique o último produto ou serviço mencionado e responda sobre ele.
-12. Ofereça ATENDENTE apenas quando o item não existir nos dados atuais, quando faltarem informações confiáveis ou quando o cliente pedir atendimento humano.
-13. Não confirme pagamentos, não altere pedidos e não afirme que um pedido foi aprovado sem informação do sistema.
-14. Não peça senha, código de verificação, dados bancários completos ou informação sensível.
-15. Não exiba IDs internos do sistema ao cliente.
-16. Responda em no máximo 5 parágrafos curtos. Evite textos longos e não use tabelas.`;
+8. Ao identificar intenção de comprar eSIM/produto, oriente a digitar COMPRAR. Ao identificar intenção de contratar um serviço, oriente a digitar SERVICOS para abrir a lista de serviços e iniciar o pedido pelo fluxo seguro do bot.
+9. Não confirme pagamentos, não altere pedidos e não afirme que um pedido foi aprovado sem informação do sistema.
+10. Para consultar pedido, pagar ou abrir opções, oriente a digitar MENU.
+11. Para atendimento humano, oriente a digitar ATENDENTE.
+12. Não peça senha, código de verificação, dados bancários completos ou informação sensível.
+13. Responda em no máximo 5 parágrafos curtos. Evite textos longos e não use tabelas.`;
 
 async function configuracaoIAWhatsApp() {
   return {
@@ -461,14 +458,6 @@ async function montarContextoComercialIA() {
       LIMIT 100
     `);
 
-    const servicos = await all(`
-      SELECT id, nome, preco_padrao, categoria, descricao, prazo, tipo_entrada, entrada_label
-      FROM servicos_catalogo
-      WHERE COALESCE(ativo, 1)=1
-      ORDER BY categoria, nome
-      LIMIT 100
-    `);
-
     let campanhas = [];
     try {
       campanhas = await all(`
@@ -482,53 +471,29 @@ async function montarContextoComercialIA() {
     } catch (_) {}
 
     const destaques = new Set(campanhas.map(c => Number(c.produto_id)).filter(Boolean));
-    const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-    const blocos = ['DADOS COMERCIAIS ATUAIS DO SISTEMA', `Atualizado em: ${agora}`];
-
-    if (produtos.length) {
-      const linhasProdutos = produtos.map(p => {
-        const preco = Number(p.preco_cliente || p.preco_revenda || 0);
-        const estoque = Number(p.estoque || 0);
-        const disponibilidade = estoque > 0 ? `DISPONÍVEL (${estoque} unidade${estoque === 1 ? '' : 's'})` : 'SEM ESTOQUE';
-        const descricao = String(p.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 180);
-        return [
-          `Produto: ${p.nome_plano}`,
-          `Categoria: ${p.categoria}`,
-          `Preço: ${brl(preco)}`,
-          `Disponibilidade: ${disponibilidade}`,
-          destaques.has(Number(p.id)) ? 'Destaque/campanha ativa: SIM' : '',
-          descricao ? `Descrição: ${descricao}` : ''
-        ].filter(Boolean).join(' | ');
-      });
-      blocos.push(`\nPRODUTOS E eSIM:\n${linhasProdutos.join('\n')}`);
-    } else {
-      blocos.push('\nPRODUTOS E eSIM:\nNenhum produto ativo cadastrado.');
+    if (!produtos.length) {
+      return `CATÁLOGO ATUAL DO SISTEMA\nAtualizado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\nNenhum produto ativo cadastrado no momento.`;
     }
 
-    if (servicos.length) {
-      const linhasServicos = servicos.map(s => {
-        const preco = Number(s.preco_padrao || 0);
-        const descricao = String(s.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 220);
-        const prazo = String(s.prazo || '').replace(/\s+/g, ' ').trim();
-        return [
-          `Serviço: ${s.nome}`,
-          `Categoria: ${s.categoria || 'Serviços'}`,
-          preco > 0 ? `Preço: ${brl(preco)}` : 'Preço: não cadastrado',
-          prazo ? `Prazo: ${prazo}` : 'Prazo: não cadastrado',
-          'Disponibilidade: ATIVO',
-          descricao ? `Descrição: ${descricao}` : ''
-        ].filter(Boolean).join(' | ');
-      });
-      blocos.push(`\nSERVIÇOS:\n${linhasServicos.join('\n')}`);
-    } else {
-      blocos.push('\nSERVIÇOS:\nNenhum serviço ativo cadastrado.');
-    }
+    const linhas = produtos.map(p => {
+      const preco = Number(p.preco_cliente || p.preco_revenda || 0);
+      const estoque = Number(p.estoque || 0);
+      const disponibilidade = estoque > 0 ? `DISPONÍVEL (${estoque} unidade${estoque === 1 ? '' : 's'})` : 'SEM ESTOQUE';
+      const descricao = String(p.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      return [
+        `ID ${p.id} | ${p.nome_plano}`,
+        `Categoria: ${p.categoria}`,
+        `Preço atual: ${brl(preco)}`,
+        `Disponibilidade: ${disponibilidade}`,
+        destaques.has(Number(p.id)) ? 'Campanha ativa: SIM (produto em destaque)' : 'Campanha ativa: NÃO',
+        descricao ? `Descrição: ${descricao}` : ''
+      ].filter(Boolean).join(' | ');
+    });
 
-    blocos.push('\nINSTRUÇÃO: responda preços e prazos diretamente. Não mostre IDs internos. Quando o cliente disser apenas “qual preço?”, “qual valor?” ou “qual prazo?”, use o último produto ou serviço mencionado no histórico.');
-    return blocos.join('\n');
+    return `CATÁLOGO ATUAL DO SISTEMA\nAtualizado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\nUse exclusivamente estes dados para preços e disponibilidade:\n${linhas.join('\n')}`;
   } catch (e) {
     console.log('⚠️ IA CONTEXTO COMERCIAL:', e.message);
-    return 'DADOS COMERCIAIS ATUAIS DO SISTEMA\nNão foi possível consultar produtos e serviços agora. Não invente preços ou prazos; ofereça atendimento humano.';
+    return 'CATÁLOGO ATUAL DO SISTEMA\nNão foi possível consultar o catálogo agora. Não informe preços nem disponibilidade; encaminhe o cliente ao atendimento humano.';
   }
 }
 
@@ -561,13 +526,13 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
   const intencaoCompra = detectarIntencaoCompraIA(texto);
   const input = [
     ...contexto,
-    { role: 'user', content: `${String(texto).slice(0, 2500)}${intencaoCompra ? '\n\n[SISTEMA: Foi detectada intenção de compra. Informe primeiro os dados comerciais disponíveis e pergunte se deseja prosseguir. Só depois indique COMPRAR ou SERVICOS para concluir no fluxo do bot.]' : ''}` }
+    { role: 'user', content: `${String(texto).slice(0, 2500)}${intencaoCompra ? '\n\n[SISTEMA: Foi detectada intenção de compra. Oriente de forma breve a digitar COMPRAR para abrir o catálogo e concluir pelo fluxo do bot.]' : ''}` }
   ];
 
   try {
     const resp = await axios.post(OPENAI_API_URL, {
       model: cfg.modelo,
-      instructions: `${cfg.instrucao}\n\nREGRAS DE EXECUÇÃO MAIS RECENTES E OBRIGATÓRIAS:\n- Informe diretamente preço, prazo, estoque e disponibilidade de produtos e serviços cadastrados.\n- Use o contexto da conversa para perguntas curtas como \"qual preço?\".\n- Não diga que não pode informar preço quando ele estiver nos dados atuais.\n- Não mostre IDs internos.\n- Não mande o cliente voltar ao menu antes de responder à pergunta.\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.\n\n${await montarContextoComercialIA()}`,
+      instructions: `${cfg.instrucao}\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.\n\n${await montarContextoComercialIA()}`,
       input,
       max_output_tokens: cfg.maxTokens,
       reasoning: { effort: 'minimal' },
@@ -592,7 +557,8 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
       throw new Error(`A OpenAI não retornou texto (${motivo}).`);
     }
     resposta = resposta.slice(0, 3200);
-    // Sem rodapé fixo: a IA responde preço/prazo antes de sugerir comandos.
+    const rodape = '\n\nDigite *menu* para voltar, *comprar* para ver os eSIMs, *servicos* para contratar um serviço ou *atendente* para falar com uma pessoa.';
+    if (!/digite \*?menu\*?/i.test(resposta)) resposta += rodape;
 
     ativarSessaoIAWhatsApp(numero);
     historicoIAWhatsApp.set(chave, [
