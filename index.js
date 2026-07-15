@@ -606,6 +606,25 @@ async function initDB() {
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
+
+  await run(`CREATE TABLE IF NOT EXISTS campanhas_anuncios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    mensagem TEXT NOT NULL,
+    imagem TEXT,
+    intervalo_horas INTEGER DEFAULT 2,
+    enviar_whatsapp INTEGER DEFAULT 1,
+    enviar_telegram INTEGER DEFAULT 1,
+    ativo INTEGER DEFAULT 0,
+    proximo_envio TEXT,
+    ultimo_envio TEXT,
+    total_envios INTEGER DEFAULT 0,
+    ultima_enviadas INTEGER DEFAULT 0,
+    ultima_falhas INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
@@ -706,7 +725,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -948,6 +967,78 @@ async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null }
   }
   return { total: rows.length, enviadas, falhas };
 }
+function caminhoImagemCampanha(imagemRel) {
+  if (!imagemRel) return null;
+  const rel = String(imagemRel).replace(/^\/+/, '');
+  if (rel.startsWith('esim/')) return path.join(ESIM_DIR, path.basename(rel));
+  return path.join(PUBLIC_DIR, rel);
+}
+
+async function enviarCampanhaAnuncio(campanha) {
+  const clientes = await all(`SELECT id,nome,whatsapp,jid,telegram_id FROM revendas WHERE status='ATIVA' ORDER BY id ASC`);
+  const imagemPath = caminhoImagemCampanha(campanha.imagem);
+  let total = 0, enviadas = 0, falhas = 0;
+  const pausa = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  for (const cliente of clientes) {
+    if (Number(campanha.enviar_whatsapp || 0) === 1) {
+      const numero = normalizarNumeroWhatsApp(cliente.whatsapp || jidToNumber(cliente.jid || ''));
+      if (numero) {
+        total++;
+        const ok = imagemPath && fs.existsSync(imagemPath)
+          ? await enviarImagemWhatsApp(numero, imagemPath, campanha.mensagem)
+          : await enviarWhatsAppTexto(numero, campanha.mensagem);
+        if (ok) enviadas++; else falhas++;
+        await pausa(500);
+      }
+    }
+    if (Number(campanha.enviar_telegram || 0) === 1 && cliente.telegram_id) {
+      total++;
+      const destino = tgJid(cliente.telegram_id);
+      const ok = imagemPath && fs.existsSync(imagemPath)
+        ? await enviarImagem(destino, imagemPath, campanha.mensagem)
+        : await enviarTexto(destino, campanha.mensagem);
+      if (ok) enviadas++; else falhas++;
+      await pausa(350);
+    }
+  }
+  return { total, enviadas, falhas };
+}
+
+let anunciosWorkerExecutando = false;
+let anunciosWorkerIniciado = false;
+async function processarAnunciosAutomaticos() {
+  if (anunciosWorkerExecutando) return;
+  anunciosWorkerExecutando = true;
+  try {
+    const campanhas = await all(`SELECT * FROM campanhas_anuncios
+      WHERE ativo=1 AND (proximo_envio IS NULL OR datetime(proximo_envio) <= datetime('now'))
+      ORDER BY id ASC`);
+    for (const campanha of campanhas) {
+      try {
+        const resultado = await enviarCampanhaAnuncio(campanha);
+        const horas = Math.max(1, Number(campanha.intervalo_horas || 2));
+        await run(`UPDATE campanhas_anuncios SET ultimo_envio=CURRENT_TIMESTAMP,
+          proximo_envio=datetime('now', ?), total_envios=total_envios+1,
+          ultima_enviadas=?, ultima_falhas=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,
+          [`+${horas} hours`, resultado.enviadas, resultado.falhas, campanha.id]);
+        notificarPainel('mensagem', '📣 Anúncio automático enviado', `${campanha.nome}: ${resultado.enviadas}/${resultado.total}`);
+      } catch (e) {
+        console.log('❌ CAMPANHA AUTOMÁTICA:', campanha.id, e.message);
+        await run(`UPDATE campanhas_anuncios SET proximo_envio=datetime('now','+10 minutes'), ultima_falhas=ultima_falhas+1, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [campanha.id]);
+      }
+    }
+  } finally {
+    anunciosWorkerExecutando = false;
+  }
+}
+function iniciarWorkerAnuncios() {
+  if (anunciosWorkerIniciado) return;
+  anunciosWorkerIniciado = true;
+  setInterval(() => processarAnunciosAutomaticos().catch(e => console.log('❌ WORKER ANÚNCIOS:', e.message)), 60 * 1000);
+  setTimeout(() => processarAnunciosAutomaticos().catch(e => console.log('❌ WORKER ANÚNCIOS:', e.message)), 8000);
+}
+
 async function avisarNovoPedidoAdmins(pedido, extra='') {
   const entrada = textoEntradaPedido(pedido);
   const origem = pedido.revenda_nome ? `🏪 Revenda: ${pedido.revenda_nome}` : `👤 Cliente: ${pedido.cliente_nome || pedido.cliente_whatsapp || '-'}`;
@@ -1803,6 +1894,7 @@ ${detalhesEntradas}
 
 async function iniciarTelegram() {
   await initDB();
+  iniciarWorkerAnuncios();
   if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
     console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
     return;
@@ -3822,6 +3914,88 @@ app.post('/admin/pedido/:id/finalizar', async (req, res) => { const p = await ge
 app.post('/admin/pedido/:id/cancelar', async (req, res) => { const motivo = req.body.motivo || 'Não informado'; await cancelarPedidoComEstorno(req.params.id, motivo); res.redirect(req.get('referer') || '/admin/pedidos'); });
 
 
+
+app.get('/admin/anuncios', async (req, res) => {
+  const campanhas = await all('SELECT * FROM campanhas_anuncios ORDER BY id DESC');
+  let cards = '';
+  for (const c of campanhas) {
+    const status = Number(c.ativo) === 1 ? '🟢 ATIVA' : '⏸ PAUSADA';
+    const canais = [Number(c.enviar_whatsapp) === 1 ? 'WhatsApp' : '', Number(c.enviar_telegram) === 1 ? 'Telegram' : ''].filter(Boolean).join(' + ') || 'Nenhum';
+    const img = c.imagem ? `<img src="/${safeHtml(c.imagem)}" style="max-width:180px;max-height:180px;border-radius:12px;margin:8px 0">` : '';
+    cards += `<div class="card"><h2>${safeHtml(c.nome)} <span class="pill">${status}</span></h2>${img}
+      <p>${safeHtml(c.mensagem).replace(/\n/g,'<br>')}</p>
+      <p class="muted">⏱ A cada ${Number(c.intervalo_horas || 2)} hora(s) · 📲 ${safeHtml(canais)}<br>
+      Último envio: ${dateBR(c.ultimo_envio)} · Próximo: ${dateBR(c.proximo_envio)}<br>
+      Resultado anterior: ${Number(c.ultima_enviadas || 0)} enviadas / ${Number(c.ultima_falhas || 0)} falhas</p>
+      <div class="actions">
+        <form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/agora"><button class="btn green" onclick="return confirm('Enviar este anúncio agora?')">📤 Anunciar agora</button></form>
+        <form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/toggle"><button class="btn orange">${Number(c.ativo) === 1 ? '⏸ Pausar' : '▶️ Ativar'}</button></form>
+        <form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/apagar"><button class="btn red" onclick="return confirm('Apagar esta campanha?')">🗑️ Apagar</button></form>
+      </div></div>`;
+  }
+  if (!cards) cards = '<div class="card"><p class="muted">Nenhuma campanha cadastrada.</p></div>';
+  const body = `<h1>📣 Anúncios automáticos</h1>
+    <div class="card"><h2>Nova campanha</h2>
+      <form method="post" enctype="multipart/form-data">
+        <label>Nome da campanha</label><input name="nome" required placeholder="Ex.: Promoção Blacklist SSP"><br><br>
+        <label>Texto do anúncio</label><textarea name="mensagem" rows="8" required placeholder="Digite o texto enviado aos clientes..."></textarea><br><br>
+        <label>Imagem opcional</label><input type="file" name="imagem" accept="image/*"><br><br>
+        <label>Intervalo automático</label><select name="intervalo_horas"><option value="1">1 hora</option><option value="2" selected>2 horas</option><option value="4">4 horas</option><option value="12">12 horas</option><option value="24">24 horas</option></select><br><br>
+        <label><input type="checkbox" name="enviar_whatsapp" value="1" checked> Enviar pelo WhatsApp</label><br>
+        <label><input type="checkbox" name="enviar_telegram" value="1" checked> Enviar pelo Telegram</label><br><br>
+        <label><input type="checkbox" name="ativar" value="1"> Ativar imediatamente e enviar em instantes</label><br><br>
+        <button class="btn green">💾 Criar campanha</button>
+      </form>
+      <p class="muted">A campanha envia somente para clientes ativos. Contas vinculadas podem receber nos dois canais quando ambos estiverem selecionados.</p>
+    </div>${cards}`;
+  res.send(page('Anúncios automáticos', body));
+});
+
+app.post('/admin/anuncios', uploadEsim.single('imagem'), async (req, res) => {
+  const nome = String(req.body.nome || '').trim();
+  const mensagem = String(req.body.mensagem || '').trim();
+  const intervalo = [1,2,4,12,24].includes(Number(req.body.intervalo_horas)) ? Number(req.body.intervalo_horas) : 2;
+  if (!nome || !mensagem) return res.redirect('/admin/anuncios');
+  if (!req.body.enviar_whatsapp && !req.body.enviar_telegram) return res.status(400).send(page('Destino obrigatório', '<h1>❌ Selecione WhatsApp ou Telegram.</h1><a class="btn" href="/admin/anuncios">Voltar</a>'));
+  const imagem = req.file ? `esim/${req.file.filename}` : null;
+  const ativo = req.body.ativar ? 1 : 0;
+  await run(`INSERT INTO campanhas_anuncios (nome,mensagem,imagem,intervalo_horas,enviar_whatsapp,enviar_telegram,ativo,proximo_envio)
+    VALUES (?,?,?,?,?,?,?,?)`, [nome,mensagem,imagem,intervalo,req.body.enviar_whatsapp?1:0,req.body.enviar_telegram?1:0,ativo,ativo ? new Date().toISOString() : null]);
+  res.redirect('/admin/anuncios');
+});
+
+app.post('/admin/anuncios/:id/toggle', async (req, res) => {
+  const c = await get('SELECT * FROM campanhas_anuncios WHERE id=?', [req.params.id]);
+  if (c) {
+    const novo = Number(c.ativo) === 1 ? 0 : 1;
+    await run(`UPDATE campanhas_anuncios SET ativo=?, proximo_envio=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE proximo_envio END, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [novo, novo, c.id]);
+  }
+  res.redirect('/admin/anuncios');
+});
+
+app.post('/admin/anuncios/:id/agora', async (req, res) => {
+  const c = await get('SELECT * FROM campanhas_anuncios WHERE id=?', [req.params.id]);
+  res.redirect('/admin/anuncios');
+  if (!c) return;
+  setImmediate(async () => {
+    try {
+      const resultado = await enviarCampanhaAnuncio(c);
+      const horas = Math.max(1, Number(c.intervalo_horas || 2));
+      await run(`UPDATE campanhas_anuncios SET ultimo_envio=CURRENT_TIMESTAMP, proximo_envio=datetime('now', ?), total_envios=total_envios+1, ultima_enviadas=?, ultima_falhas=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [`+${horas} hours`, resultado.enviadas, resultado.falhas, c.id]);
+      notificarPainel('mensagem', '📣 Anúncio enviado', `${c.nome}: ${resultado.enviadas}/${resultado.total}`);
+    } catch (e) { console.log('❌ ANUNCIAR AGORA:', e.message); }
+  });
+});
+
+app.post('/admin/anuncios/:id/apagar', async (req, res) => {
+  const c = await get('SELECT * FROM campanhas_anuncios WHERE id=?', [req.params.id]);
+  if (c?.imagem) {
+    const fp = caminhoImagemCampanha(c.imagem);
+    try { if (fp && fs.existsSync(fp)) fs.unlinkSync(fp); } catch (_) {}
+  }
+  await run('DELETE FROM campanhas_anuncios WHERE id=?', [req.params.id]);
+  res.redirect('/admin/anuncios');
+});
 
 app.get('/admin/mensagens', async (req, res) => {
   const revendas = await all('SELECT id,nome,whatsapp FROM revendas WHERE status="ATIVA" ORDER BY nome ASC');
