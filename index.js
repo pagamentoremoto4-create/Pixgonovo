@@ -1343,6 +1343,14 @@ async function processarMensagemTelegram(msg) {
   const texto = textoOriginal.toLowerCase().trim();
   if (!textoOriginal) return;
   if (texto === '/start' || texto === '/senha') return;
+  if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '')) {
+    if (texto === '/admin' || texto === 'admin' || texto === 'painel') {
+      await enviarPainelAdminTelegram(msg.chat.id);
+      return;
+    }
+    const tratadoAdmin = await tratarAdminTelegramLegado(fromAdmin, textoOriginal, texto, msg.from.first_name || 'Admin');
+    if (tratadoAdmin) return;
+  }
 
   const { cliente } = await cadastrarClienteTelegram(msg.from);
   const from = tgJid(msg.from.id);
@@ -1892,6 +1900,43 @@ ${detalhesEntradas}
   return;
 }
 
+function adminTelegramKeyboard() {
+  return { inline_keyboard: [
+    [{ text: '📦 Produtos', callback_data: 'admin_produtos' }, { text: '📂 Categorias', callback_data: 'admin_categorias' }],
+    [{ text: '📋 Pedidos', callback_data: 'admin_pedidos' }, { text: '📣 Campanhas', callback_data: 'admin_campanhas' }],
+    [{ text: '👥 Clientes', callback_data: 'admin_clientes' }, { text: '📊 Relatórios', callback_data: 'admin_relatorios' }],
+    [{ text: '⚙️ Configurações', callback_data: 'admin_configuracoes' }, { text: '📥 Estoque', callback_data: 'admin_estoque' }],
+    [{ text: '🌐 Abrir painel web', url: `${BASE_URL || ''}/admin` }]
+  ] };
+}
+async function enviarPainelAdminTelegram(chatId) {
+  const pend = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
+  const clientes = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
+  const estoque = await get('SELECT COUNT(*) qtd FROM esim_estoque WHERE status="DISPONIVEL"');
+  const campanhas = await get('SELECT COUNT(*) qtd FROM campanhas_anuncios WHERE ativo=1');
+  return tgBot.sendMessage(chatId, `🔐 *PAINEL ADMINISTRATIVO*\n\n🏢 CentralUnlocker\n\n🟡 Pedidos pendentes: ${pend?.qtd || 0}\n👥 Clientes ativos: ${clientes?.qtd || 0}\n📥 QR Codes disponíveis: ${estoque?.qtd || 0}\n📣 Campanhas ativas: ${campanhas?.qtd || 0}\n\nSelecione uma opção:`, { parse_mode: 'Markdown', reply_markup: adminTelegramKeyboard() });
+}
+async function responderBotaoAdminTelegram(chatId, data) {
+  const voltar = [[{ text: '⬅️ Voltar ao painel', callback_data: 'admin_inicio' }]];
+  if (data === 'admin_inicio') return enviarPainelAdminTelegram(chatId);
+  const links = {
+    admin_produtos: ['/admin/esim', '📦 Produtos e planos eSIM'],
+    admin_categorias: ['/admin/servicos', '📂 Categorias: Serviços e eSIM'],
+    admin_pedidos: ['/admin/pedidos', '📋 Gerenciar pedidos'],
+    admin_campanhas: ['/admin/anuncios', '📣 Campanhas automáticas'],
+    admin_clientes: ['/admin/revendas', '👥 Clientes e revendas'],
+    admin_relatorios: ['/admin/relatorios', '📊 Relatórios'],
+    admin_configuracoes: ['/admin/config', '⚙️ Configurações'],
+    admin_estoque: ['/admin/esim', '📥 Estoque eSIM']
+  };
+  let texto = links[data]?.[1] || 'Painel administrativo';
+  if (data === 'admin_pedidos') { const x=await get('SELECT COUNT(*) qtd FROM pedidos'); texto += `\n\nTotal de pedidos: ${x?.qtd||0}`; }
+  if (data === 'admin_clientes') { const x=await get('SELECT COUNT(*) qtd FROM revendas'); texto += `\n\nTotal de clientes: ${x?.qtd||0}`; }
+  if (data === 'admin_estoque') { const x=await get('SELECT COUNT(*) qtd FROM esim_estoque WHERE status="DISPONIVEL"'); texto += `\n\nDisponíveis: ${x?.qtd||0}`; }
+  if (data === 'admin_campanhas') { const x=await get('SELECT COUNT(*) qtd FROM campanhas_anuncios WHERE ativo=1'); texto += `\n\nCampanhas ativas: ${x?.qtd||0}`; }
+  return tgBot.sendMessage(chatId, texto, { reply_markup: { inline_keyboard: [[{text:'🌐 Abrir no painel web',url:`${BASE_URL || ''}${links[data]?.[0] || '/admin'}`}], ...voltar] } });
+}
+
 async function iniciarTelegram() {
   await initDB();
   iniciarWorkerAnuncios();
@@ -1954,6 +1999,15 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       const chatId = q.message?.chat?.id;
       const data = String(q.data || '');
       if (!chatId) return;
+      if (data.startsWith('admin_')) {
+        if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
+          await tgBot.answerCallbackQuery(q.id, { text: 'Apenas o administrador pode usar este painel.', show_alert: true });
+          return;
+        }
+        await tgBot.answerCallbackQuery(q.id);
+        await responderBotaoAdminTelegram(chatId, data);
+        return;
+      }
       // Botões do cliente no Telegram
       const ehBotaoCliente = data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || /^esim_(\d+|confirmar_\d+|cancelar_compra)$/.test(data);
       if (ehBotaoCliente) {
@@ -2868,7 +2922,9 @@ async function tratarAdminTelegramLegado(from, textoOriginal, texto, nomeContato
 }
 async function enviarMenuAdmin(from) {
   adminSessao.set(from, { menu: true });
-  await enviarTexto(from, `🏢 *CENTRALUNLOCKER ADMIN*\n\n1️⃣ Dashboard\n2️⃣ Pedidos\n3️⃣ Revendas\n4️⃣ Serviços\n5️⃣ Financeiro\n6️⃣ Relatórios\n7️⃣ Backup\n8️⃣ Configurações\n9️⃣ Painel Web\n0️⃣ Sair\n\nDigite uma opção:`);
+  const chatId = tgIdFromJid(from);
+  if (tgBot && chatId) return enviarPainelAdminTelegram(chatId);
+  await enviarTexto(from, `🔐 PAINEL ADMINISTRATIVO\n\nUse /admin no Telegram.`);
 }
 async function tratarOpcaoAdmin(from, opcao) {
   if (opcao === '0') { adminSessao.delete(from); await enviarTexto(from, '✅ Menu encerrado.'); return; }
