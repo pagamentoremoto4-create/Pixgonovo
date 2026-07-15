@@ -401,7 +401,7 @@ async function configuracaoIAWhatsApp() {
     ativa: (await getConfig('ia_ativa', process.env.IA_ENABLED === 'true' ? '1' : '0')) === '1',
     modelo: await getConfig('ia_modelo', process.env.OPENAI_MODEL || 'gpt-5-mini'),
     instrucao: await getConfig('ia_instrucao', IA_INSTRUCAO_PADRAO),
-    maxTokens: Math.max(80, Math.min(800, Number(await getConfig('ia_max_tokens', process.env.OPENAI_MAX_OUTPUT_TOKENS || '300')) || 300))
+    maxTokens: Math.max(200, Math.min(1500, Number(await getConfig('ia_max_tokens', process.env.OPENAI_MAX_OUTPUT_TOKENS || '700')) || 300))
   };
 }
 
@@ -431,6 +431,8 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
       instructions: `${cfg.instrucao}\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.`,
       input,
       max_output_tokens: cfg.maxTokens,
+      reasoning: { effort: 'minimal' },
+      text: { verbosity: 'low' },
       store: false
     }, {
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -445,7 +447,11 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
         .map(c => c.text || '')
         .join('\n').trim();
     }
-    if (!resposta) throw new Error('A OpenAI não retornou texto.');
+    if (!resposta) {
+      const motivo = data?.incomplete_details?.reason || data?.status || 'sem_texto';
+      console.log('⚠️ OPENAI RESPOSTA SEM TEXTO:', JSON.stringify({ status: data?.status, motivo, uso: data?.usage }));
+      throw new Error(`A OpenAI não retornou texto (${motivo}).`);
+    }
     resposta = resposta.slice(0, 3500);
 
     historicoIAWhatsApp.set(chave, [
@@ -5120,13 +5126,13 @@ app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
   const iaCfg = await configuracaoIAWhatsApp();
-  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="80" max="800" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
+  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
   res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/ia', async (req, res) => {
   await setConfig('ia_ativa', String(req.body.ia_ativa || '0') === '1' ? '1' : '0');
   await setConfig('ia_modelo', String(req.body.ia_modelo || 'gpt-5-mini').trim().slice(0, 80));
-  await setConfig('ia_max_tokens', String(Math.max(80, Math.min(800, Number(req.body.ia_max_tokens || 300)))));
+  await setConfig('ia_max_tokens', String(Math.max(200, Math.min(1500, Number(req.body.ia_max_tokens || 300)))));
   const instrucao = String(req.body.ia_instrucao || IA_INSTRUCAO_PADRAO).trim().slice(0, 8000);
   await setConfig('ia_instrucao', instrucao || IA_INSTRUCAO_PADRAO);
   historicoIAWhatsApp.clear();
