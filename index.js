@@ -12,6 +12,7 @@ const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
 const crypto = require('crypto');
 let TelegramBot = null;
+let tgBot = null; // Instância global: o painel pode consultar com segurança durante a inicialização.
 try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
 
 // Telegram + WhatsApp: conexão direta via QR Code usando Baileys; webhook Evolution mantido apenas como compatibilidade opcional.
@@ -258,6 +259,10 @@ function normalizarOpcaoSaldoInsuficiente(texto) {
 }
 
 async function enviarSaldoInsuficienteTelegram(chatId, revenda, valor, item='serviço', entradas=[]) {
+  if (!tgBot) {
+    console.log('⚠️ Telegram ainda não iniciado: saldo insuficiente não enviado.');
+    return false;
+  }
   return tgBot.sendMessage(chatId, textoSaldoInsuficiente(revenda, valor, item, entradas), {
     reply_markup: { inline_keyboard: [
       [{ text: '💳 Pagar este serviço', callback_data: 'saldo_pagar_servico' }],
@@ -1802,7 +1807,14 @@ async function iniciarTelegram() {
     console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
     return;
   }
+  if (tgBot) {
+    console.log('ℹ️ Bot Telegram já estava iniciado.');
+    return;
+  }
   tgBot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+  tgBot.on('polling_error', (erro) => {
+    console.log('❌ TELEGRAM POLLING:', erro?.message || erro);
+  });
   console.log('✅ BOT TELEGRAM INICIADO');
   tgBot.onText(/\/start/, async (msg) => {
     try {
