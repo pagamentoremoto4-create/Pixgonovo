@@ -581,6 +581,9 @@ async function initDB() {
   )`);
   await addColumnIfMissing('esim_planos', 'preco_cliente', 'REAL DEFAULT 0');
   await addColumnIfMissing('esim_planos', 'ativo', 'INTEGER DEFAULT 1');
+  await addColumnIfMissing('esim_planos', 'descricao', 'TEXT');
+  await addColumnIfMissing('esim_planos', 'imagem', 'TEXT');
+  await addColumnIfMissing('esim_planos', 'categoria', "TEXT DEFAULT 'eSIM'");
 
   // Migra os planos já existentes no estoque para o catálogo.
   await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
@@ -624,6 +627,7 @@ async function initDB() {
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await addColumnIfMissing('campanhas_anuncios', 'produto_id', 'INTEGER');
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
 
@@ -995,9 +999,16 @@ async function enviarCampanhaAnuncio(campanha) {
     if (Number(campanha.enviar_telegram || 0) === 1 && cliente.telegram_id) {
       total++;
       const destino = tgJid(cliente.telegram_id);
-      const ok = imagemPath && fs.existsSync(imagemPath)
-        ? await enviarImagem(destino, imagemPath, campanha.mensagem)
-        : await enviarTexto(destino, campanha.mensagem);
+      let ok = false;
+      try {
+        const opts = campanha.produto_id ? { reply_markup: { inline_keyboard: [[{ text: '🛒 Comprar agora', callback_data: `esim_${campanha.produto_id}` }]] } } : {};
+        if (imagemPath && fs.existsSync(imagemPath)) {
+          await tgBot.sendPhoto(String(cliente.telegram_id), fs.createReadStream(imagemPath), { caption: String(campanha.mensagem || ''), ...opts });
+        } else {
+          await tgBot.sendMessage(String(cliente.telegram_id), String(campanha.mensagem || ''), opts);
+        }
+        ok = true;
+      } catch (e) { console.log('⚠️ CAMPANHA TG:', e.message); }
       if (ok) enviadas++; else falhas++;
       await pausa(350);
     }
@@ -1328,6 +1339,20 @@ async function processarMensagemTelegram(msg) {
   if (!msg?.from?.id || !msg?.chat?.id) return;
   const fromAdmin = tgJid(msg.from.id);
   const sessAdmin = adminSessao.get(fromAdmin);
+  if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '') && sessAdmin?.etapa?.startsWith('produto_')) {
+    const txt=String(msg.text||'').trim();
+    if(['cancelar','sair','voltar'].includes(txt.toLowerCase())){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Operação cancelada.');return enviarListaProdutosAdminTelegram(msg.chat.id);}
+    if(sessAdmin.etapa==='produto_novo_nome'){adminSessao.set(fromAdmin,{etapa:'produto_novo_preco',nome:txt});await tgBot.sendMessage(msg.chat.id,'💰 Digite o preço do produto:');return;}
+    if(sessAdmin.etapa==='produto_novo_preco'){const preco=Number(txt.replace(',','.'));if(!Number.isFinite(preco)||preco<0)return tgBot.sendMessage(msg.chat.id,'❌ Preço inválido. Digite novamente:');adminSessao.set(fromAdmin,{...sessAdmin,etapa:'produto_novo_desc',preco});await tgBot.sendMessage(msg.chat.id,'📝 Digite a descrição do produto:');return;}
+    if(sessAdmin.etapa==='produto_novo_desc'){const r=await run('INSERT INTO esim_planos (nome_plano,preco_revenda,preco_cliente,descricao,ativo) VALUES (?,?,?,?,1)',[sessAdmin.nome,sessAdmin.preco,sessAdmin.preco,txt]);adminSessao.set(fromAdmin,{etapa:'produto_novo_foto',produto_id:r.lastID});await tgBot.sendMessage(msg.chat.id,'📷 Envie a foto do produto agora. Para cadastrar sem foto, digite PULAR.');return;}
+    if(sessAdmin.etapa==='produto_novo_foto'){if(txt.toLowerCase()==='pular'){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Produto cadastrado sem foto.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}const ok=await salvarFotoProdutoTelegram(msg,sessAdmin.produto_id);if(!ok)return tgBot.sendMessage(msg.chat.id,'❌ Envie uma imagem ou digite PULAR.');adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Produto e foto cadastrados.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}
+    if(sessAdmin.etapa==='produto_editar_foto'){const ok=await salvarFotoProdutoTelegram(msg,sessAdmin.produto_id);if(!ok)return tgBot.sendMessage(msg.chat.id,'❌ Envie uma imagem válida.');adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Foto atualizada.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}
+    if(!txt)return;
+    if(sessAdmin.etapa==='produto_editar_nome')await run('UPDATE esim_planos SET nome_plano=? WHERE id=?',[txt,sessAdmin.produto_id]);
+    if(sessAdmin.etapa==='produto_editar_desc')await run('UPDATE esim_planos SET descricao=? WHERE id=?',[txt,sessAdmin.produto_id]);
+    if(sessAdmin.etapa==='produto_editar_preco'){const v=Number(txt.replace(',','.'));if(!Number.isFinite(v)||v<0)return tgBot.sendMessage(msg.chat.id,'❌ Preço inválido.');await run('UPDATE esim_planos SET preco_revenda=?,preco_cliente=? WHERE id=?',[v,v,sessAdmin.produto_id]);}
+    adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Produto atualizado.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);
+  }
   if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '') && sessAdmin?.etapa === 'entregar_esim_manual_tg') {
     const txtAdmin = String(msg.text || '').trim().toLowerCase();
     if (['cancelar', 'sair', 'voltar'].includes(txtAdmin)) {
@@ -1344,8 +1369,13 @@ async function processarMensagemTelegram(msg) {
   if (!textoOriginal) return;
   if (texto === '/start' || texto === '/senha') return;
   if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '')) {
-    if (texto === '/admin' || texto === 'admin' || texto === 'painel') {
-      await enviarPainelAdminTelegram(msg.chat.id);
+    if (texto === '/admin' || texto === 'admin' || texto === 'painel' || texto === 'administração' || texto === 'administracao' || texto === '🔐 administração') {
+      await enviarPainelAdminTelegram(msg.chat.id, true);
+      return;
+    }
+    if (texto === '🛒 menu do cliente' || texto === 'menu do cliente') {
+      const { cliente } = await cadastrarClienteTelegram(msg.from);
+      await enviarMenuTelegram(msg.chat.id, cliente);
       return;
     }
     const tratadoAdmin = await tratarAdminTelegramLegado(fromAdmin, textoOriginal, texto, msg.from.first_name || 'Admin');
@@ -1900,6 +1930,68 @@ ${detalhesEntradas}
   return;
 }
 
+
+function textoProdutoCampanha(p) {
+  return `📱 *${p.nome_plano}*\n\n${p.descricao ? `${p.descricao}\n\n` : ''}💰 Valor: *${brl(p.preco_revenda)}*\n\n✅ Compra rápida e segura\n📦 Entrega conforme disponibilidade\n\nToque no botão abaixo para comprar.`;
+}
+async function enviarListaProdutosAdminTelegram(chatId, titulo='📦 *PRODUTOS*') {
+  const produtos = await all('SELECT * FROM esim_planos ORDER BY ativo DESC, id DESC LIMIT 80');
+  const botoes = produtos.map(p => [{ text: `${p.ativo ? '✅' : '⛔'} ${p.nome_plano} — ${brl(p.preco_revenda)}`, callback_data: `admprod_${p.id}` }]);
+  botoes.unshift([{ text: '➕ Cadastrar produto', callback_data: 'admprod_novo' }]);
+  botoes.push([{ text: '⬅️ Voltar', callback_data: 'admin_inicio' }]);
+  return tgBot.sendMessage(chatId, `${titulo}\n\nEscolha um produto para editar ou cadastre um novo.`, { parse_mode:'Markdown', reply_markup:{inline_keyboard:botoes} });
+}
+async function mostrarProdutoAdminTelegram(chatId, id) {
+  const p = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
+  if (!p) return tgBot.sendMessage(chatId, '❌ Produto não encontrado.');
+  const legenda = `📦 *${p.nome_plano}*\n\n🏷 Categoria: ${p.categoria || 'eSIM'}\n💰 Preço: ${brl(p.preco_revenda)}\n📝 Descrição: ${p.descricao || 'Não cadastrada'}\n📷 Foto: ${p.imagem ? 'Cadastrada' : 'Não cadastrada'}\n📍 Status: ${p.ativo ? 'ATIVO' : 'DESATIVADO'}`;
+  const kb={inline_keyboard:[
+    [{text:'✏️ Nome',callback_data:`admprod_nome_${id}`},{text:'💰 Preço',callback_data:`admprod_preco_${id}`}],
+    [{text:'📝 Descrição',callback_data:`admprod_desc_${id}`},{text:'📷 Foto',callback_data:`admprod_foto_${id}`}],
+    [{text:p.ativo?'⛔ Desativar':'✅ Ativar',callback_data:`admprod_toggle_${id}`}],
+    [{text:'📣 Criar campanha',callback_data:`admcamp_prod_${id}`}],
+    [{text:'⬅️ Produtos',callback_data:'admin_produtos'}]
+  ]};
+  const fp=caminhoImagemCampanha(p.imagem);
+  if (fp && fs.existsSync(fp)) return tgBot.sendPhoto(chatId, fs.createReadStream(fp), {caption:legenda,parse_mode:'Markdown',reply_markup:kb});
+  return tgBot.sendMessage(chatId, legenda, {parse_mode:'Markdown',reply_markup:kb});
+}
+async function salvarFotoProdutoTelegram(msg, produtoId) {
+  const arq=await salvarArquivoTelegramEmEsim(msg);
+  if (!arq) return false;
+  await run('UPDATE esim_planos SET imagem=? WHERE id=?',[arq.rel,produtoId]);
+  return true;
+}
+async function enviarMenuCampanhasTelegram(chatId) {
+  const prods=await all('SELECT * FROM esim_planos WHERE ativo=1 ORDER BY nome_plano');
+  const camps=await all('SELECT * FROM campanhas_anuncios ORDER BY id DESC LIMIT 30');
+  const kb=[[{text:'➕ Criar campanha escolhendo produto',callback_data:'admcamp_escolher'}]];
+  for(const c of camps) kb.push([{text:`${c.ativo?'🟢':'⏸️'} ${c.nome}`,callback_data:`admcamp_ver_${c.id}`}]);
+  kb.push([{text:'⬅️ Voltar',callback_data:'admin_inicio'}]);
+  return tgBot.sendMessage(chatId,`📣 *ANÚNCIOS AUTOMÁTICOS*\n\nCampanhas cadastradas: ${camps.length}\nProdutos disponíveis: ${prods.length}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function escolherProdutoCampanhaTelegram(chatId){
+  const ps=await all('SELECT * FROM esim_planos WHERE ativo=1 ORDER BY nome_plano');
+  const kb=ps.map(p=>[{text:`📦 ${p.nome_plano} — ${brl(p.preco_revenda)}`,callback_data:`admcamp_prod_${p.id}`}]);
+  kb.push([{text:'⬅️ Voltar',callback_data:'admin_campanhas'}]);
+  return tgBot.sendMessage(chatId,'📦 *ESCOLHA O PRODUTO*\n\nA foto, descrição, preço e botão de compra serão usados automaticamente.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function criarCampanhaProdutoTelegram(chatId,produtoId){
+  const p=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[produtoId]);
+  if(!p) return tgBot.sendMessage(chatId,'❌ Produto indisponível.');
+  const msg=textoProdutoCampanha(p);
+  const r=await run(`INSERT INTO campanhas_anuncios (nome,mensagem,imagem,produto_id,intervalo_horas,enviar_whatsapp,enviar_telegram,ativo,proximo_envio) VALUES (?,?,?,?,2,1,1,1,CURRENT_TIMESTAMP)`,[`Produto: ${p.nome_plano}`,msg,p.imagem||null,p.id]);
+  return tgBot.sendMessage(chatId,`✅ *CAMPANHA CRIADA E ATIVADA*\n\n📦 Produto: ${p.nome_plano}\n💰 Preço: ${brl(p.preco_revenda)}\n⏱ Intervalo: 2 horas\n📲 Canais: WhatsApp e Telegram\n🛒 Botão de compra: ativado no Telegram`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'🚀 Enviar agora',callback_data:`admcamp_agora_${r.lastID}`}],[{text:'📣 Campanhas',callback_data:'admin_campanhas'}]]}});
+}
+
+function tecladoFixoAdminTelegram() {
+  return {
+    keyboard: [[{ text: '🔐 Administração' }, { text: '🛒 Menu do cliente' }]],
+    resize_keyboard: true,
+    is_persistent: true
+  };
+}
+
 function adminTelegramKeyboard() {
   return { inline_keyboard: [
     [{ text: '📦 Produtos', callback_data: 'admin_produtos' }, { text: '📂 Categorias', callback_data: 'admin_categorias' }],
@@ -1909,14 +2001,19 @@ function adminTelegramKeyboard() {
     [{ text: '🌐 Abrir painel web', url: `${BASE_URL || ''}/admin` }]
   ] };
 }
-async function enviarPainelAdminTelegram(chatId) {
+async function enviarPainelAdminTelegram(chatId, mostrarAtalho = false) {
   const pend = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
   const clientes = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
   const estoque = await get('SELECT COUNT(*) qtd FROM esim_estoque WHERE status="DISPONIVEL"');
   const campanhas = await get('SELECT COUNT(*) qtd FROM campanhas_anuncios WHERE ativo=1');
-  return tgBot.sendMessage(chatId, `🔐 *PAINEL ADMINISTRATIVO*\n\n🏢 CentralUnlocker\n\n🟡 Pedidos pendentes: ${pend?.qtd || 0}\n👥 Clientes ativos: ${clientes?.qtd || 0}\n📥 QR Codes disponíveis: ${estoque?.qtd || 0}\n📣 Campanhas ativas: ${campanhas?.qtd || 0}\n\nSelecione uma opção:`, { parse_mode: 'Markdown', reply_markup: adminTelegramKeyboard() });
+  await tgBot.sendMessage(chatId, `🔐 *PAINEL ADMINISTRATIVO*\n\n🏢 CentralUnlocker\n\n🟡 Pedidos pendentes: ${pend?.qtd || 0}\n👥 Clientes ativos: ${clientes?.qtd || 0}\n📥 QR Codes disponíveis: ${estoque?.qtd || 0}\n📣 Campanhas ativas: ${campanhas?.qtd || 0}\n\nSelecione uma opção:`, { parse_mode: 'Markdown', reply_markup: adminTelegramKeyboard() });
+  if (mostrarAtalho) {
+    await tgBot.sendMessage(chatId, '✅ Use os botões abaixo para abrir a administração ou visualizar o menu do cliente.', { reply_markup: tecladoFixoAdminTelegram() });
+  }
 }
 async function responderBotaoAdminTelegram(chatId, data) {
+  if (data === 'admin_produtos') return enviarListaProdutosAdminTelegram(chatId);
+  if (data === 'admin_campanhas') return enviarMenuCampanhasTelegram(chatId);
   const voltar = [[{ text: '⬅️ Voltar ao painel', callback_data: 'admin_inicio' }]];
   if (data === 'admin_inicio') return enviarPainelAdminTelegram(chatId);
   const links = {
@@ -1955,6 +2052,10 @@ async function iniciarTelegram() {
   console.log('✅ BOT TELEGRAM INICIADO');
   tgBot.onText(/\/start/, async (msg) => {
     try {
+      if (String(msg.from?.id) === String(ADMIN_TELEGRAM_ID || '')) {
+        await enviarPainelAdminTelegram(msg.chat.id, true);
+        return;
+      }
       const { cliente, novo } = await cadastrarClienteTelegram(msg.from);
       if (novo) {
         const texto = `🎉 Bem-vindo à Centralunlocker
@@ -1999,12 +2100,21 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       const chatId = q.message?.chat?.id;
       const data = String(q.data || '');
       if (!chatId) return;
-      if (data.startsWith('admin_')) {
+      const ehBotaoAdmin = data.startsWith('admin_') || data.startsWith('admprod_') || data.startsWith('admcamp_');
+      if (ehBotaoAdmin) {
         if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
           await tgBot.answerCallbackQuery(q.id, { text: 'Apenas o administrador pode usar este painel.', show_alert: true });
           return;
         }
         await tgBot.answerCallbackQuery(q.id);
+        const adminKey=tgJid(q.from.id);
+        if(data==='admprod_novo'){ adminSessao.set(adminKey,{etapa:'produto_novo_nome'}); await tgBot.sendMessage(chatId,'➕ Digite o nome do novo produto:'); return; }
+        let m=data.match(/^admprod_(nome|preco|desc|foto|toggle)_(\d+)$/);
+        if(m){ const ac=m[1],id=Number(m[2]); if(ac==='toggle'){const p=await get('SELECT ativo FROM esim_planos WHERE id=?',[id]);await run('UPDATE esim_planos SET ativo=? WHERE id=?',[p?.ativo?0:1,id]);return mostrarProdutoAdminTelegram(chatId,id);} adminSessao.set(adminKey,{etapa:`produto_editar_${ac}`,produto_id:id}); const prompts={nome:'Digite o novo nome:',preco:'Digite o novo preço:',desc:'Digite a nova descrição:',foto:'Envie agora a foto do produto (imagem ou documento):'}; await tgBot.sendMessage(chatId,prompts[ac]); return;}
+        m=data.match(/^admprod_(\d+)$/); if(m){await mostrarProdutoAdminTelegram(chatId,Number(m[1]));return;}
+        if(data==='admcamp_escolher'){await escolherProdutoCampanhaTelegram(chatId);return;}
+        m=data.match(/^admcamp_prod_(\d+)$/); if(m){await criarCampanhaProdutoTelegram(chatId,Number(m[1]));return;}
+        m=data.match(/^admcamp_agora_(\d+)$/); if(m){const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[Number(m[1])]);if(!c)return tgBot.sendMessage(chatId,'❌ Campanha não encontrada.');await tgBot.sendMessage(chatId,'⏳ Enviando campanha...');const r=await enviarCampanhaAnuncio(c);await run('UPDATE campanhas_anuncios SET ultimo_envio=CURRENT_TIMESTAMP,total_envios=total_envios+1,ultima_enviadas=?,ultima_falhas=? WHERE id=?',[r.enviadas,r.falhas,c.id]);await tgBot.sendMessage(chatId,`✅ Envio concluído: ${r.enviadas}/${r.total}. Falhas: ${r.falhas}.`);return;}
         await responderBotaoAdminTelegram(chatId, data);
         return;
       }
