@@ -386,12 +386,17 @@ async function setConfig(chave, valor) { await run('INSERT OR REPLACE INTO confi
 
 
 const historicoIAWhatsApp = new Map();
+// Controla quais clientes estão em conversa exclusiva com a IA.
+// Enquanto a sessão estiver ativa, respostas curtas como "sim", "1" ou "2"
+// não são capturadas pelo menu tradicional.
+const sessoesIAWhatsApp = new Map();
 const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
 const IA_INSTRUCAO_PADRAO = `Você é a atendente virtual da CentralUnlocker e responde em português do Brasil.
 Seja educada, objetiva e profissional.
 Ajude com dúvidas gerais sobre eSIM, pedidos, serviços, pagamentos e uso do sistema.
 Nunca invente preços, prazos, disponibilidade, status de pedidos ou confirmação de pagamentos.
 Para comprar, pagar, consultar pedido ou abrir o menu, oriente o cliente a digitar "menu" e usar as opções do bot.
+Quando a mensagem vier após o menu mas não for uma opção válida, responda normalmente como atendente, sem dizer que houve erro no menu.
 Quando o cliente pedir atendimento humano, diga para digitar 6 no menu.
 Não peça senhas, códigos de verificação, dados bancários completos ou informações sensíveis.
 Responda em no máximo 5 parágrafos curtos.`;
@@ -405,11 +410,42 @@ async function configuracaoIAWhatsApp() {
   };
 }
 
-function mensagemPodeIrParaIA(texto, sessao) {
+function chaveIAWhatsApp(numero) {
+  return normalizarNumeroWhatsApp(numero);
+}
+function iaWhatsAppAtivaPara(numero) {
+  return sessoesIAWhatsApp.has(chaveIAWhatsApp(numero));
+}
+function ativarSessaoIAWhatsApp(numero) {
+  const chave = chaveIAWhatsApp(numero);
+  if (chave) sessoesIAWhatsApp.set(chave, { iniciadaEm: Date.now(), ultimaMensagem: Date.now() });
+}
+function encerrarSessaoIAWhatsApp(numero, limparHistorico=false) {
+  const chave = chaveIAWhatsApp(numero);
+  sessoesIAWhatsApp.delete(chave);
+  if (limparHistorico) historicoIAWhatsApp.delete(chave);
+}
+function comandoSaidaIAWhatsApp(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[!?.,;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  if (['menu', 'inicio', 'start', 'voltar ao menu', 'sair da ia'].includes(t)) return 'menu';
+  if (['comprar', 'comprar esim', 'quero comprar', 'esim', 'ver produtos'].includes(t)) return 'comprar';
+  if (['cancelar', 'sair', 'parar', 'encerrar'].includes(t)) return 'cancelar';
+  if (t === '6' || t.includes('falar com atendente') || t.includes('atendimento humano') || t === 'atendente' || t === 'suporte') return 'suporte';
+  return '';
+}
+function mensagemPodeIrParaIA(texto, sessao, numero='') {
   const t = String(texto || '').trim();
-  if (!t || t.length < 2 || /^\d+$/.test(t)) return false;
+  if (!t) return false;
+  // Em sessão exclusiva, inclusive números e respostas curtas vão para a IA.
+  if (numero && iaWhatsAppAtivaPara(numero)) return true;
+
   const etapa = String(sessao?.etapa || '');
-  return !etapa || ['menu', 'suporte'].includes(etapa);
+  // Regra híbrida: sem fluxo ou no menu principal, qualquer mensagem que não
+  // tenha sido reconhecida anteriormente pelo bot pode ser assumida pela IA.
+  // Isso inclui respostas curtas como "sim" e números fora das opções 1 a 6.
+  return !etapa || etapa === 'menu';
 }
 
 async function responderComOpenAIWhatsApp(numero, texto, cliente) {
@@ -452,8 +488,11 @@ async function responderComOpenAIWhatsApp(numero, texto, cliente) {
       console.log('⚠️ OPENAI RESPOSTA SEM TEXTO:', JSON.stringify({ status: data?.status, motivo, uso: data?.usage }));
       throw new Error(`A OpenAI não retornou texto (${motivo}).`);
     }
-    resposta = resposta.slice(0, 3500);
+    resposta = resposta.slice(0, 3200);
+    const rodape = '\n\nDigite *menu* para voltar, *comprar* para ver os eSIMs ou *atendente* para falar com uma pessoa.';
+    if (!/digite \*?menu\*?/i.test(resposta)) resposta += rodape;
 
+    ativarSessaoIAWhatsApp(numero);
     historicoIAWhatsApp.set(chave, [
       ...contexto,
       { role: 'user', content: String(texto).slice(0, 2500) },
@@ -1867,6 +1906,49 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
+  // Sessão exclusiva da IA: evita que respostas como "2", "sim" ou "não"
+  // sejam interpretadas pelo menu tradicional.
+  if (iaWhatsAppAtivaPara(numeroNorm)) {
+    const comandoIA = comandoSaidaIAWhatsApp(textoOriginal);
+    if (comandoIA === 'menu') {
+      encerrarSessaoIAWhatsApp(numeroNorm);
+      await apagarSessaoPedido(from);
+      await salvarSessaoPedido(from, { etapa: 'menu' });
+      await enviarMenuWhatsApp(from, cliente, false);
+      return;
+    }
+    if (comandoIA === 'comprar') {
+      encerrarSessaoIAWhatsApp(numeroNorm);
+      await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
+      await enviarListaEsim(from);
+      return;
+    }
+    if (comandoIA === 'suporte') {
+      encerrarSessaoIAWhatsApp(numeroNorm);
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '👨‍💻 Atendimento humano solicitado. Aguarde o retorno de um atendente.\n\nDigite *menu* quando quiser voltar às opções automáticas.');
+      notificarPainel('suporte', '🆘 Solicitação de suporte pela IA', `${cliente.nome} - +${numeroNorm}`);
+      await avisarAdminTelegram(`🆘 Solicitação de atendimento humano\n\nCliente: ${cliente.nome}\nWhatsApp: +${numeroNorm}`);
+      return;
+    }
+    if (comandoIA === 'cancelar') {
+      encerrarSessaoIAWhatsApp(numeroNorm, true);
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '✅ Conversa com a IA encerrada.\n\nDigite *menu* para abrir as opções novamente.');
+      return;
+    }
+
+    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+    if (ia.respondeu) {
+      await enviarTexto(from, ia.texto);
+      return;
+    }
+    // Em caso de falha da API, encerra a sessão para não prender o cliente.
+    encerrarSessaoIAWhatsApp(numeroNorm);
+    await enviarTexto(from, '⚠️ A assistente está temporariamente indisponível. Digite *menu* para usar as opções ou *atendente* para suporte humano.');
+    return;
+  }
+
   if (['cancelar', 'sair', 'voltar'].includes(lower)) {
     await apagarSessaoPedido(from);
     await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
@@ -1893,6 +1975,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   ];
 
   if (palavrasMenu.includes(comandoMenu)) {
+    encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
@@ -1969,7 +2052,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
   if (!sess) {
-    if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+    if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
       const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
       if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
     }
@@ -2024,11 +2107,13 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
 
-    if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+    // Nenhuma opção válida do menu foi reconhecida: a IA assume a conversa.
+    // Os números 1 a 6 continuam com prioridade e nunca chegam aqui.
+    if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
       const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
       if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
     }
-    await enviarTexto(from, '❌ Opção inválida. Digite um número de 1 a 6 ou escreva *menu*.');
+    await enviarTexto(from, '❌ Não consegui responder agora. Digite um número de 1 a 6, escreva *menu* ou tente novamente em instantes.');
     return;
   }
 
@@ -2105,7 +2190,7 @@ ${detalhesEntradas}
     return;
   }
 
-  if (mensagemPodeIrParaIA(textoOriginal, sess)) {
+  if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
     const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
     if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
   }
