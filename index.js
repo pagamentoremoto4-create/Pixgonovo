@@ -65,6 +65,21 @@ let whatsappSocket = null;
 let qrCodeBase64 = null;
 const whatsappJidPorNumero = new Map();
 let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
+let conectado = false;
+
+// Evita processar duas vezes a mesma mensagem recebida pelo Baileys.
+const mensagensWhatsAppProcessadas = new Map();
+function mensagemWhatsAppJaProcessada(id) {
+  const chave = String(id || '').trim();
+  if (!chave) return false;
+  const agora = Date.now();
+  for (const [msgId, horario] of mensagensWhatsAppProcessadas) {
+    if (agora - horario > 5 * 60 * 1000) mensagensWhatsAppProcessadas.delete(msgId);
+  }
+  if (mensagensWhatsAppProcessadas.has(chave)) return true;
+  mensagensWhatsAppProcessadas.set(chave, agora);
+  return false;
+}
 let whatsappNumeroConectado = '';
 let whatsappReconectarTimer = null;
 let whatsappIniciando = false;
@@ -441,7 +456,10 @@ function comandoSaidaIAWhatsApp(texto) {
   if (!t) return '';
   if (['menu', 'inicio', 'start', 'voltar ao menu', 'sair da ia'].includes(t)) return 'menu';
   if (['servicos', 'serviço', 'servico', 'contratar serviço', 'contratar servico', 'ver serviços', 'ver servicos'].includes(t)) return 'servicos';
-  if (['comprar', 'comprar esim', 'quero comprar', 'esim', 'ver produtos', 'catalogo', 'catálogo'].includes(t) || detectarIntencaoCompraIA(t)) return 'comprar';
+  // Só abre o catálogo de eSIM quando o cliente mencionar eSIM/produto/plano.
+  // Frases genéricas como "quero comprar" ou "quero pagar" precisam usar
+  // o contexto da conversa anterior para decidir entre serviço e produto.
+  if (['comprar esim', 'esim', 'ver produtos', 'catalogo', 'catálogo', 'ver planos', 'planos esim'].includes(t)) return 'comprar';
   if (['cancelar', 'sair', 'parar', 'encerrar'].includes(t)) return 'cancelar';
   if (t === '6' || t.includes('falar com atendente') || t.includes('atendimento humano') || t === 'atendente' || t === 'suporte') return 'suporte';
   return '';
@@ -535,6 +553,52 @@ async function montarContextoComercialIA() {
 function detectarIntencaoCompraIA(texto) {
   const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
   return /\b(quero comprar|quero esse|vou levar|pode fechar|pode fazer o pedido|como compro|como faco para comprar|como pagar|quero contratar|fechar pedido)\b/.test(t);
+}
+
+function normalizarBuscaComercial(valor) {
+  return String(valor || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function localizarUltimoItemComercialIA(numero) {
+  const chave = chaveIAWhatsApp(numero);
+  const historico = historicoIAWhatsApp.get(chave) || [];
+  const textoHistorico = normalizarBuscaComercial(historico.map(m => m?.content || '').join(' '));
+  if (!textoHistorico) return null;
+
+  const servicos = await all('SELECT * FROM servicos_catalogo WHERE COALESCE(ativo,1)=1 ORDER BY LENGTH(nome) DESC, id DESC');
+  for (const servico of servicos) {
+    const nome = normalizarBuscaComercial(servico.nome);
+    if (nome && textoHistorico.includes(nome)) return { tipo: 'servico', item: servico };
+  }
+
+  const produtos = await all('SELECT * FROM esim_planos WHERE COALESCE(ativo,1)=1 ORDER BY LENGTH(nome_plano) DESC, id DESC');
+  for (const produto of produtos) {
+    const nome = normalizarBuscaComercial(produto.nome_plano);
+    if (nome && textoHistorico.includes(nome)) return { tipo: 'produto', item: produto };
+  }
+  return null;
+}
+
+async function iniciarItemDoContextoIA(from, numeroNorm, cliente) {
+  const contexto = await localizarUltimoItemComercialIA(numeroNorm);
+  if (!contexto) return false;
+
+  encerrarSessaoIAWhatsApp(numeroNorm);
+  if (contexto.tipo === 'servico') {
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: contexto.item.id });
+    await enviarTexto(from, `🛠 *${contexto.item.nome}*\n💰 Valor: ${brl(await precoDaRevenda(cliente.id, contexto.item.id))}\n${contexto.item.prazo ? `⏳ Prazo: ${contexto.item.prazo}\n` : ''}\n${iconeEntradaServico(contexto.item)} Informe o ${labelEntradaServico(contexto.item)} para continuar:`);
+    return true;
+  }
+
+  const estoque = await get(`SELECT COUNT(*) AS qtd FROM esim_estoque WHERE nome_plano=? AND status='DISPONIVEL'`, [contexto.item.nome_plano]);
+  if (Number(estoque?.qtd || 0) < 1) {
+    await enviarTexto(from, `❌ O eSIM *${contexto.item.nome_plano}* está sem estoque no momento. Digite *comprar eSIM* para ver os planos disponíveis.`);
+    return true;
+  }
+  await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: contexto.item });
+  await enviarTexto(from, `📱 Confirmar eSIM\n\n📦 Plano: ${contexto.item.nome_plano}\n💰 Valor: ${brl(contexto.item.preco_cliente || contexto.item.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n\n1️⃣ ✅ Confirmar compra\n2️⃣ ❌ Cancelar\n0️⃣ ⬅️ Voltar`);
+  return true;
 }
 
 function mensagemPodeIrParaIA(texto, sessao, numero='') {
@@ -1806,9 +1870,20 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
     const planos = await planosEsimDisponiveis();
     const plano = planos[Number(opcao) - 1];
-    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Escolha um número da lista, digite *0* para voltar ou faça sua pergunta normalmente.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
     await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
+    return;
+  }
+
+  if (sess?.etapa === 'esim_escolha') {
+    // Uma pergunta em texto no meio do catálogo não deve virar "plano inválido".
+    // Suspende o fluxo rígido e deixa a IA responder normalmente.
+    await apagarSessaoPedido(from);
+    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+    if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+    await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
+    await enviarTexto(from, 'Não consegui responder agora. Digite o número do plano, *0* para voltar ou tente novamente.');
     return;
   }
 
@@ -1844,6 +1919,15 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
 
 0️⃣ ⬅️ Voltar`);
     }
+    return;
+  }
+
+  if (sess?.etapa === 'servico_escolha') {
+    await apagarSessaoPedido(from);
+    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
+    if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+    await salvarSessaoPedido(from, { etapa: 'servico_escolha' });
+    await enviarTexto(from, 'Não consegui responder agora. Digite o número do serviço, *0* para voltar ou tente novamente.');
     return;
   }
 
@@ -2022,6 +2106,11 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarMenuWhatsApp(from, cliente, false);
       return;
     }
+    if (detectarIntencaoCompraIA(textoOriginal) || /\b(quero pagar|pagar agora|pode gerar|vamos fechar)\b/i.test(textoOriginal)) {
+      if (await iniciarItemDoContextoIA(from, numeroNorm, cliente)) return;
+      // Sem item identificado, a IA continua a conversa e pergunta qual produto/serviço.
+    }
+
     if (comandoIA === 'comprar') {
       encerrarSessaoIAWhatsApp(numeroNorm);
       await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
@@ -4305,6 +4394,14 @@ async function iniciarWhatsAppQrCode() {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
           if (!jidPrincipal || msg?.key?.fromMe || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+
+          // O Baileys pode reenviar o mesmo evento durante sincronização/reconexão.
+          // Usa o ID nativo da mensagem para garantir uma única resposta do bot.
+          const idMensagem = msg?.key?.id || '';
+          if (mensagemWhatsAppJaProcessada(idMensagem)) {
+            console.log('↩️ WHATSAPP DUPLICADO IGNORADO:', idMensagem);
+            continue;
+          }
 
           // Em contas recentes o WhatsApp pode entregar o remetente como @lid.
           // Quando existir o JID telefônico alternativo, ele deve ser usado para cadastro e respostas.
