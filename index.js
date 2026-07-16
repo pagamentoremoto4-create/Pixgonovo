@@ -58,7 +58,11 @@ const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
-const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-session');
+const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-services-session');
+const WHATSAPP_SUPPORT_SESSION_DIR = process.env.WHATSAPP_SUPPORT_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-support-session');
+const WHATSAPP_ADS_SESSION_DIR = process.env.WHATSAPP_ADS_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-ads-session');
+const WHATSAPP_SUPPORT_ENABLED = String(process.env.WHATSAPP_SUPPORT_ENABLED || process.env.WHATSAPP_ENABLED || 'false').toLowerCase() === 'true';
+const WHATSAPP_ADS_ENABLED = String(process.env.WHATSAPP_ADS_ENABLED || process.env.WHATSAPP_ENABLED || 'false').toLowerCase() === 'true';
 
 // Atendimento automático por IA removido. O WhatsApp usa apenas os fluxos do sistema.
 let whatsappSocket = null;
@@ -66,6 +70,16 @@ let qrCodeBase64 = null;
 const whatsappJidPorNumero = new Map();
 let whatsappStatus = WHATSAPP_ENABLED ? 'INICIANDO' : 'DESABILITADO';
 let conectado = false;
+
+// Sessões independentes: suporte com IA, bot de serviços e anúncios em grupos.
+const whatsappExtra = {
+  support: { key: 'support', label: 'Suporte + IA', enabled: WHATSAPP_SUPPORT_ENABLED, sessionDir: WHATSAPP_SUPPORT_SESSION_DIR, socket: null, qr: null, status: WHATSAPP_SUPPORT_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null },
+  ads: { key: 'ads', label: 'Anúncios', enabled: WHATSAPP_ADS_ENABLED, sessionDir: WHATSAPP_ADS_SESSION_DIR, socket: null, qr: null, status: WHATSAPP_ADS_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null }
+};
+let campanhaAdsEmAndamento = false;
+let cancelarCampanhaAds = false;
+let progressoCampanhaAds = { status: 'PARADA', total: 0, enviados: 0, falhas: 0, grupoAtual: '', inicio: null, fim: null };
+const historicoIASuporte = new Map();
 
 // Evita processar duas vezes a mesma mensagem recebida pelo Baileys.
 const mensagensWhatsAppProcessadas = new Map();
@@ -433,6 +447,60 @@ async function configuracaoIAWhatsApp() {
     instrucao: await getConfig('ia_instrucao', IA_INSTRUCAO_PADRAO),
     maxTokens: Math.max(200, Math.min(1500, Number(await getConfig('ia_max_tokens', process.env.OPENAI_MAX_OUTPUT_TOKENS || '700')) || 300))
   };
+}
+
+const IA_SUPORTE_INSTRUCAO_PADRAO = `Você é a atendente de suporte da CentralUnlocker. Responda em português do Brasil, com mensagens curtas, claras e educadas.
+
+Sua função é tirar dúvidas, explicar produtos, serviços, preços, prazos e disponibilidade usando somente os DADOS COMERCIAIS ATUAIS fornecidos pelo sistema.
+
+REGRA PRINCIPAL: sempre que o cliente quiser comprar, contratar, pagar, gerar PIX, enviar IMEI, consultar saldo, fazer ou acompanhar pedido, direcione-o para o Bot de Serviços usando o link fornecido em cada atendimento. Você não cria pedidos, não recebe IMEI, não gera PIX, não altera saldo e não confirma pagamento.
+
+Nunca invente preço, prazo, estoque ou condição. Quando o cliente pedir atendimento humano, informe que a equipe continuará pelo mesmo WhatsApp.`;
+
+async function configuracaoIASuporte() {
+  return {
+    ativa: (await getConfig('ia_suporte_ativa', process.env.IA_SUPPORT_ENABLED === 'false' ? '0' : '1')) === '1',
+    modelo: await getConfig('ia_suporte_modelo', process.env.OPENAI_MODEL || 'gpt-5-mini'),
+    instrucao: await getConfig('ia_suporte_instrucao', IA_SUPORTE_INSTRUCAO_PADRAO),
+    maxTokens: Math.max(200, Math.min(1200, Number(await getConfig('ia_suporte_max_tokens', '600')) || 600)),
+    numeroBot: normalizarNumeroWhatsApp(await getConfig('whatsapp_bot_servicos_numero', process.env.WHATSAPP_BOT_SERVICOS || ''))
+  };
+}
+
+async function responderIASuporte(numero, texto, nome='Cliente') {
+  const cfg = await configuracaoIASuporte();
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (!cfg.ativa) return { respondeu: false, motivo: 'IA_DESATIVADA' };
+  if (!apiKey) return { respondeu: false, motivo: 'SEM_API_KEY' };
+  const chave = normalizarNumeroWhatsApp(numero);
+  const anterior = historicoIASuporte.get(chave) || [];
+  const contexto = anterior.slice(-8);
+  const linkBot = cfg.numeroBot ? `https://wa.me/${cfg.numeroBot}?text=${encodeURIComponent('Olá, quero acessar os serviços')}` : '';
+  try {
+    const resp = await axios.post(OPENAI_API_URL, {
+      model: cfg.modelo,
+      instructions: `${cfg.instrucao}
+
+Nome do cliente: ${nome}.
+LINK OFICIAL DO BOT DE SERVIÇOS: ${linkBot || 'não configurado no painel'}
+Ao direcionar, mostre o link puro em uma linha separada.
+
+${await montarContextoComercialIA()}`,
+      input: [...contexto, { role: 'user', content: String(texto).slice(0, 2500) }],
+      max_output_tokens: cfg.maxTokens,
+      reasoning: { effort: 'minimal' }, text: { verbosity: 'low' }, store: false
+    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+    const data = resp.data || {};
+    let resposta = String(data.output_text || '').trim();
+    if (!resposta && Array.isArray(data.output)) resposta = data.output.flatMap(o => Array.isArray(o.content) ? o.content : []).map(c => c?.text || '').filter(Boolean).join('\n').trim();
+    if (!resposta) throw new Error('A OpenAI não retornou texto.');
+    resposta = resposta.slice(0, 3200);
+    historicoIASuporte.set(chave, [...contexto, { role: 'user', content: String(texto).slice(0,2500) }, { role: 'assistant', content: resposta }].slice(-10));
+    return { respondeu: true, texto: resposta };
+  } catch (e) {
+    console.log('❌ OPENAI SUPORTE:', e?.response?.data?.error?.message || e.message);
+    return { respondeu: false, motivo: 'ERRO_IA' };
+  }
 }
 
 function chaveIAWhatsApp(numero) {
@@ -1046,7 +1114,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp (3 sessões)</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -4274,6 +4342,92 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
   ]).finally(() => clearTimeout(timer));
 }
 
+
+function emitirStatusExtra(sessao) {
+  io.emit(`whatsapp-${sessao.key}-status`, { status: sessao.status, numero: sessao.numero, erro: sessao.erro });
+}
+function agendarReconexaoExtra(key) {
+  const sessao = whatsappExtra[key];
+  if (!sessao || sessao.timer || !sessao.enabled) return;
+  sessao.timer = setTimeout(() => { sessao.timer = null; iniciarWhatsAppExtra(key).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message)); }, 5000);
+}
+async function processarMensagemSuporte({ numero, nome, texto, jid }) {
+  const sessao = whatsappExtra.support;
+  const cfg = await configuracaoIASuporte();
+  if (!cfg.ativa) return; // conectado, porém sem resposta automática.
+  const resultado = await responderIASuporte(numero, texto, nome);
+  if (resultado.respondeu && sessao.socket && sessao.conectado) await sessao.socket.sendMessage(jid || numberToJid(numero), { text: resultado.texto });
+}
+async function iniciarWhatsAppExtra(key) {
+  const sessao = whatsappExtra[key];
+  if (!sessao || !sessao.enabled || sessao.iniciando) return;
+  sessao.iniciando = true; sessao.status = 'INICIANDO'; sessao.erro = ''; emitirStatusExtra(sessao);
+  try {
+    fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
+    const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
+    const pino = pinoModule.default || pinoModule;
+    const makeWASocket = baileys.default || baileys.makeWASocket;
+    const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, `carregar sessão ${key}`);
+    sessao.socket = makeWASocket({ auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
+    sessao.socket.ev.on('creds.update', saveCreds);
+    sessao.socket.ev.on('connection.update', async update => {
+      const { connection, lastDisconnect, qr } = update || {};
+      if (qr) { sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 }); sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = ''; emitirStatusExtra(sessao); }
+      if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusExtra(sessao); }
+      if (connection === 'open') { sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = ''; sessao.numero = jidToNumber(sessao.socket?.user?.id || ''); emitirStatusExtra(sessao); notificarPainel('whatsapp', `✅ ${sessao.label} conectado`, sessao.numero || 'Sessão ativa'); }
+      if (connection === 'close') { sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO'; sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut) agendarReconexaoExtra(key); }
+    });
+    if (key === 'support') sessao.socket.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+      for (const msg of messages || []) {
+        try {
+          const jid = msg?.key?.remoteJid || ''; if (!jid || msg?.key?.fromMe || jid === 'status@broadcast' || jid.endsWith('@g.us')) continue;
+          const texto = textoMensagemBaileys(msg?.message || {}); const numero = normalizarNumeroWhatsApp(jidToNumber(msg?.key?.remoteJidAlt || jid)); if (!numero || !texto) continue;
+          await processarMensagemSuporte({ numero, nome: msg?.pushName || 'Cliente', texto, jid: (msg?.key?.remoteJidAlt || jid) });
+        } catch (e) { console.log('❌ MENSAGEM SUPORTE:', e.message); }
+      }
+    });
+    // A sessão de anúncios deliberadamente não registra messages.upsert.
+  } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null; emitirStatusExtra(sessao); console.log(`❌ INICIAR WHATSAPP ${key}:`, e.stack || e.message); }
+  finally { sessao.iniciando = false; }
+}
+async function desconectarWhatsAppExtra(key) {
+  const sessao = whatsappExtra[key]; if (!sessao) return;
+  try { if (sessao.socket) await sessao.socket.logout(); } catch (_) {}
+  if (sessao.timer) clearTimeout(sessao.timer);
+  sessao.timer = null; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
+  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); emitirStatusExtra(sessao);
+}
+async function listarGruposAnuncios() {
+  const sessao = whatsappExtra.ads;
+  if (!sessao.socket || !sessao.conectado) return [];
+  const grupos = await sessao.socket.groupFetchAllParticipating();
+  return Object.values(grupos || {}).map(g => ({ id: g.id, nome: g.subject || g.id, participantes: Array.isArray(g.participants) ? g.participants.length : 0 })).sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+function dormir(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+async function executarCampanhaAds({ grupoIds, texto, imagemBuffer, intervaloSegundos }) {
+  const sessao = whatsappExtra.ads;
+  if (!sessao.socket || !sessao.conectado) throw new Error('WhatsApp de anúncios não está conectado.');
+  if (campanhaAdsEmAndamento) throw new Error('Já existe uma campanha em andamento.');
+  campanhaAdsEmAndamento = true; cancelarCampanhaAds = false;
+  progressoCampanhaAds = { status: 'ENVIANDO', total: grupoIds.length, enviados: 0, falhas: 0, grupoAtual: '', inicio: new Date().toISOString(), fim: null };
+  try {
+    const grupos = await listarGruposAnuncios(); const nomes = new Map(grupos.map(g => [g.id, g.nome]));
+    for (let i=0; i<grupoIds.length; i++) {
+      if (cancelarCampanhaAds) { progressoCampanhaAds.status = 'CANCELADA'; break; }
+      const id = grupoIds[i]; progressoCampanhaAds.grupoAtual = nomes.get(id) || id;
+      try { const payload = imagemBuffer ? { image: imagemBuffer, caption: texto || '' } : { text: texto || '' }; await sessao.socket.sendMessage(id, payload); progressoCampanhaAds.enviados++; }
+      catch (e) { progressoCampanhaAds.falhas++; console.log('❌ CAMPANHA GRUPO:', id, e.message); }
+      io.emit('campanha-ads-progresso', progressoCampanhaAds);
+      if (i < grupoIds.length - 1 && !cancelarCampanhaAds) await dormir(intervaloSegundos * 1000);
+    }
+    if (progressoCampanhaAds.status !== 'CANCELADA') progressoCampanhaAds.status = 'CONCLUIDA';
+  } finally { progressoCampanhaAds.fim = new Date().toISOString(); progressoCampanhaAds.grupoAtual = ''; campanhaAdsEmAndamento = false; io.emit('campanha-ads-progresso', progressoCampanhaAds); }
+}
+
 function agendarReconexaoWhatsApp() {
   if (whatsappReconectarTimer || !WHATSAPP_ENABLED) return;
   whatsappReconectarTimer = setTimeout(() => {
@@ -5390,37 +5544,58 @@ app.get('/admin/financeiro', async (req, res) => { const revs = await all('SELEC
 app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo || 'diario'; const txt = await resumoPeriodo(tipo); const parts = txt.replace(/\*/g,'').split('\n').filter(Boolean); res.send(page('Relatórios', `<h1>📈 Relatórios</h1><div class="card"><a class="btn" href="/admin/relatorios?tipo=diario">Diário</a><a class="btn" href="/admin/relatorios?tipo=mensal">Mensal</a><a class="btn" href="/admin/relatorios?tipo=anual">Anual</a></div><div class="card"><pre style="white-space:pre-wrap;font-size:18px">${safeHtml(parts.join('\n'))}</pre></div>`)); });
 
 app.get('/admin/whatsapp', async (req, res) => {
-  const statusLabel = conectado ? '🟢 CONECTADO' : whatsappStatus === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO LEITURA DO QR CODE' : whatsappStatus === 'CONECTANDO' ? '🟡 CONECTANDO' : `🔴 ${safeHtml(whatsappStatus)}`;
-  const erroHtml = whatsappUltimoErro ? `<div class="card" style="border-color:#ef4444"><h3>⚠️ Detalhe do erro</h3><p>${safeHtml(whatsappUltimoErro)}</p><p class="mini-help">Confira também os Logs do Render.</p></div>` : '';
-  const qrHtml = qrCodeBase64
-    ? `<div style="text-align:center"><img src="${qrCodeBase64}" alt="QR Code do WhatsApp" style="width:min(360px,100%);background:#fff;padding:12px;border-radius:18px"><p class="mini-help">No celular: WhatsApp → Aparelhos conectados → Conectar um aparelho → escaneie este QR Code.</p></div>`
-    : conectado
-      ? `<div class="card"><h2>✅ WhatsApp conectado</h2><p><b>Número:</b> ${safeHtml(whatsappNumeroConectado || 'identificado pela sessão')}</p><p>A sessão será restaurada automaticamente depois de reiniciar, desde que a pasta persistente não seja apagada.</p></div>`
-      : `<div class="card"><p>O QR Code ainda está sendo preparado. Use o botão abaixo para iniciar ou atualizar a conexão.</p></div>`;
-  res.send(page('WhatsApp', `<h1>📲 Conexão do WhatsApp</h1><div class="grid"><div class="card metric"><h2>Status</h2><h1 style="font-size:22px">${statusLabel}</h1></div><div class="card metric"><h2>Provedor</h2><h1 style="font-size:22px">QR CODE DIRETO</h1></div></div>${erroHtml}<div class="card">${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/conectar"><button class="btn green">🔄 Gerar/Atualizar QR Code</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/desconectar"><button class="btn red" onclick="return confirm('Desconectar o WhatsApp e apagar a sessão?')">🔌 Desconectar</button></form></div><script>setTimeout(()=>location.reload(),5000)</script>`));
+  const iaServicos = await configuracaoIAWhatsApp();
+  const iaSuporte = await configuracaoIASuporte();
+  const cardSessao = (titulo, chave, status, conectadoSessao, numero, qr, erro, descricao) => {
+    const label = conectadoSessao ? '🟢 CONECTADO' : status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : `🔴 ${safeHtml(status)}`;
+    const qrHtml = qr ? `<div style="text-align:center"><img src="${qr}" style="width:min(300px,100%);background:#fff;padding:10px;border-radius:16px"><p class="mini-help">WhatsApp → Aparelhos conectados → Conectar aparelho.</p></div>` : conectadoSessao ? `<p><b>Número conectado:</b> +${safeHtml(numero || '')}</p>` : '<p class="muted">Clique em conectar para gerar o QR Code.</p>';
+    return `<div class="card"><h2>${titulo}</h2><p class="muted">${descricao}</p><h3>${label}</h3>${erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(erro)}</p>` : ''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${chave}/conectar"><button class="btn green">🔄 Conectar / Atualizar QR</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${chave}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form></div>`;
+  };
+  const support = whatsappExtra.support, ads = whatsappExtra.ads;
+  const botNumero = iaSuporte.numeroBot || whatsappNumeroConectado || '';
+  const cfgHtml = `<div class="card"><h2>⚙️ Funções das sessões</h2><form method="post" action="/admin/whatsapp/configurar"><label>IA do Suporte</label><select name="ia_suporte_ativa"><option value="1" ${iaSuporte.ativa?'selected':''}>Ativada</option><option value="0" ${!iaSuporte.ativa?'selected':''}>Desativada</option></select><label>IA do Bot de Serviços</label><select name="ia_servicos_ativa"><option value="1" ${iaServicos.ativa?'selected':''}>Ativada</option><option value="0" ${!iaServicos.ativa?'selected':''}>Desativada</option></select><label>Número do Bot de Serviços</label><input name="bot_servicos_numero" value="${safeHtml(botNumero)}" placeholder="5511999999999"><p class="mini-help">A IA do suporte usará este número para encaminhar compras, PIX, pedidos, saldo e eSIM.</p><button class="btn green">💾 Salvar configurações</button></form></div>`;
+  res.send(page('WhatsApp', `<h1>📲 WhatsApp — 3 sessões independentes</h1><div class="grid">${cardSessao('🛟 1. Suporte + IA','support',support.status,support.conectado,support.numero,support.qr,support.erro,'Atende dúvidas. Ao detectar compra ou pedido, direciona para o Bot de Serviços. A IA pode ser desligada sem desconectar o número.')}${cardSessao('🤖 2. Bot de Serviços','services',whatsappStatus,conectado,whatsappNumeroConectado,qrCodeBase64,whatsappUltimoErro,'Menu, eSIM, serviços, saldo, PIX, pedidos, histórico e integração com Telegram. IA independente.')}${cardSessao('📢 3. Anúncios em grupos','ads',ads.status,ads.conectado,ads.numero,ads.qr,ads.erro,'Não responde mensagens. Serve exclusivamente para campanhas em grupos autorizados.')}${cfgHtml}<div class="card"><h2>📣 Campanhas em grupos</h2><p><a class="btn green" href="/admin/whatsapp/anuncios">Abrir campanhas do WhatsApp</a></p></div></div><script>setTimeout(()=>location.reload(),7000)</script>`));
 });
-app.post('/admin/whatsapp/conectar', async (req, res) => {
-  if (!conectado) {
-    console.log('🔄 Reinício manual do WhatsApp solicitado pelo painel');
-    if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
-    try { if (whatsappSocket?.end) whatsappSocket.end(new Error('reinicio manual')); } catch (_) {}
-    whatsappSocket = null;
-    qrCodeBase64 = null;
-    whatsappStatus = 'INICIANDO';
-    await iniciarWhatsAppQrCode();
+app.post('/admin/whatsapp/configurar', async (req, res) => {
+  await setConfig('ia_suporte_ativa', String(req.body.ia_suporte_ativa || '0') === '1' ? '1' : '0');
+  await setConfig('ia_ativa', String(req.body.ia_servicos_ativa || '0') === '1' ? '1' : '0');
+  await setConfig('whatsapp_bot_servicos_numero', normalizarNumeroWhatsApp(req.body.bot_servicos_numero || ''));
+  historicoIASuporte.clear(); historicoIAWhatsApp.clear(); res.redirect('/admin/whatsapp');
+});
+app.post('/admin/whatsapp/:sessao/conectar', async (req, res) => {
+  const key = String(req.params.sessao || '');
+  if (key === 'services') {
+    if (!conectado) { if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; } try { if (whatsappSocket?.end) whatsappSocket.end(new Error('reinicio manual')); } catch (_) {} whatsappSocket = null; qrCodeBase64 = null; whatsappStatus = 'INICIANDO'; await iniciarWhatsAppQrCode(); }
+  } else if (whatsappExtra[key]) {
+    const sessao = whatsappExtra[key]; if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; } try { if (sessao.socket?.end) sessao.socket.end(new Error('reinicio manual')); } catch (_) {} sessao.socket = null; sessao.qr = null; sessao.status = 'INICIANDO'; await iniciarWhatsAppExtra(key);
   }
   res.redirect('/admin/whatsapp');
 });
-app.post('/admin/whatsapp/desconectar', async (req, res) => {
-  await desconectarWhatsApp();
-  res.redirect('/admin/whatsapp');
+app.post('/admin/whatsapp/:sessao/desconectar', async (req, res) => { const key = String(req.params.sessao || ''); if (key === 'services') await desconectarWhatsApp(); else if (whatsappExtra[key]) await desconectarWhatsAppExtra(key); res.redirect('/admin/whatsapp'); });
+
+app.get('/admin/whatsapp/anuncios', async (req, res) => {
+  let grupos = []; let erro = '';
+  try { grupos = await listarGruposAnuncios(); } catch (e) { erro = e.message; }
+  const checks = grupos.map(g => `<label style="display:block;padding:8px;border-bottom:1px solid #233"><input type="checkbox" name="grupos" value="${safeHtml(g.id)}" checked> <b>${safeHtml(g.nome)}</b> <span class="muted">(${g.participantes} participantes)</span></label>`).join('') || '<p>Nenhum grupo disponível. Conecte a sessão de anúncios e clique em atualizar.</p>';
+  res.send(page('Campanhas WhatsApp', `<h1>📢 Anunciar nos grupos do WhatsApp</h1>${erro?`<div class="card"><p style="color:#ef4444">${safeHtml(erro)}</p></div>`:''}<div class="grid"><div class="card"><h2>Nova campanha</h2><form method="post" action="/admin/whatsapp/anuncios/enviar"><label>Foto opcional</label><input id="adsFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="adsImage" type="hidden" name="imageData"><label>Legenda / mensagem</label><textarea name="texto" rows="12" maxlength="4000" placeholder="Digite o anúncio..."></textarea><label>Intervalo entre grupos (segundos)</label><input type="number" name="intervalo" min="5" max="120" value="7"><label><input type="checkbox" id="todos" checked onchange="document.querySelectorAll('[name=grupos]').forEach(x=>x.checked=this.checked)"> Selecionar todos os grupos</label><div style="max-height:420px;overflow:auto;border:1px solid #233;border-radius:10px">${checks}</div><br><button class="btn green" onclick="return confirm('Iniciar o envio para os grupos selecionados?')">🚀 Iniciar campanha</button></form><script>const f=document.getElementById('adsFile'),d=document.getElementById('adsImage');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file){d.value='';return;}const r=new FileReader();r.onload=()=>d.value=r.result;r.readAsDataURL(file);});</script></div><div class="card"><h2>Progresso</h2><p>Status: <b>${safeHtml(progressoCampanhaAds.status)}</b></p><p>Total: ${progressoCampanhaAds.total}<br>✅ Enviados: ${progressoCampanhaAds.enviados}<br>❌ Falhas: ${progressoCampanhaAds.falhas}</p>${progressoCampanhaAds.grupoAtual?`<p>Grupo atual: ${safeHtml(progressoCampanhaAds.grupoAtual)}</p>`:''}<form method="post" action="/admin/whatsapp/anuncios/cancelar"><button class="btn red" ${campanhaAdsEmAndamento?'':'disabled'}>⛔ Cancelar campanha</button></form><p><a class="btn" href="/admin/whatsapp/anuncios">🔄 Atualizar grupos/progresso</a></p><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar às sessões</a></p></div></div><script>setTimeout(()=>location.reload(),5000)</script>`));
 });
+app.post('/admin/whatsapp/anuncios/enviar', async (req, res) => {
+  try {
+    let grupos = req.body.grupos || []; if (!Array.isArray(grupos)) grupos = [grupos]; grupos = grupos.filter(x => String(x).endsWith('@g.us'));
+    const texto = String(req.body.texto || '').trim().slice(0,4000); const intervalo = Math.max(5, Math.min(120, Number(req.body.intervalo || 7)));
+    let imagemBuffer = null; const data = String(req.body.imageData || ''); const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i); if (m) imagemBuffer = Buffer.from(m[2], 'base64');
+    if (!grupos.length) throw new Error('Selecione pelo menos um grupo.'); if (!texto && !imagemBuffer) throw new Error('Digite uma mensagem ou escolha uma foto.');
+    executarCampanhaAds({ grupoIds: grupos, texto, imagemBuffer, intervaloSegundos: intervalo }).catch(e => { progressoCampanhaAds.status='ERRO'; progressoCampanhaAds.fim=new Date().toISOString(); console.log('❌ CAMPANHA ADS:', e.message); });
+    res.redirect('/admin/whatsapp/anuncios');
+  } catch (e) { res.send(page('Erro', `<h1>❌ Não foi possível iniciar</h1><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/whatsapp/anuncios">Voltar</a>`)); }
+});
+app.post('/admin/whatsapp/anuncios/cancelar', (req, res) => { cancelarCampanhaAds = true; res.redirect('/admin/whatsapp/anuncios'); });
 
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
   const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
   const iaCfg = await configuracaoIAWhatsApp();
-  const iaCard = `<div class="card"><h2>🤖 IA no WhatsApp</h2><p class="muted">A IA responde somente perguntas livres no WhatsApp e consulta automaticamente produtos, preços, categorias, estoque e campanhas ativas no banco. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
+  const iaCard = `<div class="card"><h2>🤖 IA do Bot de Serviços</h2><p class="muted">A IA responde somente perguntas livres no Bot de Serviços e consulta automaticamente produtos, preços, categorias, estoque e campanhas ativas no banco. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
   res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/ia', async (req, res) => {
@@ -5468,6 +5643,17 @@ app.post('/admin/backup/restaurar', async (req, res) => { const file = path.base
 
 cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) { console.log('❌ BACKUP AUTOMÁTICO:', e); } }, { timezone: 'America/Sao_Paulo' });
 
+// Migra automaticamente a sessão única das versões anteriores para a sessão do Bot de Serviços.
+try {
+  const legacySessionDir = path.join(DATA_DIR, 'whatsapp-session');
+  if (legacySessionDir !== WHATSAPP_SESSION_DIR && fs.existsSync(legacySessionDir) && !fs.existsSync(WHATSAPP_SESSION_DIR)) {
+    fs.cpSync(legacySessionDir, WHATSAPP_SESSION_DIR, { recursive: true });
+    console.log('✅ Sessão antiga migrada para o Bot de Serviços');
+  }
+} catch (e) { console.log('⚠️ Não foi possível migrar a sessão antiga:', e.message); }
+
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarTelegram();
-iniciarWhatsAppQrCode().catch(e => console.log('❌ WHATSAPP START:', e.message));
+iniciarWhatsAppQrCode().catch(e => console.log('❌ WHATSAPP SERVIÇOS START:', e.message));
+iniciarWhatsAppExtra('support').catch(e => console.log('❌ WHATSAPP SUPORTE START:', e.message));
+iniciarWhatsAppExtra('ads').catch(e => console.log('❌ WHATSAPP ANÚNCIOS START:', e.message));
