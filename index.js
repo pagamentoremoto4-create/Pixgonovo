@@ -805,6 +805,8 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
   await addColumnIfMissing('revendas', 'bot_ativo', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('revendas', 'perfil_bot', "TEXT DEFAULT 'NORMAL'");
+  await run("UPDATE revendas SET perfil_bot='NORMAL' WHERE perfil_bot IS NULL OR TRIM(perfil_bot)=''");
 
   await run(`CREATE TABLE IF NOT EXISTS whatsapp_vinculos (
     codigo TEXT PRIMARY KEY,
@@ -2105,6 +2107,10 @@ function extrairMensagemWhatsApp(body) {
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
 
+function clienteEhVip(cliente) {
+  return String(cliente?.perfil_bot || 'NORMAL').trim().toUpperCase() === 'VIP';
+}
+
 function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
   const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
   const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
@@ -2333,6 +2339,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
       if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
     }
+    // Perfil VIP: mensagens livres fora de um fluxo ativo são ignoradas em silêncio.
+    // Perfil NORMAL mantém o comportamento tradicional do menu rígido.
+    if (clienteEhVip(cliente)) {
+      console.log('👑 MENSAGEM FORA DO FLUXO IGNORADA (VIP):', numeroNorm, textoOriginal);
+      return;
+    }
     await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
     return;
   }
@@ -2470,6 +2482,12 @@ ${detalhesEntradas}
   if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
     const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
     if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
+  }
+  // A sessão de menu não é considerada um atendimento em andamento.
+  // Por isso, clientes VIP podem conversar normalmente sem receber aviso automático.
+  if (clienteEhVip(cliente)) {
+    console.log('👑 MENSAGEM FORA DO FLUXO IGNORADA (VIP):', numeroNorm, textoOriginal);
+    return;
   }
   await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
   return;
@@ -5216,13 +5234,13 @@ app.get('/admin/revendas', async (req, res) => {
     </form>
     <p class="muted">Clientes novos do WhatsApp são cadastrados automaticamente. Para recuperar o histórico antigo do Telegram, use o botão <b>Vincular ao Telegram</b> na conta criada pelo WhatsApp.</p>
   </div>
-  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Bot</th><th>Saldo</th><th>Ações</th></tr>`;
+  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Perfil</th><th>Bot</th><th>Saldo</th><th>Ações</th></tr>`;
   for (const r of rows) {
     const somenteWhatsApp = Boolean(r.whatsapp && !r.telegram_id);
     const vinculo = somenteWhatsApp ? `<a class="btn green" href="/admin/revenda/${r.id}/vincular-telegram">🔗 Vincular ao Telegram</a>` : '';
     const botAtivo = Number(r.bot_ativo || 0) === 1;
     const acaoBot = `<form class="forms-inline" method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${botAtivo ? 0 : 1}"><button class="btn ${botAtivo ? 'orange' : 'green'}">${botAtivo ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form>`;
-    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td><span class="pill">${botAtivo ? '🟢 Ativado' : '🔴 Desativado'}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}${acaoBot}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
+    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td><span class="pill">${clienteEhVip(r) ? '👑 VIP' : '👤 Normal'}</span></td><td><span class="pill">${botAtivo ? '🟢 Ativado' : '🔴 Desativado'}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}${acaoBot}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
   }
   html += '</table>';
   res.send(page('Clientes', html));
@@ -5365,6 +5383,7 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
+    <label>Perfil do cliente</label><select name="perfil_bot"><option value="NORMAL" ${!clienteEhVip(r)?'selected':''}>👤 Normal — responde opção inválida fora do fluxo</option><option value="VIP" ${clienteEhVip(r)?'selected':''}>👑 VIP — ignora mensagens fora do fluxo</option></select><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <div class="card"><b>Comunicação com o bot:</b> ${Number(r.bot_ativo || 0) === 1 ? '🟢 Ativada' : '🔴 Desativada'}<br><span class="muted">Ao ativar, a saudação e o menu são enviados imediatamente pelo WhatsApp.</span></div>
     <button class="btn green">Salvar cadastro</button>
@@ -5375,7 +5394,8 @@ app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
   const jid = telegramId ? tgJid(telegramId) : '';
   const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
-  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
+  const perfilBot = String(req.body.perfil_bot || 'NORMAL').toUpperCase() === 'VIP' ? 'VIP' : 'NORMAL';
+  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, perfil_bot=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), perfilBot, req.params.id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/precos', async (req, res) => {
