@@ -804,6 +804,7 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'telegram_id', 'TEXT');
   await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
+  await addColumnIfMissing('revendas', 'bot_ativo', 'INTEGER DEFAULT 0');
 
   await run(`CREATE TABLE IF NOT EXISTS whatsapp_vinculos (
     codigo TEXT PRIMARY KEY,
@@ -956,6 +957,15 @@ async function initDB() {
     valor TEXT,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Migração executada uma única vez: todos os clientes já cadastrados começam
+  // com a comunicação automática desativada nesta versão.
+  const migracaoBotClientes = await getConfig('migracao_bot_clientes_desativados_v65', '0');
+  if (migracaoBotClientes !== '1') {
+    await run('UPDATE revendas SET bot_ativo=0, atualizado_em=CURRENT_TIMESTAMP WHERE status != "REMOVIDA"');
+    await setConfig('migracao_bot_clientes_desativados_v65', '1');
+    console.log('✅ MIGRAÇÃO: comunicação do bot desativada para todos os clientes existentes');
+  }
 
   await run(`CREATE TABLE IF NOT EXISTS mensagens_envio (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2059,7 +2069,7 @@ async function cadastrarClienteWhatsApp(numero, nomeInformado='Cliente WhatsApp'
   const existe = await get('SELECT id FROM revendas WHERE login=?', [login]);
   if (existe) login = `${login}${Date.now().toString().slice(-3)}`;
   const senha = gerarSenha(8);
-  const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda, limite_credito) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, "PRE_PAGO", 0)', [nome, numeroNorm, jid, login, senha]);
+  const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda, limite_credito, bot_ativo) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, "PRE_PAGO", 0, 0)', [nome, numeroNorm, jid, login, senha]);
   cliente = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
   notificarPainel('cliente', '👤 Novo cliente WhatsApp', `${nome} - ${numeroNorm}`);
   await avisarAdminTelegram(`👤 Novo cliente cadastrado pelo WhatsApp\n\nNome: ${nome}\nWhatsApp: ${numeroNorm}\nUsuário: ${login}`);
@@ -2095,11 +2105,9 @@ function extrairMensagemWhatsApp(body) {
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
 
-function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0) {
+function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
   const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
-  const saudacao = primeiroAcesso ? `👋 Olá, *${nome}*!
-
-` : `👋 Olá, *${nome}*!
+  const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
 
 `;
   return `${saudacao}💰 Saldo: ${brl(cliente?.saldo || 0)}
@@ -2115,10 +2123,10 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0) {
 💬 Digite a opção desejada.`;
 }
 
-async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false) {
+async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false) {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE", "EM PROCESSO")', [cliente.id]);
   const atual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
-  return await enviarTexto(from, menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0)));
+  return await enviarTexto(from, menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0), semSaudacao));
 }
 
 async function processarMensagemWhatsApp({ numero, nome, texto }) {
@@ -2129,6 +2137,13 @@ async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const lower = textoOriginal.toLowerCase();
   const opcao = normalizarOpcaoTelegram(textoOriginal);
   const { cliente, novo } = await cadastrarClienteWhatsApp(numeroNorm, nome);
+
+  // Todo cliente novo ou ainda não liberado pelo administrador permanece em silêncio.
+  // O cadastro acontece normalmente, porém nenhuma mensagem, menu ou IA é enviada.
+  if (!Number(cliente?.bot_ativo || 0)) {
+    if (novo) console.log('🔇 CLIENTE CADASTRADO COM BOT DESATIVADO:', numeroNorm);
+    return;
+  }
 
   // Código de 6 dígitos gerado no Telegram: vincula as duas contas.
   if (/^\d{6}$/.test(textoOriginal)) {
@@ -2154,13 +2169,6 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
         return;
       }
     }
-  }
-
-  // Primeiro contato: cadastro silencioso e menu automático.
-  if (novo) {
-    await salvarSessaoPedido(from, { etapa: 'menu' });
-    await enviarMenuWhatsApp(from, cliente, true);
-    return;
   }
 
   // Sessão exclusiva da IA: evita que respostas como "2", "sim" ou "não"
@@ -5208,11 +5216,13 @@ app.get('/admin/revendas', async (req, res) => {
     </form>
     <p class="muted">Clientes novos do WhatsApp são cadastrados automaticamente. Para recuperar o histórico antigo do Telegram, use o botão <b>Vincular ao Telegram</b> na conta criada pelo WhatsApp.</p>
   </div>
-  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Saldo</th><th>Ações</th></tr>`;
+  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Bot</th><th>Saldo</th><th>Ações</th></tr>`;
   for (const r of rows) {
     const somenteWhatsApp = Boolean(r.whatsapp && !r.telegram_id);
     const vinculo = somenteWhatsApp ? `<a class="btn green" href="/admin/revenda/${r.id}/vincular-telegram">🔗 Vincular ao Telegram</a>` : '';
-    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
+    const botAtivo = Number(r.bot_ativo || 0) === 1;
+    const acaoBot = `<form class="forms-inline" method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${botAtivo ? 0 : 1}"><button class="btn ${botAtivo ? 'orange' : 'green'}">${botAtivo ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form>`;
+    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td><span class="pill">${botAtivo ? '🟢 Ativado' : '🔴 Desativado'}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}${acaoBot}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
   }
   html += '</table>';
   res.send(page('Clientes', html));
@@ -5274,6 +5284,37 @@ app.post('/admin/revenda/:id/boasvindas', async (req, res) => {
   if (r) await enviarBoasVindasTutorialRevenda(r);
   res.redirect('/admin/revendas');
 });
+app.post('/admin/revenda/:id/bot', async (req, res) => {
+  const ativar = Number(req.body.bot_ativo || 0) === 1 ? 1 : 0;
+  await run('UPDATE revendas SET bot_ativo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [ativar, req.params.id]);
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+
+  if (ativar && cliente?.whatsapp) {
+    const from = `wa:${normalizarNumeroWhatsApp(cliente.whatsapp)}`;
+    await apagarSessaoPedido(from);
+    await salvarSessaoPedido(from, { etapa: 'menu' });
+    await enviarTexto(from, `👋 Olá, *${String(cliente.nome || 'Cliente').trim()}*!
+
+Seja bem-vindo à *CentralUnlocker*.
+
+Como posso ajudar você hoje?
+
+Selecione uma das opções do menu abaixo:`);
+    await enviarMenuWhatsApp(from, cliente, false, true);
+    notificarPainel('cliente', '🤖 Bot ativado para cliente', `${cliente.nome} - ${cliente.whatsapp}`);
+  }
+
+  if (!ativar && cliente?.whatsapp) {
+    encerrarSessaoIAWhatsApp(normalizarNumeroWhatsApp(cliente.whatsapp), true);
+    await apagarSessaoPedido(`wa:${normalizarNumeroWhatsApp(cliente.whatsapp)}`);
+  }
+
+  const voltar = String(req.get('referer') || '').includes(`/admin/revenda/${req.params.id}/editar`)
+    ? `/admin/revenda/${req.params.id}/editar`
+    : '/admin/revendas';
+  res.redirect(voltar);
+});
+
 app.post('/admin/revenda/:id/status', async (req, res) => {
   await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]);
   const rStatus = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
@@ -5325,8 +5366,10 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
-    <button class="btn green">Salvar</button>
-  </form></div>`));
+    <div class="card"><b>Comunicação com o bot:</b> ${Number(r.bot_ativo || 0) === 1 ? '🟢 Ativada' : '🔴 Desativada'}<br><span class="muted">Ao ativar, a saudação e o menu são enviados imediatamente pelo WhatsApp.</span></div>
+    <button class="btn green">Salvar cadastro</button>
+  </form>
+  <form method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${Number(r.bot_ativo || 0) === 1 ? 0 : 1}"><button class="btn ${Number(r.bot_ativo || 0) === 1 ? 'orange' : 'green'}">${Number(r.bot_ativo || 0) === 1 ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form></div>`));
 });
 app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
