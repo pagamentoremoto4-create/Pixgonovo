@@ -2142,7 +2142,11 @@ async function processarMensagemWhatsApp({ numero, nome, texto }) {
   const textoOriginal = String(texto || '').trim();
   const lower = textoOriginal.toLowerCase();
   const opcao = normalizarOpcaoTelegram(textoOriginal);
-  const { cliente, novo } = await cadastrarClienteWhatsApp(numeroNorm, nome);
+  const cadastroWhatsApp = await cadastrarClienteWhatsApp(numeroNorm, nome);
+  const novo = cadastroWhatsApp.novo;
+  // Recarrega sempre o cadastro diretamente do banco para aplicar imediatamente
+  // mudanças de perfil (NORMAL/VIP) e ativação feitas pelo painel.
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [cadastroWhatsApp.cliente.id]) || cadastroWhatsApp.cliente;
 
   // Todo cliente novo ou ainda não liberado pelo administrador permanece em silêncio.
   // O cadastro acontece normalmente, porém nenhuma mensagem, menu ou IA é enviada.
@@ -2396,8 +2400,14 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
 
-    // Nenhuma opção válida do menu foi reconhecida: a IA assume a conversa.
-    // Os números 1 a 6 continuam com prioridade e nunca chegam aqui.
+    // Para o perfil VIP, a etapa "menu" não é considerada fluxo ativo.
+    // Portanto, qualquer texto que não seja uma opção válida é ignorado em silêncio.
+    if (clienteEhVip(cliente)) {
+      console.log('👑 MENSAGEM LIVRE NO MENU IGNORADA (VIP):', numeroNorm, textoOriginal);
+      return;
+    }
+
+    // Cliente NORMAL mantém o funcionamento atual e pode usar a IA antes do aviso.
     if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
       const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
       if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
@@ -5333,6 +5343,17 @@ Selecione uma das opções do menu abaixo:`);
   res.redirect(voltar);
 });
 
+app.post('/admin/revenda/:id/perfil-bot', async (req, res) => {
+  const perfilBot = String(req.body.perfil_bot || 'NORMAL').toUpperCase() === 'VIP' ? 'VIP' : 'NORMAL';
+  await run('UPDATE revendas SET perfil_bot=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [perfilBot, req.params.id]);
+  const cliente = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (cliente) notificarPainel('cliente', perfilBot === 'VIP' ? '👑 Cliente definido como VIP' : '👤 Cliente definido como Normal', `${cliente.nome} - ${cliente.whatsapp || cliente.telegram_id || ''}`);
+  const voltar = String(req.get('referer') || '').includes(`/admin/revenda/${req.params.id}/editar`)
+    ? `/admin/revenda/${req.params.id}/editar`
+    : '/admin/revendas';
+  res.redirect(voltar);
+});
+
 app.post('/admin/revenda/:id/status', async (req, res) => {
   await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]);
   const rStatus = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
@@ -5383,11 +5404,15 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
-    <label>Perfil do cliente</label><select name="perfil_bot"><option value="NORMAL" ${!clienteEhVip(r)?'selected':''}>👤 Normal — responde opção inválida fora do fluxo</option><option value="VIP" ${clienteEhVip(r)?'selected':''}>👑 VIP — ignora mensagens fora do fluxo</option></select><br><br>
+    <label>Perfil do cliente</label><select name="perfil_bot"><option value="NORMAL" ${!clienteEhVip(r)?'selected':''}>👤 Normal — responde opção inválida fora do fluxo</option><option value="VIP" ${clienteEhVip(r)?'selected':''}>👑 VIP — ignora mensagens fora do fluxo</option></select><br><span class="muted">Clique em Salvar cadastro para gravar as alterações deste formulário.</span><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <div class="card"><b>Comunicação com o bot:</b> ${Number(r.bot_ativo || 0) === 1 ? '🟢 Ativada' : '🔴 Desativada'}<br><span class="muted">Ao ativar, a saudação e o menu são enviados imediatamente pelo WhatsApp.</span></div>
     <button class="btn green">Salvar cadastro</button>
   </form>
+  <hr>
+  <b>Alteração rápida do perfil:</b><br><br>
+  <form class="forms-inline" method="post" action="/admin/revenda/${r.id}/perfil-bot"><input type="hidden" name="perfil_bot" value="VIP"><button class="btn ${clienteEhVip(r) ? 'green' : ''}">👑 Definir como VIP</button></form>
+  <form class="forms-inline" method="post" action="/admin/revenda/${r.id}/perfil-bot"><input type="hidden" name="perfil_bot" value="NORMAL"><button class="btn ${!clienteEhVip(r) ? 'green' : 'gray'}">👤 Definir como Normal</button></form><br><br>
   <form method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${Number(r.bot_ativo || 0) === 1 ? 0 : 1}"><button class="btn ${Number(r.bot_ativo || 0) === 1 ? 'orange' : 'green'}">${Number(r.bot_ativo || 0) === 1 ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form></div>`));
 });
 app.post('/admin/revenda/:id/editar', async (req, res) => {
