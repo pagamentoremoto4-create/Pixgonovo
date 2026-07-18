@@ -4381,6 +4381,22 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
   ]).finally(() => clearTimeout(timer));
 }
 
+function sessaoWhatsAppRegistrada(sessionDir) {
+  try {
+    const arquivoCredenciais = path.join(sessionDir, 'creds.json');
+    if (!fs.existsSync(arquivoCredenciais)) return false;
+    const credenciais = JSON.parse(fs.readFileSync(arquivoCredenciais, 'utf8'));
+    return credenciais?.registered === true;
+  } catch (e) {
+    console.log('⚠️ NÃO FOI POSSÍVEL VERIFICAR A SESSÃO:', sessionDir, e.message);
+    return false;
+  }
+}
+
+function paginaSessaoJaRegistrada(nomeSessao) {
+  return page('Sessão já registrada', `<h1>⚠️ Sessão já registrada</h1><p>O WhatsApp de <b>${safeHtml(nomeSessao)}</b> já possui credenciais salvas.</p><p>Para conectar outro número por código, volte ao painel e clique primeiro em <b>Desconectar</b>. Isso apaga a sessão antiga com segurança.</p><a class="btn" href="/admin/whatsapp">Voltar ao WhatsApp</a>`);
+}
+
 
 function emitirStatusExtra(sessao) {
   io.emit(`whatsapp-${sessao.key}-status`, { status: sessao.status, numero: sessao.numero, erro: sessao.erro, pairingCode: sessao.pairingCode, pairingNumero: sessao.pairingNumero });
@@ -5696,16 +5712,24 @@ app.post('/admin/whatsapp/:sessao/codigo', async (req, res) => {
   if (numero.length < 10 || numero.length > 15) return res.send(page('Número inválido', `<h1>❌ Número inválido</h1><p>Informe somente números, com DDI e DDD. Exemplo: 5511999999999.</p><a class="btn" href="/admin/whatsapp">Voltar</a>`));
   try {
     if (key === 'services') {
+      if (conectado || sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) {
+        return res.status(409).send(paginaSessaoJaRegistrada('Bot de Serviços'));
+      }
       if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
       try { if (whatsappSocket?.end) whatsappSocket.end(new Error('troca para código de pareamento')); } catch (_) {}
-      whatsappSocket = null; qrCodeBase64 = null; whatsappPairingCode = ''; whatsappStatus = 'INICIANDO';
+      whatsappSocket = null; qrCodeBase64 = null; whatsappPairingCode = ''; whatsappStatus = 'INICIANDO'; whatsappUltimoErro = '';
       await iniciarWhatsAppQrCode({ modo: 'codigo', numero });
     } else if (whatsappExtra[key]) {
       const sessao = whatsappExtra[key];
+      if (sessao.conectado || sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+        return res.status(409).send(paginaSessaoJaRegistrada(sessao.label));
+      }
       if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
       try { if (sessao.socket?.end) sessao.socket.end(new Error('troca para código de pareamento')); } catch (_) {}
-      sessao.socket = null; sessao.qr = null; sessao.pairingCode = ''; sessao.status = 'INICIANDO';
+      sessao.socket = null; sessao.qr = null; sessao.pairingCode = ''; sessao.status = 'INICIANDO'; sessao.erro = '';
       await iniciarWhatsAppExtra(key, { modo: 'codigo', numero });
+    } else {
+      return res.status(404).send(page('Sessão inválida', '<h1>❌ Sessão inválida</h1><a class="btn" href="/admin/whatsapp">Voltar</a>'));
     }
     res.redirect('/admin/whatsapp');
   } catch (e) {
