@@ -1013,6 +1013,38 @@ async function initDB() {
   await addColumnIfMissing('campanhas_anuncios', 'parar_sem_estoque', 'INTEGER DEFAULT 1');
   await addColumnIfMissing('campanhas_anuncios', 'ciclos_enviados', 'INTEGER DEFAULT 0');
 
+
+  await run(`CREATE TABLE IF NOT EXISTS campanhas_grupos_whatsapp (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    mensagem TEXT,
+    imagem TEXT,
+    grupos_json TEXT NOT NULL,
+    intervalo_min INTEGER DEFAULT 15,
+    intervalo_max INTEGER DEFAULT 30,
+    horario TEXT DEFAULT '09:00',
+    dias_semana TEXT DEFAULT '0,1,2,3,4,5,6',
+    ativo INTEGER DEFAULT 0,
+    proximo_envio TEXT,
+    ultimo_envio TEXT,
+    total_execucoes INTEGER DEFAULT 0,
+    ultima_enviadas INTEGER DEFAULT 0,
+    ultima_falhas INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS historico_campanhas_grupos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campanha_id INTEGER,
+    nome TEXT,
+    total INTEGER DEFAULT 0,
+    enviadas INTEGER DEFAULT 0,
+    falhas INTEGER DEFAULT 0,
+    status TEXT,
+    iniciado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    finalizado_em TEXT
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS categorias_produtos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL UNIQUE,
@@ -4509,6 +4541,69 @@ async function executarCampanhaAds({ grupoIds, texto, imagemBuffer, intervaloSeg
   } finally { progressoCampanhaAds.fim = new Date().toISOString(); progressoCampanhaAds.grupoAtual = ''; campanhaAdsEmAndamento = false; io.emit('campanha-ads-progresso', progressoCampanhaAds); }
 }
 
+
+const ADS_IMAGE_DIR = path.join(DATA_DIR, 'ads-images');
+try { fs.mkdirSync(ADS_IMAGE_DIR, { recursive: true }); } catch (_) {}
+function intervaloAleatorio(min, max) {
+  min = Math.max(5, Number(min || 15)); max = Math.max(min, Number(max || min));
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function proximoHorarioCampanha(horario, diasCsv) {
+  const [hh, mm] = String(horario || '09:00').split(':').map(Number);
+  const dias = new Set(String(diasCsv || '0,1,2,3,4,5,6').split(',').map(Number));
+  const agora = new Date();
+  for (let add=0; add<8; add++) {
+    const d = new Date(agora); d.setDate(d.getDate()+add); d.setHours(hh||0, mm||0, 0, 0);
+    if (dias.has(d.getDay()) && d.getTime() > agora.getTime()+30000) return d.toISOString();
+  }
+  const d = new Date(agora.getTime()+24*3600*1000); d.setHours(hh||0, mm||0, 0, 0); return d.toISOString();
+}
+async function executarCampanhaAdsAvancada(campanha, origem='agendada') {
+  let grupos=[]; try { grupos=JSON.parse(campanha.grupos_json||'[]'); } catch (_) {}
+  grupos=grupos.filter(x=>String(x).endsWith('@g.us'));
+  if (!grupos.length) throw new Error('A campanha não possui grupos selecionados.');
+  let imagemBuffer=null;
+  if (campanha.imagem && fs.existsSync(campanha.imagem)) imagemBuffer=fs.readFileSync(campanha.imagem);
+  const hist=await run(`INSERT INTO historico_campanhas_grupos (campanha_id,nome,total,status) VALUES (?,?,?,'ENVIANDO')`,[campanha.id,campanha.nome,grupos.length]);
+  const sessao=whatsappExtra.ads;
+  if (!sessao.socket || !sessao.conectado) {
+    await run(`UPDATE historico_campanhas_grupos SET status='ERRO: WHATSAPP DESCONECTADO',finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[hist.lastID]);
+    throw new Error('WhatsApp de anúncios não está conectado.');
+  }
+  if (campanhaAdsEmAndamento) throw new Error('Já existe uma campanha em andamento.');
+  campanhaAdsEmAndamento=true; cancelarCampanhaAds=false;
+  progressoCampanhaAds={status:'ENVIANDO',total:grupos.length,enviados:0,falhas:0,grupoAtual:'',inicio:new Date().toISOString(),fim:null,nome:campanha.nome};
+  try {
+    const disponiveis=await listarGruposAnuncios(); const nomes=new Map(disponiveis.map(g=>[g.id,g.nome]));
+    for(let i=0;i<grupos.length;i++){
+      if(cancelarCampanhaAds){progressoCampanhaAds.status='CANCELADA';break;}
+      const id=grupos[i]; progressoCampanhaAds.grupoAtual=nomes.get(id)||id;
+      try { await sessao.socket.sendMessage(id, imagemBuffer?{image:imagemBuffer,caption:campanha.mensagem||''}:{text:campanha.mensagem||''}); progressoCampanhaAds.enviados++; }
+      catch(e){ progressoCampanhaAds.falhas++; console.log('❌ CAMPANHA AUTOMÁTICA GRUPO:',id,e.message); }
+      io.emit('campanha-ads-progresso',progressoCampanhaAds);
+      if(i<grupos.length-1&&!cancelarCampanhaAds) await dormir(intervaloAleatorio(campanha.intervalo_min,campanha.intervalo_max)*1000);
+    }
+    if(progressoCampanhaAds.status!=='CANCELADA') progressoCampanhaAds.status='CONCLUIDA';
+  } finally {
+    progressoCampanhaAds.fim=new Date().toISOString(); progressoCampanhaAds.grupoAtual=''; campanhaAdsEmAndamento=false;
+    await run(`UPDATE historico_campanhas_grupos SET enviadas=?,falhas=?,status=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[progressoCampanhaAds.enviados,progressoCampanhaAds.falhas,progressoCampanhaAds.status,hist.lastID]);
+    if(campanha.id){
+      const prox=proximoHorarioCampanha(campanha.horario,campanha.dias_semana);
+      await run(`UPDATE campanhas_grupos_whatsapp SET ultimo_envio=CURRENT_TIMESTAMP,proximo_envio=?,total_execucoes=total_execucoes+1,ultima_enviadas=?,ultima_falhas=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[prox,progressoCampanhaAds.enviados,progressoCampanhaAds.falhas,campanha.id]);
+    }
+    io.emit('campanha-ads-progresso',progressoCampanhaAds);
+  }
+}
+let workerCampanhasGruposRodando=false;
+async function verificarCampanhasGruposAgendadas(){
+  if(workerCampanhasGruposRodando||campanhaAdsEmAndamento)return;
+  workerCampanhasGruposRodando=true;
+  try{
+    const c=await get(`SELECT * FROM campanhas_grupos_whatsapp WHERE ativo=1 AND proximo_envio IS NOT NULL AND datetime(proximo_envio)<=datetime('now') ORDER BY proximo_envio LIMIT 1`);
+    if(c) await executarCampanhaAdsAvancada(c,'agendada');
+  }catch(e){console.log('❌ WORKER CAMPANHAS GRUPOS:',e.message);}finally{workerCampanhasGruposRodando=false;}
+}
+
 function agendarReconexaoWhatsApp() {
   if (whatsappReconectarTimer || !WHATSAPP_ENABLED) return;
   whatsappReconectarTimer = setTimeout(() => {
@@ -5760,22 +5855,34 @@ app.post('/admin/whatsapp/:sessao/codigo', async (req, res) => {
 app.post('/admin/whatsapp/:sessao/desconectar', async (req, res) => { const key = String(req.params.sessao || ''); if (key === 'services') await desconectarWhatsApp(); else if (whatsappExtra[key]) await desconectarWhatsAppExtra(key); res.redirect('/admin/whatsapp'); });
 
 app.get('/admin/whatsapp/anuncios', async (req, res) => {
-  let grupos = []; let erro = '';
-  try { grupos = await listarGruposAnuncios(); } catch (e) { erro = e.message; }
-  const checks = grupos.map(g => `<label style="display:block;padding:8px;border-bottom:1px solid #233"><input type="checkbox" name="grupos" value="${safeHtml(g.id)}" checked> <b>${safeHtml(g.nome)}</b> <span class="muted">(${g.participantes} participantes)</span></label>`).join('') || '<p>Nenhum grupo disponível. Conecte a sessão de anúncios e clique em atualizar.</p>';
-  res.send(page('Campanhas WhatsApp', `<h1>📢 Anunciar nos grupos do WhatsApp</h1>${erro?`<div class="card"><p style="color:#ef4444">${safeHtml(erro)}</p></div>`:''}<div class="grid"><div class="card"><h2>Nova campanha</h2><form method="post" action="/admin/whatsapp/anuncios/enviar"><label>Foto opcional</label><input id="adsFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="adsImage" type="hidden" name="imageData"><label>Legenda / mensagem</label><textarea name="texto" rows="12" maxlength="4000" placeholder="Digite o anúncio..."></textarea><label>Intervalo entre grupos (segundos)</label><input type="number" name="intervalo" min="5" max="120" value="7"><label><input type="checkbox" id="todos" checked onchange="document.querySelectorAll('[name=grupos]').forEach(x=>x.checked=this.checked)"> Selecionar todos os grupos</label><div style="max-height:420px;overflow:auto;border:1px solid #233;border-radius:10px">${checks}</div><br><button class="btn green" onclick="return confirm('Iniciar o envio para os grupos selecionados?')">🚀 Iniciar campanha</button></form><script>const f=document.getElementById('adsFile'),d=document.getElementById('adsImage');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file){d.value='';return;}const r=new FileReader();r.onload=()=>d.value=r.result;r.readAsDataURL(file);});</script></div><div class="card"><h2>Progresso</h2><p>Status: <b>${safeHtml(progressoCampanhaAds.status)}</b></p><p>Total: ${progressoCampanhaAds.total}<br>✅ Enviados: ${progressoCampanhaAds.enviados}<br>❌ Falhas: ${progressoCampanhaAds.falhas}</p>${progressoCampanhaAds.grupoAtual?`<p>Grupo atual: ${safeHtml(progressoCampanhaAds.grupoAtual)}</p>`:''}<form method="post" action="/admin/whatsapp/anuncios/cancelar"><button class="btn red" ${campanhaAdsEmAndamento?'':'disabled'}>⛔ Cancelar campanha</button></form><p><a class="btn" href="/admin/whatsapp/anuncios">🔄 Atualizar grupos/progresso</a></p><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar às sessões</a></p></div></div>${campanhaAdsEmAndamento ? `<script>setTimeout(()=>location.reload(),5000)</script>` : ''}`));
+  let grupos=[]; let erro='';
+  try { grupos=await listarGruposAnuncios(); } catch(e){ erro=e.message; }
+  const salvas=await all(`SELECT * FROM campanhas_grupos_whatsapp ORDER BY id DESC`);
+  const historico=await all(`SELECT * FROM historico_campanhas_grupos ORDER BY id DESC LIMIT 20`);
+  const checks=grupos.map(g=>`<label style="display:block;padding:8px;border-bottom:1px solid #233"><input type="checkbox" name="grupos" value="${safeHtml(g.id)}" checked> <b>${safeHtml(g.nome)}</b> <span class="muted">(${g.participantes})</span></label>`).join('')||'<p>Nenhum grupo disponível. Conecte a sessão de anúncios.</p>';
+  const cards=salvas.map(c=>`<div class="card"><h3>${Number(c.ativo)?'🟢':'⏸️'} ${safeHtml(c.nome)}</h3><p>${safeHtml(String(c.mensagem||'').slice(0,180))}</p><p><b>Horário:</b> ${safeHtml(c.horario||'09:00')}<br><b>Intervalo:</b> ${c.intervalo_min}-${c.intervalo_max}s<br><b>Próximo:</b> ${safeHtml(c.proximo_envio||'não programado')}<br><b>Último:</b> ${c.ultima_enviadas||0} enviados / ${c.ultima_falhas||0} falhas</p><form class="forms-inline" method="post" action="/admin/whatsapp/anuncios/${c.id}/agora"><button class="btn green">📤 Enviar agora</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/anuncios/${c.id}/toggle"><button class="btn orange">${Number(c.ativo)?'⏸️ Pausar':'▶️ Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/anuncios/${c.id}/apagar"><button class="btn red" onclick="return confirm('Apagar campanha?')">🗑️ Apagar</button></form></div>`).join('')||'<div class="card"><p class="muted">Nenhum anúncio automático cadastrado.</p></div>';
+  const hist=historico.map(h=>`<tr><td>${safeHtml(h.iniciado_em||'')}</td><td>${safeHtml(h.nome||'')}</td><td>${h.enviadas||0}/${h.total||0}</td><td>${h.falhas||0}</td><td>${safeHtml(h.status||'')}</td></tr>`).join('')||'<tr><td colspan="5">Sem envios registrados.</td></tr>';
+  res.send(page('Campanhas WhatsApp',`<h1>📢 Anúncios automáticos em grupos</h1>${erro?`<div class="card"><p style="color:#ef4444">${safeHtml(erro)}</p></div>`:''}<div class="grid"><div class="card"><h2>➕ Novo anúncio automático</h2><form method="post" action="/admin/whatsapp/anuncios/salvar"><label>Nome</label><input name="nome" required placeholder="Ex.: eSIM Claro 100GB"><label>Foto opcional</label><input id="adsFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="adsImage" type="hidden" name="imageData"><img id="adsPreview" style="display:none;max-width:100%;max-height:260px;margin-top:10px;border-radius:10px"><label>Legenda / mensagem</label><textarea name="texto" rows="10" maxlength="4000"></textarea><div class="grid"><div><label>Intervalo mínimo</label><input type="number" name="intervalo_min" min="5" max="300" value="15"></div><div><label>Intervalo máximo</label><input type="number" name="intervalo_max" min="5" max="300" value="30"></div></div><label>Horário diário</label><input type="time" name="horario" value="09:00"><label>Dias da semana</label><div><label><input type="checkbox" name="dias" value="1" checked> Seg</label> <label><input type="checkbox" name="dias" value="2" checked> Ter</label> <label><input type="checkbox" name="dias" value="3" checked> Qua</label> <label><input type="checkbox" name="dias" value="4" checked> Qui</label> <label><input type="checkbox" name="dias" value="5" checked> Sex</label> <label><input type="checkbox" name="dias" value="6" checked> Sáb</label> <label><input type="checkbox" name="dias" value="0"> Dom</label></div><br><label><input type="checkbox" id="todos" checked onchange="document.querySelectorAll('[name=grupos]').forEach(x=>x.checked=this.checked)"> Selecionar todos</label><div style="max-height:360px;overflow:auto;border:1px solid #233;border-radius:10px">${checks}</div><br><label><input type="checkbox" name="ativo" value="1"> Ativar automaticamente após salvar</label><br><button class="btn green">💾 Salvar anúncio</button></form><script>const f=document.getElementById('adsFile'),d=document.getElementById('adsImage'),p=document.getElementById('adsPreview');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file){d.value='';p.style.display='none';return;}const r=new FileReader();r.onload=()=>{d.value=r.result;p.src=r.result;p.style.display='block'};r.readAsDataURL(file);});</script></div><div class="card"><h2>📤 Progresso</h2><p>Status: <b>${safeHtml(progressoCampanhaAds.status)}</b></p><p>Total: ${progressoCampanhaAds.total}<br>✅ Enviados: ${progressoCampanhaAds.enviados}<br>❌ Falhas: ${progressoCampanhaAds.falhas}</p>${progressoCampanhaAds.grupoAtual?`<p>Grupo atual: ${safeHtml(progressoCampanhaAds.grupoAtual)}</p>`:''}<form method="post" action="/admin/whatsapp/anuncios/cancelar"><button class="btn red" ${campanhaAdsEmAndamento?'':'disabled'}>⛔ Cancelar</button></form><p><a class="btn" href="/admin/whatsapp/anuncios">🔄 Atualizar</a></p></div></div><h2>📅 Anúncios programados</h2><div class="grid">${cards}</div><h2>🕘 Histórico</h2><div class="card"><table><tr><th>Data</th><th>Campanha</th><th>Enviados</th><th>Falhas</th><th>Status</th></tr>${hist}</table></div>${campanhaAdsEmAndamento?`<script>setTimeout(()=>location.reload(),5000)</script>`:''}`));
 });
-app.post('/admin/whatsapp/anuncios/enviar', async (req, res) => {
-  try {
-    let grupos = req.body.grupos || []; if (!Array.isArray(grupos)) grupos = [grupos]; grupos = grupos.filter(x => String(x).endsWith('@g.us'));
-    const texto = String(req.body.texto || '').trim().slice(0,4000); const intervalo = Math.max(5, Math.min(120, Number(req.body.intervalo || 7)));
-    let imagemBuffer = null; const data = String(req.body.imageData || ''); const m = data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i); if (m) imagemBuffer = Buffer.from(m[2], 'base64');
-    if (!grupos.length) throw new Error('Selecione pelo menos um grupo.'); if (!texto && !imagemBuffer) throw new Error('Digite uma mensagem ou escolha uma foto.');
-    executarCampanhaAds({ grupoIds: grupos, texto, imagemBuffer, intervaloSegundos: intervalo }).catch(e => { progressoCampanhaAds.status='ERRO'; progressoCampanhaAds.fim=new Date().toISOString(); console.log('❌ CAMPANHA ADS:', e.message); });
+app.post('/admin/whatsapp/anuncios/salvar', async (req,res)=>{
+  try{
+    let grupos=req.body.grupos||[]; if(!Array.isArray(grupos))grupos=[grupos]; grupos=grupos.filter(x=>String(x).endsWith('@g.us'));
+    let dias=req.body.dias||[]; if(!Array.isArray(dias))dias=[dias]; dias=dias.map(Number).filter(x=>x>=0&&x<=6);
+    const nome=String(req.body.nome||'').trim().slice(0,120), mensagem=String(req.body.texto||'').trim().slice(0,4000);
+    if(!nome||!grupos.length)throw new Error('Informe o nome e selecione pelo menos um grupo.');
+    let imagem=null; const data=String(req.body.imageData||''); const m=data.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
+    if(m){imagem=path.join(ADS_IMAGE_DIR,`campanha-${Date.now()}.${m[1].toLowerCase()==='jpeg'?'jpg':m[1].toLowerCase()}`);fs.writeFileSync(imagem,Buffer.from(m[2],'base64'));}
+    if(!mensagem&&!imagem)throw new Error('Digite uma mensagem ou escolha uma foto.');
+    const min=Math.max(5,Math.min(300,Number(req.body.intervalo_min||15))); const max=Math.max(min,Math.min(300,Number(req.body.intervalo_max||30)));
+    const horario=/^\d{2}:\d{2}$/.test(String(req.body.horario||''))?String(req.body.horario):'09:00'; const ativo=req.body.ativo?1:0; const ds=(dias.length?dias:[0,1,2,3,4,5,6]).join(','); const prox=ativo?proximoHorarioCampanha(horario,ds):null;
+    await run(`INSERT INTO campanhas_grupos_whatsapp (nome,mensagem,imagem,grupos_json,intervalo_min,intervalo_max,horario,dias_semana,ativo,proximo_envio) VALUES (?,?,?,?,?,?,?,?,?,?)`,[nome,mensagem,imagem,JSON.stringify(grupos),min,max,horario,ds,ativo,prox]);
     res.redirect('/admin/whatsapp/anuncios');
-  } catch (e) { res.send(page('Erro', `<h1>❌ Não foi possível iniciar</h1><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/whatsapp/anuncios">Voltar</a>`)); }
+  }catch(e){res.send(page('Erro',`<h1>❌ Não foi possível salvar</h1><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/whatsapp/anuncios">Voltar</a>`));}
 });
-app.post('/admin/whatsapp/anuncios/cancelar', (req, res) => { cancelarCampanhaAds = true; res.redirect('/admin/whatsapp/anuncios'); });
+app.post('/admin/whatsapp/anuncios/:id/toggle',async(req,res)=>{const c=await get('SELECT * FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);if(c){const ativo=Number(c.ativo)?0:1;await run('UPDATE campanhas_grupos_whatsapp SET ativo=?,proximo_envio=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[ativo,ativo?proximoHorarioCampanha(c.horario,c.dias_semana):c.proximo_envio,c.id]);}res.redirect('/admin/whatsapp/anuncios');});
+app.post('/admin/whatsapp/anuncios/:id/agora',async(req,res)=>{const c=await get('SELECT * FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);if(c)executarCampanhaAdsAvancada(c,'manual').catch(e=>console.log('❌ ENVIO AGORA:',e.message));res.redirect('/admin/whatsapp/anuncios');});
+app.post('/admin/whatsapp/anuncios/:id/apagar',async(req,res)=>{const c=await get('SELECT * FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);if(c?.imagem)try{fs.unlinkSync(c.imagem)}catch(_){}await run('DELETE FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);res.redirect('/admin/whatsapp/anuncios');});
+app.post('/admin/whatsapp/anuncios/cancelar',(req,res)=>{cancelarCampanhaAds=true;res.redirect('/admin/whatsapp/anuncios');});
 
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
@@ -5843,3 +5950,5 @@ iniciarTelegram();
 iniciarWhatsAppQrCode().catch(e => console.log('❌ WHATSAPP SERVIÇOS START:', e.message));
 iniciarWhatsAppExtra('support').catch(e => console.log('❌ WHATSAPP SUPORTE START:', e.message));
 iniciarWhatsAppExtra('ads').catch(e => console.log('❌ WHATSAPP ANÚNCIOS START:', e.message));
+setInterval(() => verificarCampanhasGruposAgendadas().catch(e => console.log('❌ AGENDADOR ADS:', e.message)), 60000);
+setTimeout(() => verificarCampanhasGruposAgendadas().catch(()=>{}), 15000);
