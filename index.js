@@ -2046,6 +2046,17 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
       criados.push({ id: ins.lastID, entrada });
     }
 
+    // Cliente pré-pago é marcado como cobrado no momento da criação.
+    // Portanto, o saldo também precisa ser debitado aqui. Antes, no fluxo do
+    // Telegram, cobrado=1 era salvo sem retirar o valor da carteira; ao finalizar,
+    // o sistema entendia que o pedido já estava pago e não descontava nada.
+    if (prePago && criados.length) {
+      await run(
+        'UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?',
+        [valor * criados.length, cliente.id]
+      );
+    }
+
     pedidoSessao.delete(from);
     if (!criados.length) { await enviarTexto(from, `⚠️ Nenhum pedido novo foi criado.${duplicados.length ? `\n\nJá estavam em andamento:\n${duplicados.join('\n')}` : ''}`); return; }
     if (criados.length === 1) {
@@ -4275,9 +4286,13 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
 
 async function finalizarPedido(pedido) {
   await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]);
-  if (pedido.tipo === 'REVENDA' && !pedido.cobrado && pedido.revenda_id) {
-    await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.valor, pedido.revenda_id]);
-    await run('UPDATE pedidos SET cobrado=1 WHERE id=?', [pedido.id]);
+  if (pedido.tipo === 'REVENDA' && pedido.revenda_id) {
+    // Reserva a cobrança de forma condicional. Assim, mesmo que o botão de
+    // finalizar seja acionado duas vezes, o saldo será debitado apenas uma vez.
+    const cobranca = await run('UPDATE pedidos SET cobrado=1 WHERE id=? AND COALESCE(cobrado,0)=0', [pedido.id]);
+    if (Number(cobranca?.changes || 0) > 0) {
+      await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [Number(pedido.valor || 0), pedido.revenda_id]);
+    }
   }
   const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
