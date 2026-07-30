@@ -4467,7 +4467,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   const sessao = whatsappExtra[key];
   if (!sessao || !sessao.enabled || sessao.iniciando) return;
   sessao.iniciando = true; sessao.status = 'INICIANDO'; sessao.erro = '';
-  sessao.connectionMode = opcoes.modo === 'codigo' ? 'codigo' : 'qr';
+  sessao.connectionMode = opcoes.modo === 'codigo' ? 'codigo' : (opcoes.modo === 'restaurar' ? 'restaurar' : 'qr');
   sessao.pairingNumero = normalizarNumeroWhatsApp(opcoes.numero || '');
   sessao.pairingCode = '';
   if (sessao.connectionMode === 'qr') sessao.qr = null;
@@ -4483,19 +4483,30 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
+    let codigoPareamentoSolicitado = false;
     socketAtual.ev.on('creds.update', saveCreds);
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
-      if (qr && sessao.connectionMode !== 'codigo') { sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 }); sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = ''; emitirStatusExtra(sessao); }
+      if (qr) {
+        if (sessao.connectionMode === 'codigo' && sessao.pairingNumero && !state.creds.registered && !codigoPareamentoSolicitado) {
+          codigoPareamentoSolicitado = true;
+          try {
+            const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(sessao.pairingNumero), 30000, `gerar código ${key}`);
+            sessao.pairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
+            sessao.qr = null; sessao.status = 'AGUARDANDO_CODIGO'; sessao.erro = ''; emitirStatusExtra(sessao);
+          } catch (e) {
+            codigoPareamentoSolicitado = false;
+            sessao.status = 'ERRO'; sessao.erro = e.message || String(e); emitirStatusExtra(sessao);
+          }
+        } else if (sessao.connectionMode !== 'codigo') {
+          sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+          sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = ''; emitirStatusExtra(sessao);
+        }
+      }
       if (connection === 'connecting') { sessao.status = sessao.pairingCode ? 'AGUARDANDO_CODIGO' : (sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'); emitirStatusExtra(sessao); }
       if (connection === 'open') { if (sessao.socket !== socketAtual) return; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = ''; sessao.numero = jidToNumber(socketAtual?.user?.id || ''); emitirStatusExtra(sessao); notificarPainel('whatsapp', `✅ ${sessao.label} conectado`, sessao.numero || 'Sessão ativa'); }
-      if (connection === 'close') { if (sessao.socket !== socketAtual) return; sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO'; sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut) agendarReconexaoExtra(key); }
+      if (connection === 'close') { if (sessao.socket !== socketAtual) return; sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO'; sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut && sessao.connectionMode !== 'qr' && sessao.connectionMode !== 'codigo') agendarReconexaoExtra(key); }
     });
-    if (sessao.connectionMode === 'codigo' && sessao.pairingNumero && !state.creds.registered) {
-      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, sessao.pairingNumero, `gerar código ${key}`);
-      sessao.pairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
-      sessao.qr = null; sessao.status = 'AGUARDANDO_CODIGO'; sessao.erro = ''; emitirStatusExtra(sessao);
-    }
     if (key === 'support') socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const msg of messages || []) {
@@ -4645,7 +4656,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
   }
 
   whatsappIniciando = true;
-  whatsappConnectionMode = opcoes.modo === 'codigo' ? 'codigo' : 'qr';
+  whatsappConnectionMode = opcoes.modo === 'codigo' ? 'codigo' : (opcoes.modo === 'restaurar' ? 'restaurar' : 'qr');
   whatsappPairingNumero = normalizarNumeroWhatsApp(opcoes.numero || '');
   whatsappPairingCode = '';
   if (whatsappConnectionMode === 'qr') qrCodeBase64 = null;
@@ -4695,19 +4706,35 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       retryRequestDelayMs: 500
     });
     whatsappSocket = socketAtual;
+    let codigoPareamentoSolicitado = false;
     console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
     socketAtual.ev.on('creds.update', saveCreds);
     socketAtual.ev.on('connection.update', async update => {
       try {
         const { connection, lastDisconnect, qr } = update || {};
-        if (qr && whatsappConnectionMode !== 'codigo') {
-          qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
-          conectado = false;
-          whatsappStatus = 'AGUARDANDO_QR';
-          whatsappUltimoErro = '';
-          console.log('📷 QR Code do WhatsApp gerado');
-          io.emit('whatsapp-status', { status: whatsappStatus });
+        if (qr) {
+          if (whatsappConnectionMode === 'codigo' && whatsappPairingNumero && !state.creds.registered && !codigoPareamentoSolicitado) {
+            codigoPareamentoSolicitado = true;
+            try {
+              const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(whatsappPairingNumero), 30000, 'gerar código de pareamento');
+              whatsappPairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
+              qrCodeBase64 = null; whatsappStatus = 'AGUARDANDO_CODIGO'; whatsappUltimoErro = '';
+              console.log('🔢 Código de pareamento gerado após referência válida do WhatsApp');
+              io.emit('whatsapp-status', { status: whatsappStatus, pairingCode: whatsappPairingCode, pairingNumero: whatsappPairingNumero });
+            } catch (e) {
+              codigoPareamentoSolicitado = false;
+              whatsappStatus = 'ERRO'; whatsappUltimoErro = e.message || String(e);
+              io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
+            }
+          } else if (whatsappConnectionMode !== 'codigo') {
+            qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+            conectado = false;
+            whatsappStatus = 'AGUARDANDO_QR';
+            whatsappUltimoErro = '';
+            console.log('📷 QR Code do WhatsApp gerado');
+            io.emit('whatsapp-status', { status: whatsappStatus });
+          }
         }
         if (connection === 'connecting') {
           whatsappStatus = whatsappPairingCode ? 'AGUARDANDO_CODIGO' : (qrCodeBase64 ? 'AGUARDANDO_QR' : 'CONECTANDO');
@@ -4738,7 +4765,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           whatsappUltimoErro = motivo;
           console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
           io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-          if (!loggedOut) agendarReconexaoWhatsApp();
+          if (!loggedOut && whatsappConnectionMode !== 'qr' && whatsappConnectionMode !== 'codigo') agendarReconexaoWhatsApp();
         }
       } catch (eventError) {
         whatsappUltimoErro = eventError.message;
@@ -4747,12 +4774,6 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       }
     });
 
-    if (whatsappConnectionMode === 'codigo' && whatsappPairingNumero && !state.creds.registered) {
-      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, whatsappPairingNumero, 'gerar código de pareamento');
-      whatsappPairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
-      qrCodeBase64 = null; whatsappStatus = 'AGUARDANDO_CODIGO'; whatsappUltimoErro = '';
-      io.emit('whatsapp-status', { status: whatsappStatus, pairingCode: whatsappPairingCode, pairingNumero: whatsappPairingNumero });
-    }
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
@@ -6062,8 +6083,11 @@ try {
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarTelegram();
-iniciarWhatsAppQrCode().catch(e => console.log('❌ WHATSAPP SERVIÇOS START:', e.message));
-iniciarWhatsAppExtra('support').catch(e => console.log('❌ WHATSAPP SUPORTE START:', e.message));
-iniciarWhatsAppExtra('ads').catch(e => console.log('❌ WHATSAPP ANÚNCIOS START:', e.message));
+if (sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ WHATSAPP SERVIÇOS START:', e.message));
+else { whatsappStatus = 'DESCONECTADO'; console.log('ℹ️ WhatsApp Serviços aguardando conexão manual pelo painel.'); }
+if (sessaoWhatsAppRegistrada(whatsappExtra.support.sessionDir)) iniciarWhatsAppExtra('support', { modo: 'restaurar' }).catch(e => console.log('❌ WHATSAPP SUPORTE START:', e.message));
+else { whatsappExtra.support.status = 'DESCONECTADO'; console.log('ℹ️ WhatsApp Suporte aguardando conexão manual pelo painel.'); }
+if (sessaoWhatsAppRegistrada(whatsappExtra.ads.sessionDir)) iniciarWhatsAppExtra('ads', { modo: 'restaurar' }).catch(e => console.log('❌ WHATSAPP ANÚNCIOS START:', e.message));
+else { whatsappExtra.ads.status = 'DESCONECTADO'; console.log('ℹ️ WhatsApp Anúncios aguardando conexão manual pelo painel.'); }
 setInterval(() => verificarCampanhasGruposAgendadas().catch(e => console.log('❌ AGENDADOR ADS:', e.message)), 60000);
 setTimeout(() => verificarCampanhasGruposAgendadas().catch(()=>{}), 15000);
