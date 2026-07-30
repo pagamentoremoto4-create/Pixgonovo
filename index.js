@@ -4492,7 +4492,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       if (connection === 'close') { if (sessao.socket !== socketAtual) return; sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO'; sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut) agendarReconexaoExtra(key); }
     });
     if (sessao.connectionMode === 'codigo' && sessao.pairingNumero && !state.creds.registered) {
-      const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(sessao.pairingNumero), 30000, `gerar código ${key}`);
+      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, sessao.pairingNumero, `gerar código ${key}`);
       sessao.pairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
       sessao.qr = null; sessao.status = 'AGUARDANDO_CODIGO'; sessao.erro = ''; emitirStatusExtra(sessao);
     }
@@ -4524,6 +4524,28 @@ async function listarGruposAnuncios() {
   return Object.values(grupos || {}).map(g => ({ id: g.id, nome: g.subject || g.id, participantes: Array.isArray(g.participants) ? g.participants.length : 0 })).sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 }
 function dormir(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+async function solicitarCodigoPareamentoComRetry(socketAtual, numero, descricao = 'gerar código de pareamento') {
+  let ultimoErro = null;
+  // O Baileys pode criar o socket antes do WebSocket estar pronto para receber requestPairingCode.
+  // Aguarda a negociação inicial e tenta novamente em fechamentos prematuros.
+  await dormir(1800);
+  for (let tentativa = 1; tentativa <= 4; tentativa++) {
+    try {
+      if (!socketAtual) throw new Error('Socket do WhatsApp não disponível');
+      const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(numero), 30000, `${descricao} (tentativa ${tentativa})`);
+      if (codigo) return codigo;
+      throw new Error('WhatsApp não retornou o código de pareamento');
+    } catch (e) {
+      ultimoErro = e;
+      const mensagem = String(e?.message || e || '');
+      console.log(`⚠️ ${descricao.toUpperCase()} — tentativa ${tentativa}/4:`, mensagem);
+      if (tentativa < 4) await dormir(1500 * tentativa);
+    }
+  }
+  throw ultimoErro || new Error('Não foi possível gerar o código de pareamento');
+}
+
 async function executarCampanhaAds({ grupoIds, texto, imagemBuffer, intervaloSegundos }) {
   const sessao = whatsappExtra.ads;
   if (!sessao.socket || !sessao.conectado) throw new Error('WhatsApp de anúncios não está conectado.');
@@ -4726,7 +4748,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     });
 
     if (whatsappConnectionMode === 'codigo' && whatsappPairingNumero && !state.creds.registered) {
-      const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(whatsappPairingNumero), 30000, 'gerar código de pareamento');
+      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, whatsappPairingNumero, 'gerar código de pareamento');
       whatsappPairingCode = String(codigo || '').match(/.{1,4}/g)?.join('-') || String(codigo || '');
       qrCodeBase64 = null; whatsappStatus = 'AGUARDANDO_CODIGO'; whatsappUltimoErro = '';
       io.emit('whatsapp-status', { status: whatsappStatus, pairingCode: whatsappPairingCode, pairingNumero: whatsappPairingNumero });
@@ -5855,9 +5877,26 @@ app.post('/admin/whatsapp/configurar', async (req, res) => {
 app.post('/admin/whatsapp/:sessao/conectar', async (req, res) => {
   const key = String(req.params.sessao || '');
   if (key === 'services') {
-    if (!conectado) { if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; } try { if (whatsappSocket?.end) whatsappSocket.end(new Error('reinicio manual')); } catch (_) {} whatsappSocket = null; qrCodeBase64 = null; whatsappStatus = 'INICIANDO'; await iniciarWhatsAppQrCode({ modo: 'qr' }); }
+    if (!conectado) {
+      if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
+      const socketAntigo = whatsappSocket; whatsappSocket = null;
+      try { if (socketAntigo?.end) socketAntigo.end(new Error('novo pareamento por QR')); } catch (_) {}
+      await dormir(500);
+      try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
+      fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+      qrCodeBase64 = null; whatsappPairingCode = ''; whatsappPairingNumero = ''; whatsappStatus = 'INICIANDO'; whatsappUltimoErro = '';
+      await iniciarWhatsAppQrCode({ modo: 'qr' });
+    }
   } else if (whatsappExtra[key]) {
-    const sessao = whatsappExtra[key]; if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; } try { if (sessao.socket?.end) sessao.socket.end(new Error('reinicio manual')); } catch (_) {} sessao.socket = null; sessao.qr = null; sessao.pairingCode = ''; sessao.status = 'INICIANDO'; await iniciarWhatsAppExtra(key, { modo: 'qr' });
+    const sessao = whatsappExtra[key];
+    if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+    const socketAntigo = sessao.socket; sessao.socket = null;
+    try { if (socketAntigo?.end) socketAntigo.end(new Error('novo pareamento por QR')); } catch (_) {}
+    await dormir(500);
+    try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
+    fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'INICIANDO'; sessao.erro = '';
+    await iniciarWhatsAppExtra(key, { modo: 'qr' });
   }
   res.redirect('/admin/whatsapp');
 });
@@ -5867,23 +5906,29 @@ app.post('/admin/whatsapp/:sessao/codigo', async (req, res) => {
   if (numero.length < 10 || numero.length > 15) return res.send(page('Número inválido', `<h1>❌ Número inválido</h1><p>Informe somente números, com DDI e DDD. Exemplo: 5511999999999.</p><a class="btn" href="/admin/whatsapp">Voltar</a>`));
   try {
     if (key === 'services') {
-      if (conectado || sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) {
+      if (conectado) {
         return res.status(409).send(paginaSessaoJaRegistrada('Bot de Serviços'));
       }
       if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
       const socketAntigo = whatsappSocket; whatsappSocket = null;
       try { if (socketAntigo?.end) socketAntigo.end(new Error('troca para código de pareamento')); } catch (_) {}
-      await dormir(350); qrCodeBase64 = null; whatsappPairingCode = ''; whatsappStatus = 'INICIANDO'; whatsappUltimoErro = '';
+      await dormir(500);
+      try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
+      fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+      qrCodeBase64 = null; whatsappPairingCode = ''; whatsappStatus = 'INICIANDO'; whatsappUltimoErro = '';
       await iniciarWhatsAppQrCode({ modo: 'codigo', numero });
     } else if (whatsappExtra[key]) {
       const sessao = whatsappExtra[key];
-      if (sessao.conectado || sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+      if (sessao.conectado) {
         return res.status(409).send(paginaSessaoJaRegistrada(sessao.label));
       }
       if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
       const socketAntigo = sessao.socket; sessao.socket = null;
       try { if (socketAntigo?.end) socketAntigo.end(new Error('troca para código de pareamento')); } catch (_) {}
-      await dormir(350); sessao.qr = null; sessao.pairingCode = ''; sessao.status = 'INICIANDO'; sessao.erro = '';
+      await dormir(500);
+      try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
+      fs.mkdirSync(sessao.sessionDir, { recursive: true });
+      sessao.qr = null; sessao.pairingCode = ''; sessao.status = 'INICIANDO'; sessao.erro = '';
       await iniciarWhatsAppExtra(key, { modo: 'codigo', numero });
     } else {
       return res.status(404).send(page('Sessão inválida', '<h1>❌ Sessão inválida</h1><a class="btn" href="/admin/whatsapp">Voltar</a>'));
