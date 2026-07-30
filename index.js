@@ -5802,7 +5802,49 @@ app.get('/admin/whatsapp', async (req, res) => {
   const support = whatsappExtra.support, ads = whatsappExtra.ads;
   const botNumero = iaSuporte.numeroBot || whatsappNumeroConectado || '';
   const cfgHtml = `<div class="card"><h2>⚙️ Funções das sessões</h2><form method="post" action="/admin/whatsapp/configurar"><label>IA do Suporte</label><select name="ia_suporte_ativa"><option value="1" ${iaSuporte.ativa?'selected':''}>Ativada</option><option value="0" ${!iaSuporte.ativa?'selected':''}>Desativada</option></select><label>IA do Bot de Serviços</label><select name="ia_servicos_ativa"><option value="1" ${iaServicos.ativa?'selected':''}>Ativada</option><option value="0" ${!iaServicos.ativa?'selected':''}>Desativada</option></select><label>Número do Bot de Serviços</label><input name="bot_servicos_numero" value="${safeHtml(botNumero)}" placeholder="5511999999999"><p class="mini-help">A IA do suporte usará este número para encaminhar compras, PIX, pedidos, saldo e eSIM.</p><button class="btn green">💾 Salvar configurações</button></form></div>`;
-  res.send(page('WhatsApp', `<h1>📲 WhatsApp — 3 sessões independentes</h1><div class="grid">${cardSessao('🛟 1. Suporte + IA','support',support.status,support.conectado,support.numero,support.qr,support.erro,'Atende dúvidas. Ao detectar compra ou pedido, direciona para o Bot de Serviços. A IA pode ser desligada sem desconectar o número.',support.pairingCode,support.pairingNumero)}${cardSessao('🤖 2. Bot de Serviços','services',whatsappStatus,conectado,whatsappNumeroConectado,qrCodeBase64,whatsappUltimoErro,'Menu, eSIM, serviços, saldo, PIX, pedidos, histórico e integração com Telegram. IA independente.',whatsappPairingCode,whatsappPairingNumero)}${cardSessao('📢 3. Anúncios em grupos','ads',ads.status,ads.conectado,ads.numero,ads.qr,ads.erro,'Não responde mensagens. Serve exclusivamente para campanhas em grupos autorizados.',ads.pairingCode,ads.pairingNumero)}${cfgHtml}<div class="card"><h2>📣 Campanhas em grupos</h2><p><a class="btn green" href="/admin/whatsapp/anuncios">Abrir campanhas do WhatsApp</a></p></div></div><script>setTimeout(()=>location.reload(),7000)</script>`));
+  res.send(page('WhatsApp', `<h1>📲 WhatsApp — 3 sessões independentes</h1><div class="grid">${cardSessao('🛟 1. Suporte + IA','support',support.status,support.conectado,support.numero,support.qr,support.erro,'Atende dúvidas. Ao detectar compra ou pedido, direciona para o Bot de Serviços. A IA pode ser desligada sem desconectar o número.',support.pairingCode,support.pairingNumero)}${cardSessao('🤖 2. Bot de Serviços','services',whatsappStatus,conectado,whatsappNumeroConectado,qrCodeBase64,whatsappUltimoErro,'Menu, eSIM, serviços, saldo, PIX, pedidos, histórico e integração com Telegram. IA independente.',whatsappPairingCode,whatsappPairingNumero)}${cardSessao('📢 3. Anúncios em grupos','ads',ads.status,ads.conectado,ads.numero,ads.qr,ads.erro,'Não responde mensagens. Serve exclusivamente para campanhas em grupos autorizados.',ads.pairingCode,ads.pairingNumero)}${cfgHtml}<div class="card"><h2>📣 Campanhas em grupos</h2><p><a class="btn green" href="/admin/whatsapp/anuncios">Abrir campanhas do WhatsApp</a></p></div></div><script>
+(function(){
+  const STORAGE_KEY='whatsapp-pairing-numbers';
+  const forms=Array.from(document.querySelectorAll('form[action$="/codigo"]'));
+  let digitando=false;
+  let enviando=false;
+  function carregarNumeros(){
+    let salvos={};
+    try{salvos=JSON.parse(localStorage.getItem(STORAGE_KEY)||'{}')}catch(_){salvos={}}
+    forms.forEach(form=>{
+      const input=form.querySelector('input[name="numero"]');
+      if(!input)return;
+      const key=form.action;
+      if(!input.value && salvos[key]) input.value=salvos[key];
+      input.addEventListener('focus',()=>{digitando=true});
+      input.addEventListener('blur',()=>{digitando=false});
+      input.addEventListener('input',()=>{
+        input.value=input.value.replace(/\D/g,'').slice(0,15);
+        salvos[key]=input.value;
+        try{localStorage.setItem(STORAGE_KEY,JSON.stringify(salvos))}catch(_){}
+      });
+      form.addEventListener('submit',()=>{
+        enviando=true;
+        salvos[key]=input.value;
+        try{localStorage.setItem(STORAGE_KEY,JSON.stringify(salvos))}catch(_){}
+        const botao=form.querySelector('button');
+        if(botao){botao.disabled=true;botao.textContent='⏳ Gerando código...'}
+      });
+    });
+  }
+  function podeAtualizar(){
+    if(digitando||enviando)return false;
+    const ativo=document.activeElement;
+    if(ativo && ['INPUT','TEXTAREA','SELECT'].includes(ativo.tagName))return false;
+    return !forms.some(form=>{
+      const input=form.querySelector('input[name="numero"]');
+      return input && input.value.trim().length>0 && !form.closest('.card')?.textContent.includes('AGUARDANDO CÓDIGO');
+    });
+  }
+  carregarNumeros();
+  setInterval(()=>{if(podeAtualizar())location.reload()},7000);
+})();
+</script>`));
 });
 app.post('/admin/whatsapp/configurar', async (req, res) => {
   await setConfig('ia_suporte_ativa', String(req.body.ia_suporte_ativa || '0') === '1' ? '1' : '0');
