@@ -4431,6 +4431,26 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
   ]).finally(() => clearTimeout(timer));
 }
 
+async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
+  try {
+    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
+    if (typeof buscar !== 'function') {
+      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
+      return null;
+    }
+    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
+    const versao = resultado?.version;
+    if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
+      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
+      return versao;
+    }
+    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
+  } catch (e) {
+    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
+  }
+  return null;
+}
+
 function sessaoWhatsAppRegistrada(sessionDir) {
   try {
     const arquivoCredenciais = path.join(sessionDir, 'creds.json');
@@ -4479,7 +4499,9 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
     const pino = pinoModule.default || pinoModule;
     const makeWASocket = baileys.default || baileys.makeWASocket;
     const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, `carregar sessão ${key}`);
+    const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.label);
     const socketAtual = makeWASocket({ auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
+      ...(versaoWeb ? { version: versaoWeb } : {}),
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
@@ -4493,7 +4515,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       }
       if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusExtra(sessao); }
       if (connection === 'open') { if (sessao.socket !== socketAtual) return; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = ''; sessao.numero = jidToNumber(socketAtual?.user?.id || ''); emitirStatusExtra(sessao); notificarPainel('whatsapp', `✅ ${sessao.label} conectado`, sessao.numero || 'Sessão ativa'); }
-      if (connection === 'close') { if (sessao.socket !== socketAtual) return; sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'REGERANDO_QR' : 'DESCONECTADO'); sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut) agendarReconexaoExtra(key); }
+      if (connection === 'close') { if (sessao.socket !== socketAtual) return; sessao.conectado = false; sessao.qr = null; sessao.socket = null; const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode; const loggedOut = code === baileys.DisconnectReason?.loggedOut; sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO'); sessao.erro = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`; emitirStatusExtra(sessao); if (!loggedOut && state.creds.registered && sessao.connectionMode === 'restaurar') agendarReconexaoExtra(key); }
     });
     if (key === 'support') socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
@@ -4676,6 +4698,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       'carregar sessão'
     );
     const logger = pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' });
+    const versaoWeb = await obterVersaoWebWhatsApp(baileys, 'Bot de Serviços');
 
     console.log('🔌 Criando conexão do WhatsApp...');
     // Não consulta fetchLatestBaileysVersion: essa consulta externa pode travar no Render.
@@ -4684,6 +4707,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       auth: state,
       logger,
       printQRInTerminal: false,
+      ...(versaoWeb ? { version: versaoWeb } : {}),
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('CentralUnlocker') : ['CentralUnlocker', 'Chrome', '1.0.0'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
@@ -4733,11 +4757,13 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
           const motivo = lastDisconnect?.error?.message || `código ${statusCode || 'desconhecido'}`;
           const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
-          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : (whatsappConnectionMode === 'qr' ? 'REGERANDO_QR' : 'DESCONECTADO');
+          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : (whatsappConnectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
           whatsappUltimoErro = motivo;
           console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
           io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-          if (!loggedOut) agendarReconexaoWhatsApp();
+          // Durante um novo pareamento não reconecta automaticamente, pois isso invalida o QR.
+          // Reconexão automática é permitida apenas para uma sessão já registrada.
+          if (!loggedOut && state.creds.registered && whatsappConnectionMode === 'restaurar') agendarReconexaoWhatsApp();
         }
       } catch (eventError) {
         whatsappUltimoErro = eventError.message;
