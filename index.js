@@ -961,6 +961,24 @@ async function initDB() {
     FROM esim_estoque
     WHERE nome_plano IS NOT NULL AND TRIM(nome_plano) != ''`);
 
+  await run(`CREATE TABLE IF NOT EXISTS destinatarios_avisos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    canal TEXT NOT NULL,
+    destino TEXT NOT NULL,
+    novos_servicos INTEGER DEFAULT 1,
+    pedidos_esim INTEGER DEFAULT 1,
+    pagamentos INTEGER DEFAULT 1,
+    finalizados INTEGER DEFAULT 1,
+    cancelados INTEGER DEFAULT 1,
+    ativo INTEGER DEFAULT 1,
+    ultimo_envio TEXT,
+    ultimo_status TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(canal, destino)
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS configs (
     chave TEXT PRIMARY KEY,
     valor TEXT,
@@ -1168,7 +1186,7 @@ function page(title, body) {
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp (3 sessões)</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 WhatsApp (3 sessões)</a><a href="/admin/destinatarios-avisos">🔔 Destinatários de avisos</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
@@ -1387,11 +1405,48 @@ async function salvarArquivoTelegramEmEsim(msg) {
   }
 }
 function adminsJids() { return ADMIN_TELEGRAM_ID ? [tgJid(ADMIN_TELEGRAM_ID)] : []; }
-async function enviarParaAdmins(texto) {
-  if (ADMIN_TELEGRAM_ID && tgBot) {
-    try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); }
-    catch (e) { console.log('⚠️ Falha ao avisar admin Telegram:', e.message); }
+const COLUNA_AVISO_POR_TIPO = {
+  NOVO_SERVICO: 'novos_servicos',
+  ESIM: 'pedidos_esim',
+  PAGAMENTO: 'pagamentos',
+  FINALIZADO: 'finalizados',
+  CANCELADO: 'cancelados'
+};
+async function enviarAvisoDestinatarios(tipo, texto) {
+  const coluna = COLUNA_AVISO_POR_TIPO[String(tipo || 'NOVO_SERVICO').toUpperCase()];
+  if (!coluna) return { total: 0, enviados: 0, falhas: 0 };
+  const rows = await all(`SELECT * FROM destinatarios_avisos WHERE ativo=1 AND ${coluna}=1 ORDER BY id ASC`);
+  let enviados = 0, falhas = 0;
+  for (const d of rows) {
+    let ok = false;
+    try {
+      if (d.canal === 'TELEGRAM') {
+        if (!tgBot) throw new Error('Bot Telegram não conectado');
+        await tgBot.sendMessage(String(d.destino), String(texto || ''), { parse_mode: 'Markdown' });
+        ok = true;
+      } else if (d.canal === 'WHATSAPP') {
+        ok = await enviarTexto(`wa:${normalizarNumeroWhatsApp(d.destino)}`, String(texto || ''));
+        if (!ok) throw new Error('WhatsApp de serviços não conectado ou envio recusado');
+      }
+      if (ok) enviados++;
+      await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', ['SUCESSO', d.id]);
+    } catch (e) {
+      falhas++;
+      const detalhe = String(e.message || e).slice(0, 180);
+      await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [`ERRO: ${detalhe}`, d.id]);
+      console.log(`⚠️ Falha aviso ${d.nome}:`, detalhe);
+    }
   }
+  // Mantém o ADMIN_TELEGRAM_ID como emergência quando ele ainda não estiver cadastrado.
+  const adminJaCadastrado = rows.some(d => d.canal === 'TELEGRAM' && String(d.destino) === String(ADMIN_TELEGRAM_ID));
+  if (ADMIN_TELEGRAM_ID && tgBot && !adminJaCadastrado) {
+    try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || ''), { parse_mode: 'Markdown' }); enviados++; }
+    catch (e) { falhas++; console.log('⚠️ Falha ao avisar admin Telegram:', e.message); }
+  }
+  return { total: rows.length + (ADMIN_TELEGRAM_ID && !adminJaCadastrado ? 1 : 0), enviados, falhas };
+}
+async function enviarParaAdmins(texto, tipo='NOVO_SERVICO') {
+  return enviarAvisoDestinatarios(tipo, texto);
 }
 async function enviarMensagemRevendas({ texto, revendaId=null, imagemPath=null, enviarWhatsapp=true, enviarTelegram=true }) {
   const rows = revendaId
@@ -1548,7 +1603,7 @@ ${entrada}
 
 ${extra}` : ''}
 
-🏢 Centralunlocker`);
+🏢 Centralunlocker`, String(pedido.servico_nome || '').toLowerCase().includes('esim') ? 'ESIM' : 'NOVO_SERVICO');
 }
 
 async function avisarEsimManualAdminTelegram(pedido) {
@@ -1604,7 +1659,7 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 💰 Total: ${brl(total)}
 📍 Status: PENDENTE
 
-🏢 Centralunlocker`);
+🏢 Centralunlocker`, 'NOVO_SERVICO');
 }
 
 
@@ -3874,6 +3929,7 @@ async function cancelarPedidoComEstorno(id, motivo = 'Não informado') {
     await enviarTexto(atual.revenda_jid, `💰 Estorno realizado\n\nPedido #${atual.id}\nValor estornado: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(rev?.saldo || 0)}`);
   }
   notificarPainel('cancelado', '❌ Pedido cancelado', `Pedido #${pedido.id}${precisaEstornar ? ' - estornado ' + brl(valor) : ''}`);
+  await enviarAvisoDestinatarios('CANCELADO', `❌ *Serviço cancelado*\n\n🆔 Pedido: #${atual.id}\n👤 Cliente: ${atual.revenda_nome || atual.cliente_nome || '-'}\n🛠 Serviço: ${atual.servico_nome || '-'}\n📱 Entrada: ${atual.entrada_valor || atual.imei || '-'}\n📝 Motivo: ${motivo || 'Não informado'}${precisaEstornar ? `\n💰 Estorno: ${brl(valor)}` : ''}\n🏢 Centralunlocker`);
   return { ok:true, pedido:atual, estornou:precisaEstornar, valor };
 }
 
@@ -4300,6 +4356,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         await run('INSERT INTO pagamentos (cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?)', [jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
       }
       notificarPainel('pix', '💰 PIX aprovado', `${brl(valorPix)} ${pagamentoServico ? 'serviço' : (revendaId ? 'revenda' : 'cliente')}`);
+      await enviarAvisoDestinatarios('PAGAMENTO', `💰 *Pagamento confirmado*\n\n💵 Valor: ${brl(valorPix)}\n📌 Tipo: ${pagamentoServico ? 'Pagamento de serviço' : 'Adição de saldo'}\n🏢 Centralunlocker`);
 
       if (pagamentoServico) {
         await enviarTexto(jid, `✅ Pagamento confirmado
@@ -4361,6 +4418,7 @@ async function finalizarPedido(pedido) {
   }
   const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
+  await enviarAvisoDestinatarios('FINALIZADO', `✅ *Serviço finalizado*\n\n🆔 Pedido: #${atualizado.id}\n👤 Cliente: ${atualizado.revenda_nome || atualizado.cliente_nome || '-'}\n🛠 Serviço: ${atualizado.servico_nome || '-'}\n📱 Entrada: ${atualizado.entrada_valor || atualizado.imei || '-'}\n💰 Valor: ${brl(atualizado.valor)}\n🏢 Centralunlocker`);
   await notificarPedido(atualizado, 'finalizar');
 }
 async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '') {
@@ -4942,6 +5000,52 @@ app.post('/webhook/mercadopago', async (req, res) => {
 });
 
 app.get('/cliente/*', (req, res) => res.redirect('/cliente'));
+
+
+function checkboxAviso(body, nome) { return body?.[nome] ? 1 : 0; }
+function destinoAvisoNormalizado(canal, destino) {
+  if (canal === 'WHATSAPP') return normalizarNumeroWhatsApp(destino);
+  return String(destino || '').replace(/\D/g, '');
+}
+app.get('/admin/destinatarios-avisos', async (req, res) => {
+  const rows = await all('SELECT * FROM destinatarios_avisos ORDER BY ativo DESC, nome COLLATE NOCASE ASC, id DESC');
+  let tabela = `<table><tr><th>Nome</th><th>Canal</th><th>Destino</th><th>Avisos</th><th>Status</th><th>Último envio</th><th>Ações</th></tr>`;
+  for (const d of rows) {
+    const tipos = [d.novos_servicos ? 'Serviços' : '', d.pedidos_esim ? 'eSIM' : '', d.pagamentos ? 'Pagamentos' : '', d.finalizados ? 'Finalizados' : '', d.cancelados ? 'Cancelados' : ''].filter(Boolean).join(', ') || 'Nenhum';
+    tabela += `<tr><td><b>${safeHtml(d.nome)}</b></td><td>${d.canal === 'WHATSAPP' ? '📱 WhatsApp' : '✈️ Telegram'}</td><td>${safeHtml(d.destino)}</td><td>${safeHtml(tipos)}</td><td><span class="pill">${d.ativo ? '✅ ATIVO' : '⛔ DESATIVADO'}</span><br><small class="muted">${safeHtml(d.ultimo_status || 'Nunca testado')}</small></td><td>${safeHtml(d.ultimo_envio ? dateBR(d.ultimo_envio) : '-')}</td><td><div class="actions"><form method="post" action="/admin/destinatarios-avisos/${d.id}/testar"><button class="btn green">🧪 Testar</button></form><form method="post" action="/admin/destinatarios-avisos/${d.id}/toggle"><button class="btn orange">${d.ativo ? 'Desativar' : 'Ativar'}</button></form><form method="post" action="/admin/destinatarios-avisos/${d.id}/excluir" onsubmit="return confirm('Excluir este destinatário?')"><button class="btn red">🗑️ Excluir</button></form></div></td></tr>`;
+  }
+  tabela += '</table>';
+  const msg = req.query.ok ? `<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>` : req.query.erro ? `<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>` : '';
+  res.send(page('Destinatários de avisos', `<div class="topbar"><div><h1>🔔 Destinatários de avisos</h1><p class="muted">Cadastre WhatsApp e Telegram para receber automaticamente os avisos dos serviços.</p></div></div>${msg}<div class="card"><h2>➕ Adicionar destinatário</h2><form method="post" action="/admin/destinatarios-avisos"><div class="form-grid"><div><label>Nome</label><input name="nome" required placeholder="Ex.: Adriano / Suporte"></div><div><label>Canal</label><select name="canal" required><option value="WHATSAPP">WhatsApp</option><option value="TELEGRAM">Telegram</option></select></div><div><label>Número ou ID</label><input name="destino" required placeholder="WhatsApp: 5575981635708 | Telegram: 123456789"></div></div><label>Receber avisos de:</label><div class="grid"><label><input type="checkbox" name="novos_servicos" checked> Novos serviços</label><label><input type="checkbox" name="pedidos_esim" checked> Pedidos de eSIM</label><label><input type="checkbox" name="pagamentos" checked> Pagamentos</label><label><input type="checkbox" name="finalizados" checked> Serviços finalizados</label><label><input type="checkbox" name="cancelados" checked> Serviços cancelados</label></div><br><button class="btn green">💾 Cadastrar destinatário</button></form></div><div class="card"><h2>Destinatários cadastrados</h2>${rows.length ? tabela : '<p class="muted">Nenhum destinatário cadastrado. O ADMIN_TELEGRAM_ID continua recebendo avisos de emergência.</p>'}</div>`));
+});
+app.post('/admin/destinatarios-avisos', async (req, res) => {
+  const nome = String(req.body.nome || '').trim();
+  const canal = String(req.body.canal || '').toUpperCase();
+  const destino = destinoAvisoNormalizado(canal, req.body.destino);
+  if (!nome || !['WHATSAPP','TELEGRAM'].includes(canal) || !destino) return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('Preencha os dados corretamente.'));
+  if (canal === 'WHATSAPP' && destino.length < 12) return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('WhatsApp deve ter DDI + DDD + número. Ex.: 5575981635708'));
+  try {
+    await run(`INSERT INTO destinatarios_avisos (nome, canal, destino, novos_servicos, pedidos_esim, pagamentos, finalizados, cancelados, ativo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`, [nome, canal, destino, checkboxAviso(req.body,'novos_servicos'), checkboxAviso(req.body,'pedidos_esim'), checkboxAviso(req.body,'pagamentos'), checkboxAviso(req.body,'finalizados'), checkboxAviso(req.body,'cancelados')]);
+    res.redirect('/admin/destinatarios-avisos?ok=' + encodeURIComponent('Destinatário cadastrado. Use Testar para confirmar o recebimento.'));
+  } catch (e) {
+    const msg = String(e.message || '').includes('UNIQUE') ? 'Este número ou ID já está cadastrado neste canal.' : e.message;
+    res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent(msg));
+  }
+});
+app.post('/admin/destinatarios-avisos/:id/testar', async (req, res) => {
+  const d = await get('SELECT * FROM destinatarios_avisos WHERE id=?', [req.params.id]);
+  if (!d) return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('Destinatário não encontrado.'));
+  let ok = false, erro = '';
+  try {
+    const texto = `✅ Teste realizado com sucesso!\n\n${d.nome}, este contato está cadastrado para receber os avisos de serviços da CentralUnlocker.`;
+    if (d.canal === 'TELEGRAM') { if (!tgBot) throw new Error('Bot Telegram não conectado'); await tgBot.sendMessage(String(d.destino), texto); ok = true; }
+    else { ok = await enviarTexto(`wa:${d.destino}`, texto); if (!ok) throw new Error('WhatsApp de serviços não conectado ou envio recusado'); }
+    await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status="SUCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [d.id]);
+  } catch (e) { erro = e.message; await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [`ERRO: ${String(erro).slice(0,180)}`, d.id]); }
+  res.redirect('/admin/destinatarios-avisos?' + (ok ? 'ok=' + encodeURIComponent('Mensagem de teste enviada para ' + d.nome + '.') : 'erro=' + encodeURIComponent('Falha no teste: ' + erro)));
+});
+app.post('/admin/destinatarios-avisos/:id/toggle', async (req, res) => { await run('UPDATE destinatarios_avisos SET ativo=CASE WHEN ativo=1 THEN 0 ELSE 1 END, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.params.id]); res.redirect('/admin/destinatarios-avisos'); });
+app.post('/admin/destinatarios-avisos/:id/excluir', async (req, res) => { await run('DELETE FROM destinatarios_avisos WHERE id=?', [req.params.id]); res.redirect('/admin/destinatarios-avisos?ok=' + encodeURIComponent('Destinatário excluído.')); });
 
 app.get('/admin', async (req, res) => {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"');
