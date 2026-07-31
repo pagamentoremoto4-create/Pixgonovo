@@ -120,6 +120,8 @@ const adminSessao = new Map();
 // Sessões críticas de checkout também ficam no SQLite. Assim o botão de pagamento
 // continua funcionando mesmo após reinício/redeploy do servidor.
 async function salvarSessaoPedido(chave, sessao) {
+  // Registra a última atualização dentro da própria sessão para permitir expiração segura.
+  sessao = { ...(sessao || {}), atualizado_em_ms: Date.now() };
   pedidoSessao.set(chave, sessao);
   try {
     await run(`INSERT OR REPLACE INTO pedido_sessoes (chave, etapa, dados_json, atualizado_em)
@@ -1913,13 +1915,26 @@ Envie este código para o WhatsApp da CentralUnlocker:
 
   const sessValorPixTelegram = await carregarSessaoPedido(from);
   if (sessValorPixTelegram?.etapa === 'aguardando_valor_pix') {
-    const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
-    if (!valor || valor < 10) {
-      await tgBot.sendMessage(msg.chat.id, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
+    const expirou = Date.now() - Number(sessValorPixTelegram.atualizado_em_ms || 0) > 5 * 60 * 1000;
+    const somenteValor = /^\d+(?:[.,]\d{1,2})?$/.test(textoOriginal);
+
+    if (expirou || !somenteValor) {
+      // Mensagem comum não deve ficar presa no fluxo de saldo.
+      await apagarSessaoPedido(from);
+      if (expirou) {
+        await tgBot.sendMessage(msg.chat.id, '⌛ A solicitação de saldo expirou. Envie *pagar 50* ou abra o menu para tentar novamente.', { parse_mode: 'Markdown' });
+        return;
+      }
+      // Continua o processamento normal da mensagem (menu, IA ou atendimento).
+    } else {
+      const valor = Number(textoOriginal.replace(',', '.'));
+      if (valor < 10) {
+        await tgBot.sendMessage(msg.chat.id, '❌ O valor mínimo para adicionar saldo é R$10.\n\nExemplo: 50\nDigite cancelar para sair.');
+        return;
+      }
+      await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => tgBot.sendMessage(msg.chat.id, m));
       return;
     }
-    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => tgBot.sendMessage(msg.chat.id, m));
-    return;
   }
 
   if (texto.startsWith('pagar') || texto.startsWith('/pagar')) {
@@ -2322,13 +2337,26 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
   const sessValorPixWhatsApp = await carregarSessaoPedido(from);
   if (sessValorPixWhatsApp?.etapa === 'aguardando_valor_pix') {
-    const valor = Number(String(textoOriginal || '').trim().replace(',', '.'));
-    if (!valor || valor < 10) {
-      await enviarTexto(from, '❌ Digite somente um valor mínimo de R$10.\n\nExemplo: 50');
+    const expirou = Date.now() - Number(sessValorPixWhatsApp.atualizado_em_ms || 0) > 5 * 60 * 1000;
+    const somenteValor = /^\d+(?:[.,]\d{1,2})?$/.test(textoOriginal);
+
+    if (expirou || !somenteValor) {
+      // Frases como “manda” ou “tem 5 em processo?” não são valores de saldo.
+      // Encerra o estado e deixa a mensagem seguir para IA/menu/atendimento normal.
+      await apagarSessaoPedido(from);
+      if (expirou) {
+        await enviarTexto(from, '⌛ A solicitação de saldo expirou. Digite *pagar 50* ou abra o *menu* para tentar novamente.');
+        return;
+      }
+    } else {
+      const valor = Number(textoOriginal.replace(',', '.'));
+      if (valor < 10) {
+        await enviarTexto(from, '❌ O valor mínimo para adicionar saldo é R$10.\n\nExemplo: 50\nDigite *cancelar* para sair.');
+        return;
+      }
+      await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => enviarTexto(from, m), true);
       return;
     }
-    await iniciarFluxoPagamento(from, { valor_pix: valor, tipo_pix: 'SALDO' }, cliente, async (m) => enviarTexto(from, m), true);
-    return;
   }
 
   if (lower.startsWith('pagar') || lower.startsWith('/pagar')) {
@@ -2358,7 +2386,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     }
     if (opcaoSaldo === '2') {
       await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50');
+      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\nDigite *cancelar* para sair.');
       return;
     }
     if (opcaoSaldo === '3' || lower === 'cancelar') {
@@ -2442,7 +2470,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
     if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50'); return; }
+    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\nDigite *cancelar* para sair.'); return; }
     if (opcao === '6') { await salvarSessaoPedido(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
