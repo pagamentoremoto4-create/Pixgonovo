@@ -58,7 +58,33 @@ const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE || '';
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY || '';
 const WHATSAPP_WEBHOOK_SECRET = process.env.WHATSAPP_WEBHOOK_SECRET || '';
-const WHATSAPP_SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-services-session');
+function credenciaisWhatsAppValidas(sessionDir) {
+  try {
+    const arquivo = path.join(sessionDir, 'creds.json');
+    if (!fs.existsSync(arquivo)) return false;
+    const dados = JSON.parse(fs.readFileSync(arquivo, 'utf8'));
+    return dados?.registered === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function resolverPastaSessaoServicos() {
+  const configurada = String(process.env.WHATSAPP_SESSION_DIR || '').trim();
+  const pastaAntiga = path.join(DATA_DIR, 'whatsapp-session');
+  const pastaNova = path.join(DATA_DIR, 'whatsapp-services-session');
+  const candidatas = Array.from(new Set([configurada, pastaAntiga, pastaNova].filter(Boolean)));
+
+  // Prioriza qualquer pasta que já possua uma sessão registrada. Isso evita perder
+  // a conexão quando uma versão antiga e uma nova usam nomes de pasta diferentes.
+  const existente = candidatas.find(credenciaisWhatsAppValidas);
+  const escolhida = existente || configurada || pastaAntiga;
+  console.log('📁 Sessão do Bot de Serviços:', escolhida,
+    existente ? '(credenciais registradas encontradas)' : '(aguardando primeira conexão)');
+  return escolhida;
+}
+
+const WHATSAPP_SESSION_DIR = resolverPastaSessaoServicos();
 const WHATSAPP_SUPPORT_SESSION_DIR = process.env.WHATSAPP_SUPPORT_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-support-session');
 const WHATSAPP_ADS_SESSION_DIR = process.env.WHATSAPP_ADS_SESSION_DIR || path.join(DATA_DIR, 'whatsapp-ads-session');
 const WHATSAPP_SUPPORT_ENABLED = String(process.env.WHATSAPP_SUPPORT_ENABLED || process.env.WHATSAPP_ENABLED || 'false').toLowerCase() === 'true';
@@ -6022,12 +6048,18 @@ app.post('/admin/whatsapp/:sessao/conectar', async (req, res) => {
     if (!conectado) {
       if (whatsappReconectarTimer) { clearTimeout(whatsappReconectarTimer); whatsappReconectarTimer = null; }
       const socketAntigo = whatsappSocket; whatsappSocket = null;
-      try { if (socketAntigo?.end) socketAntigo.end(new Error('novo pareamento por QR')); } catch (_) {}
+      try { if (socketAntigo?.end) socketAntigo.end(new Error('reinício manual da conexão')); } catch (_) {}
       await dormir(500);
-      try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
+
+      // Nunca apaga uma sessão registrada ao clicar em Conectar. Primeiro tenta
+      // restaurá-la; um novo QR só é gerado quando não existem credenciais válidas.
+      const possuiSessao = sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
       fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
       qrCodeBase64 = null; whatsappPairingCode = ''; whatsappPairingNumero = ''; whatsappStatus = 'INICIANDO'; whatsappUltimoErro = '';
-      await iniciarWhatsAppQrCode({ modo: 'qr' });
+      console.log(possuiSessao
+        ? '🔄 Tentando restaurar a sessão existente do Bot de Serviços.'
+        : '📷 Nenhuma sessão válida encontrada; será gerado um novo QR Code.');
+      await iniciarWhatsAppQrCode({ modo: possuiSessao ? 'restaurar' : 'qr' });
     }
   } else if (whatsappExtra[key]) {
     const sessao = whatsappExtra[key];
@@ -6156,14 +6188,15 @@ app.post('/admin/backup/restaurar', async (req, res) => { const file = path.base
 
 cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) { console.log('❌ BACKUP AUTOMÁTICO:', e); } }, { timezone: 'America/Sao_Paulo' });
 
-// Migra automaticamente a sessão única das versões anteriores para a sessão do Bot de Serviços.
+// Diagnóstico da sessão persistente antes de iniciar o servidor.
 try {
-  const legacySessionDir = path.join(DATA_DIR, 'whatsapp-session');
-  if (legacySessionDir !== WHATSAPP_SESSION_DIR && fs.existsSync(legacySessionDir) && !fs.existsSync(WHATSAPP_SESSION_DIR)) {
-    fs.cpSync(legacySessionDir, WHATSAPP_SESSION_DIR, { recursive: true });
-    console.log('✅ Sessão antiga migrada para o Bot de Serviços');
-  }
-} catch (e) { console.log('⚠️ Não foi possível migrar a sessão antiga:', e.message); }
+  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+  const arquivoCredenciais = path.join(WHATSAPP_SESSION_DIR, 'creds.json');
+  console.log('💾 DATA_DIR:', DATA_DIR);
+  console.log('🔐 Credenciais do Bot de Serviços:', fs.existsSync(arquivoCredenciais)
+    ? (sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR) ? 'registradas e válidas' : 'arquivo encontrado, porém não registrado')
+    : 'não encontradas');
+} catch (e) { console.log('⚠️ Falha ao verificar a sessão persistente:', e.message); }
 
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
 iniciarTelegram();
