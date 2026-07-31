@@ -1288,18 +1288,55 @@ async function listarServicosTexto(revenda) {
 💬 Digite a opção desejada.`;
   return texto;
 }
-async function enviarWhatsAppTexto(numero, text) {
-  if (!WHATSAPP_ENABLED) return false;
+async function resolverJidWhatsAppEnvio(numero) {
   const number = normalizarNumeroWhatsApp(numero);
-  if (!number) return false;
+  if (!number || !whatsappSocket) return '';
+
+  // Primeiro reaproveita o JID real já visto em mensagens recebidas.
+  const jidMapeado = whatsappJidPorNumero.get(number);
+  if (jidMapeado) return jidMapeado;
+
+  // Confirma no WhatsApp qual variante brasileira está registrada
+  // (com ou sem o nono dígito) e usa o JID devolvido pelo Baileys.
+  if (typeof whatsappSocket.onWhatsApp === 'function') {
+    for (const variante of variantesNumero(number)) {
+      try {
+        const resultado = await whatsappSocket.onWhatsApp(variante);
+        const encontrado = Array.isArray(resultado) ? resultado.find(item => item?.exists && item?.jid) : null;
+        if (encontrado?.jid) {
+          whatsappJidPorNumero.set(number, encontrado.jid);
+          whatsappJidPorNumero.set(normalizarNumeroWhatsApp(variante), encontrado.jid);
+          return encontrado.jid;
+        }
+      } catch (e) {
+        console.log(`⚠️ Falha ao consultar WhatsApp ${variante}:`, e.message);
+      }
+    }
+  }
+
+  return numberToJid(number);
+}
+
+async function enviarWhatsAppTexto(numero, text) {
+  if (!WHATSAPP_ENABLED) {
+    console.log('⚠️ Envio WhatsApp desativado por WHATSAPP_ENABLED.');
+    return false;
+  }
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number) {
+    console.log('⚠️ Número de WhatsApp inválido para envio:', numero);
+    return false;
+  }
   try {
     if (WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') {
       if (!whatsappSocket || !conectado) {
-        console.log('⚠️ WhatsApp QR Code ainda não está conectado.');
+        console.log('⚠️ WhatsApp de serviços ainda não está conectado.');
         return false;
       }
-      const destino = whatsappJidPorNumero.get(number) || numberToJid(number);
+      const destino = await resolverJidWhatsAppEnvio(number);
+      if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
       await whatsappSocket.sendMessage(destino, { text: String(text || '') });
+      console.log(`✅ WhatsApp enviado para ${number} (${destino})`);
       return true;
     }
     if (WHATSAPP_PROVIDER === 'evolution') {
@@ -5065,7 +5102,7 @@ app.post('/admin/destinatarios-avisos/:id/testar', async (req, res) => {
   try {
     const texto = `✅ Teste realizado com sucesso!\n\n${d.nome}, este contato está cadastrado para receber os avisos de serviços da CentralUnlocker.`;
     if (d.canal === 'TELEGRAM') { if (!tgBot) throw new Error('Bot Telegram não conectado'); await tgBot.sendMessage(String(d.destino), texto); ok = true; }
-    else { ok = await enviarTexto(`wa:${d.destino}`, texto); if (!ok) throw new Error('WhatsApp de serviços não conectado ou envio recusado'); }
+    else { const numeroTeste = normalizarNumeroWhatsApp(d.destino); ok = await enviarWhatsAppTexto(numeroTeste, texto); if (!ok) throw new Error('WhatsApp de serviços não conectado, número não localizado ou envio recusado'); }
     await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status="SUCESSO", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [d.id]);
   } catch (e) { erro = e.message; await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [`ERRO: ${String(erro).slice(0,180)}`, d.id]); }
   res.redirect('/admin/destinatarios-avisos?' + (ok ? 'ok=' + encodeURIComponent('Mensagem de teste enviada para ' + d.nome + '.') : 'erro=' + encodeURIComponent('Falha no teste: ' + erro)));
