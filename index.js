@@ -2443,11 +2443,11 @@ function numeroSessaoWhatsApp(socketAtual, sessao=null) {
 }
 
 function sessaoPertenceAoAdminPrincipal(socketAtual, sessao=null) {
-  const numero = numeroSessaoWhatsApp(socketAtual, sessao);
-  // Se ADMIN_NUMBER/ADMIN_NUMBERS estiver configurado, mantém validação estrita.
-  if (ADMIN_NUMBERS.length) return Boolean(numero && ADMIN_NUMBERS.includes(numero));
-  // V96: instalações antigas não tinham ADMIN_NUMBER no Render. Nesse caso,
-  // a sessão explicitamente chamada Admin/Administrador é tratada como principal.
+  // V97: comandos de autorização do WhatsApp NÃO dependem mais de
+  // ADMIN_NUMBER/ADMIN_NUMBERS. A autoridade é a própria sessão administrativa
+  // conectada no gerenciador de WhatsApp. Como tratarComandoAvisosEnviadoPeloAdmin
+  // também exige msg.key.fromMe, somente uma mensagem enviada pelo aparelho
+  // autenticado nessa sessão consegue ativar/desativar destinatários.
   const nome = String(sessao?.nome || '').trim().toLowerCase();
   return /^(admin|administrador|admin principal|administrador principal)$/.test(nome);
 }
@@ -2479,7 +2479,7 @@ async function tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao=null, m
   // Segurança: somente mensagens realmente enviadas pelo número principal do admin
   // podem autorizar ou remover outro WhatsApp.
   if (!sessaoPertenceAoAdminPrincipal(socketAtual, sessao)) {
-    console.log('🔒 V96 COMANDO DE AVISOS IGNORADO: sessão não autorizada como admin principal.', { sessao: sessao?.nome, numeroSessao: numeroSessaoWhatsApp(socketAtual, sessao), admins: ADMIN_NUMBERS });
+    console.log('🔒 V97 COMANDO DE AVISOS IGNORADO: a mensagem FROMME não veio de uma sessão administrativa.', { sessao: sessao?.nome, numeroSessao: numeroSessaoWhatsApp(socketAtual, sessao) });
     return true;
   }
 
