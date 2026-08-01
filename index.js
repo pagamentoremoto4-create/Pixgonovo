@@ -2444,7 +2444,12 @@ function numeroSessaoWhatsApp(socketAtual, sessao=null) {
 
 function sessaoPertenceAoAdminPrincipal(socketAtual, sessao=null) {
   const numero = numeroSessaoWhatsApp(socketAtual, sessao);
-  return Boolean(numero && ADMIN_NUMBERS.includes(numero));
+  // Se ADMIN_NUMBER/ADMIN_NUMBERS estiver configurado, mantém validação estrita.
+  if (ADMIN_NUMBERS.length) return Boolean(numero && ADMIN_NUMBERS.includes(numero));
+  // V96: instalações antigas não tinham ADMIN_NUMBER no Render. Nesse caso,
+  // a sessão explicitamente chamada Admin/Administrador é tratada como principal.
+  const nome = String(sessao?.nome || '').trim().toLowerCase();
+  return /^(admin|administrador|admin principal|administrador principal)$/.test(nome);
 }
 
 function comandoAvisosAdmin(texto) {
@@ -2474,14 +2479,14 @@ async function tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao=null, m
   // Segurança: somente mensagens realmente enviadas pelo número principal do admin
   // podem autorizar ou remover outro WhatsApp.
   if (!sessaoPertenceAoAdminPrincipal(socketAtual, sessao)) {
-    console.log('🔒 COMANDO DE AVISOS IGNORADO: sessão não pertence ao ADMIN_NUMBER/ADMIN_NUMBERS.');
+    console.log('🔒 V96 COMANDO DE AVISOS IGNORADO: sessão não autorizada como admin principal.', { sessao: sessao?.nome, numeroSessao: numeroSessaoWhatsApp(socketAtual, sessao), admins: ADMIN_NUMBERS });
     return true;
   }
 
   const { numero: destino, jidResposta } = numeroConversaMensagemWhatsApp(msg);
   const numeroAdmin = numeroSessaoWhatsApp(socketAtual, sessao);
   if (!destino || !/^55\d{10,11}$/.test(destino) || !jidResposta || jidResposta.endsWith('@g.us')) {
-    console.log('⚠️ COMANDO DE AVISOS: não foi possível identificar o número da conversa.');
+    console.log('⚠️ V96 COMANDO DE AVISOS: não foi possível identificar o número da conversa.', { remoteJid: msg?.key?.remoteJid, remoteJidAlt: msg?.key?.remoteJidAlt, participantAlt: msg?.key?.participantAlt, senderPn: msg?.senderPn, destino, jidResposta });
     return true;
   }
   if (destino === numeroAdmin) {
@@ -4892,7 +4897,19 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 
 
 function textoMensagemBaileys(message = {}) {
-  const m = message || {};
+  // V96: mensagens enviadas pelo próprio celular podem chegar embrulhadas
+  // em deviceSentMessage/ephemeral/viewOnce. Desembrulha antes de ler o texto.
+  let m = message || {};
+  for (let i = 0; i < 4; i++) {
+    const interno =
+      m.deviceSentMessage?.message ||
+      m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.viewOnceMessageV2Extension?.message;
+    if (!interno) break;
+    m = interno;
+  }
   return String(
     m.conversation ||
     m.extendedTextMessage?.text ||
@@ -5211,20 +5228,22 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     });
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
+      // V96: mensagens FROMME sincronizadas do celular podem chegar como append,
+      // não apenas notify. Processa o comando do admin antes do filtro de type.
       for (const msg of messages || []) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
           if (!jidPrincipal || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
 
-          // V90: o admin principal pode autorizar/desautorizar a própria conversa
-          // enviando "ativar avisos" ou "desativar avisos" pelo WhatsApp.
           if (msg?.key?.fromMe) {
             const textoEnviado = textoMensagemBaileys(msg?.message || {});
+            const acaoAvisos = comandoAvisosAdmin(textoEnviado);
+            if (acaoAvisos) console.log(`🛡️ V96 COMANDO ADMIN FROMME [${type || 'sem-type'}] ${sessao.nome}:`, textoEnviado, 'conversa=', jidAlternativo || jidPrincipal);
             if (await tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao, msg, texto: textoEnviado })) continue;
             continue;
           }
+          if (type !== 'notify') continue;
           if (!sessao.funcaoBot) continue;
           const idMensagem = msg?.key?.id || '';
           if (mensagemWhatsAppJaProcessada(idMensagem)) continue;
