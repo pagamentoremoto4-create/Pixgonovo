@@ -5108,18 +5108,30 @@ async function atualizarNumeroSessaoMulti(sessao, numero) {
   if (n) await run('UPDATE whatsapp_sessoes SET numero=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [n, sessao.id]);
 }
 
+function sessaoWhatsAppPodeTentarAutomatico(sessao) {
+  if (!sessao) return false;
+  try {
+    // Algumas sessões antigas possuem creds.json e número salvo, mas o campo
+    // registered só volta a true depois que o Baileys inicia a conexão. Esse é
+    // exatamente o caso em que o botão "Gerar QR Code" conecta sem escanear QR.
+    const temArquivo = fs.existsSync(path.join(sessao.sessionDir || '', 'creds.json'));
+    return sessaoWhatsAppRegistrada(sessao.sessionDir) || temArquivo || !!normalizarNumeroWhatsApp(sessao.numero || '');
+  } catch (_) { return !!normalizarNumeroWhatsApp(sessao?.numero || ''); }
+}
+
 function agendarReconexaoSessaoMulti(sessao) {
   if (!sessao || sessao.timer || !sessao.ativo) return;
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
-    if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
       sessao.status = 'SESSAO_EXPIRADA';
-      sessao.erro = 'Credenciais não registradas. Gere um novo QR Code.';
+      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere um novo QR Code.';
       emitirStatusSessaoMulti(sessao);
       return;
     }
-    console.log(`🔄 V87: reconectando automaticamente ${sessao.nome}.`);
-    iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log(`❌ V87 RECONEXÃO #${sessao.id}:`, e.message));
+    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+    console.log(`🔄 V95: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
+    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ V95 RECONEXÃO #${sessao.id}:`, e.message));
   }, 5000);
 }
 
@@ -5278,16 +5290,21 @@ async function iniciarTodasSessoesWhatsAppSalvas() {
     // Reconsulta o caminho salvo após a rotina de reparo/migração da V94.
     const rowAtual = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [sessao.id]);
     if (rowAtual) criarRuntimeSessaoWhatsApp(rowAtual);
-    if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
       sessao.status = 'DESCONECTADO';
-      sessao.erro = 'Sessão sem credenciais válidas. Gere QR Code somente para esta sessão.';
+      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere QR Code para esta sessão.';
       emitirStatusSessaoMulti(sessao);
-      console.log(`⚠️ V93: ${sessao.nome} sem credenciais registradas em ${sessao.sessionDir}`);
+      console.log(`⚠️ V95: ${sessao.nome} sem dados suficientes para tentativa automática em ${sessao.sessionDir}`);
       continue;
     }
     try {
-      console.log(`🔐 V93: restaurando automaticamente ${sessao.nome} (${sessao.sessionDir})`);
-      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' });
+      // V95: se o número já esteve conectado, executa automaticamente no boot
+      // o MESMO fluxo que o botão Gerar QR Code usaria quando registered=false.
+      // Isso resolve o caso observado no Render: clicar no botão conecta sozinho,
+      // portanto o usuário não deve precisar clicar após cada restart.
+      console.log(`🔐 V95: iniciando automaticamente ${sessao.nome} (${registrada ? 'restauração' : 'recuperação automática'}) — ${sessao.sessionDir}`);
+      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' });
     } catch (e) {
       console.log(`❌ V93 START #${sessao.id}:`, e.message);
       agendarReconexaoSessaoMulti(sessao);
@@ -5305,10 +5322,11 @@ async function watchdogSessoesWhatsApp() {
     await carregarSessoesWhatsApp();
     for (const sessao of whatsappSessoes.values()) {
       if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
-      if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) continue;
-      console.log(`🩺 V93 WATCHDOG: ${sessao.nome} está offline com sessão válida; reconectando automaticamente.`);
-      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }); }
-      catch (e) { console.log(`❌ V93 WATCHDOG #${sessao.id}:`, e.message); }
+      if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) continue;
+      const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+      console.log(`🩺 V95 WATCHDOG: ${sessao.nome} está offline; tentando ${registrada ? 'restaurar' : 'recuperar'} automaticamente.`);
+      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }); }
+      catch (e) { console.log(`❌ V95 WATCHDOG #${sessao.id}:`, e.message); }
       await new Promise(r => setTimeout(r, 1000));
     }
   } catch (e) {
