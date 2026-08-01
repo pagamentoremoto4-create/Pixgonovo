@@ -142,12 +142,15 @@ let whatsappSessoesCarregadas = false;
 
 let db = new sqlite3.Database(DB_PATH);
 let PAINEL_TEMA = 'hacker-green';
+let PAINEL_BG_MODE = 'soft'; // strong | soft | none
+let PAINEL_EFEITOS = true;
 const TEMAS_PAINEL = {
-  'hacker-green': { nome: '🟢 Hacker Verde', cor: '#00ff66', cor2: '#28d7ff' },
-  'hacker-blue': { nome: '🔵 Hacker Azul', cor: '#28d7ff', cor2: '#2f80ed' },
-  'hacker-red': { nome: '🔴 Hacker Vermelho', cor: '#ff3b3b', cor2: '#ff9f43' },
-  'hacker-purple': { nome: '🟣 Hacker Roxo', cor: '#a855f7', cor2: '#28d7ff' },
-  'dark-pro': { nome: '⚫ Dark Pro', cor: '#94a3b8', cor2: '#2f80ed' }
+  'hacker-green': { nome: '🟢 Hacker Neon Verde', cor: '#00ff66', cor2: '#28d7ff', imagem: '/img/theme-hacker-green.jpg' },
+  'hacker-blue': { nome: '🔵 Cyber Hacker Azul', cor: '#28d7ff', cor2: '#2f80ed', imagem: '/img/theme-hacker-blue.jpg' },
+  'hacker-red': { nome: '🔴 Hacker Red Alert', cor: '#ff3b3b', cor2: '#ff9f43', imagem: '/img/theme-hacker-red.jpg' },
+  'hacker-purple': { nome: '🟣 Hacker Purple Grid', cor: '#a855f7', cor2: '#28d7ff', imagem: '/img/theme-hacker-purple.jpg' },
+  'matrix': { nome: '🟩 Matrix Code', cor: '#39ff14', cor2: '#00c853', imagem: '/img/theme-matrix.jpg' },
+  'dark-pro': { nome: '⚫ Dark Pro', cor: '#94a3b8', cor2: '#2f80ed', imagem: '/img/theme-dark-pro.jpg' }
 };
 
 const pedidoSessao = new Map();
@@ -1139,6 +1142,9 @@ async function initDB() {
   await run(`INSERT OR IGNORE INTO categorias_produtos (nome) SELECT DISTINCT COALESCE(NULLIF(TRIM(categoria),''),'eSIM') FROM esim_planos`);
 
   PAINEL_TEMA = await getConfig('painel_tema', 'hacker-green');
+  PAINEL_BG_MODE = await getConfig('painel_bg_mode', 'soft');
+  if (!['strong','soft','none'].includes(PAINEL_BG_MODE)) PAINEL_BG_MODE = 'soft';
+  PAINEL_EFEITOS = (await getConfig('painel_efeitos', '1')) !== '0';
 
   const qtdServ = await get('SELECT COUNT(*) as qtd FROM servicos_catalogo');
   if (!qtdServ.qtd) {
@@ -1231,17 +1237,42 @@ function clienteEntradaHtml(s) {
   return `<label>${label}</label><textarea name="entrada" rows="3" required placeholder="Digite aqui."></textarea>`;
 }
 
-function page(title, body) {
+function page(title, body, options={}) {
+  const themeId = TEMAS_PAINEL[options.themeOverride] ? options.themeOverride : temaAtual();
+  const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
+  const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
   :root{--bg:#07111f;--bg2:#0c1426;--card:#101b31;--card2:#0d172a;--soft:#16223a;--line:#24324b;--text:#eaf0f8;--muted:#97a6ba;--blue:#2f80ed;--cyan:#28d7ff;--green:#28c76f;--red:#ff4d4f;--orange:#ff9f43;--purple:#9b5cff;--shadow:0 18px 45px rgba(0,0,0,.32)}
   *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
-</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${temaAtual()}"><div class="toast-wrap" id="toastWrap"></div><div class="layout"><aside class="side"><div class="brand">CentralUnlocker</div><div class="nav-title">Painel</div><a href="/admin">📊 Dashboard</a><a href="/admin/pedidos">📋 Pedidos</a><a href="/admin/revendas">👥 Clientes</a><a href="/admin/servicos">🛠 Serviços</a><a href="/admin/esim">📱 eSIM</a><a href="/admin/mensagens">📢 Mensagens</a><a href="/admin/anuncios">📣 Anúncios automáticos</a><a href="/admin/financeiro">💰 Financeiro</a><a href="/admin/pagamentos-config">💳 Formas de pagamento</a><a href="/admin/relatorios">📈 Relatórios</a><a href="/admin/backup">💾 Backup</a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 Conectar WhatsApp</a><a href="/admin/destinatarios-avisos">🔔 Destinatários de avisos</a><a href="/admin/config">⚙️ Configurações</a><a href="/admin/logout">🚪 Sair</a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main">${body}</main></div><script>
+/* V89 - painel moderno + temas completos */
+body{--accent:#00ff66;--accent2:#28d7ff;--theme-image:url('/img/theme-hacker-green.jpg')}
+body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff;--theme-image:url('/img/theme-hacker-green.jpg')}
+body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed;--theme-image:url('/img/theme-hacker-blue.jpg')}
+body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43;--theme-image:url('/img/theme-hacker-red.jpg')}
+body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff;--theme-image:url('/img/theme-hacker-purple.jpg')}
+body.theme-matrix{--accent:#39ff14;--accent2:#00c853;--theme-image:url('/img/theme-matrix.jpg')}
+body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed;--theme-image:url('/img/theme-dark-pro.jpg')}
+body:before{content:'';position:fixed;inset:0;z-index:-2;background:var(--theme-image) center/cover no-repeat;transition:opacity .3s ease}body.bg-strong:before{opacity:.28}body.bg-soft:before{opacity:.11}body.bg-none:before{opacity:0}.layout{transition:grid-template-columns .22s ease}.layout.side-collapsed{grid-template-columns:86px minmax(0,1fr)}.layout.side-collapsed .side{padding-left:12px;padding-right:12px}.layout.side-collapsed .side a span,.layout.side-collapsed .nav-title,.layout.side-collapsed .brand-text,.layout.side-collapsed .side-profile{display:none}.layout.side-collapsed .side a{justify-content:center;font-size:20px}.layout.side-collapsed .brand{justify-content:center;padding:10px}.admin-head{position:sticky;top:0;z-index:30;margin:-26px -26px 22px;padding:13px 26px;display:flex;align-items:center;gap:13px;background:rgba(3,9,18,.78);backdrop-filter:blur(18px);border-bottom:1px solid color-mix(in srgb,var(--accent) 20%,transparent)}.menu-toggle{border:1px solid color-mix(in srgb,var(--accent) 38%,transparent);background:rgba(8,17,31,.92);color:var(--accent);width:42px;height:42px;border-radius:13px;font-size:20px;cursor:pointer}.head-brand{display:flex;flex-direction:column;min-width:0}.head-brand b{font-size:15px}.head-brand span{font-size:11px;color:var(--muted)}.head-status{margin-left:auto;display:flex;align-items:center;gap:8px;padding:8px 11px;border-radius:999px;background:rgba(8,17,31,.72);border:1px solid rgba(255,255,255,.08);font-size:12px}.system-dot{width:9px;height:9px;border-radius:50%;background:#22c55e;box-shadow:0 0 12px #22c55e}.system-dot.off{background:#ef4444;box-shadow:0 0 12px #ef4444}.head-clock{color:var(--accent);font-weight:850}.hero-hacker,.side-profile{background-image:linear-gradient(90deg,rgba(0,0,0,.88),rgba(0,0,0,.48)),var(--theme-image)!important;background-size:cover!important;background-position:center!important}.bg-soft .hero-hacker{background-image:linear-gradient(90deg,rgba(0,0,0,.91),rgba(0,0,0,.72)),var(--theme-image)!important}.bg-none .hero-hacker,.bg-none .side-profile{background-image:linear-gradient(135deg,#06111f,#020617)!important}.effects-on .card,.effects-on .service-card,.effects-on .hero-hacker{backdrop-filter:blur(10px);transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}.effects-on .card:hover,.effects-on .service-card:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}.effects-off *{animation:none!important;transition:none!important}.theme-grid{grid-template-columns:repeat(auto-fit,minmax(205px,1fr))}.theme-card{position:relative;overflow:hidden}.theme-preview{height:115px;background-position:center!important;background-size:cover!important;border:1px solid rgba(255,255,255,.1)}.preview-hacker-green{background-image:linear-gradient(135deg,rgba(0,30,8,.45),rgba(0,255,102,.22)),url('/img/theme-hacker-green.jpg')}.preview-hacker-blue{background-image:linear-gradient(135deg,rgba(0,21,45,.45),rgba(40,215,255,.22)),url('/img/theme-hacker-blue.jpg')}.preview-hacker-red{background-image:linear-gradient(135deg,rgba(35,7,7,.45),rgba(255,59,59,.22)),url('/img/theme-hacker-red.jpg')}.preview-hacker-purple{background-image:linear-gradient(135deg,rgba(24,6,43,.45),rgba(168,85,247,.22)),url('/img/theme-hacker-purple.jpg')}.preview-matrix{background-image:linear-gradient(135deg,rgba(0,20,0,.5),rgba(57,255,20,.2)),url('/img/theme-matrix.jpg')}.preview-dark-pro{background-image:linear-gradient(135deg,rgba(2,6,23,.5),rgba(100,116,139,.2)),url('/img/theme-dark-pro.jpg')}.theme-actions{display:flex;gap:7px;flex-wrap:wrap}.theme-actions form{display:inline}.theme-current{position:absolute;right:10px;top:10px;background:var(--accent);color:#020617;border-radius:999px;padding:5px 8px;font-size:11px;font-weight:900}.personalize-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.choice-row{display:flex;gap:8px;flex-wrap:wrap}.choice-row label{flex:1;min-width:120px;text-transform:none;letter-spacing:0}.choice-row input{width:auto;min-width:0;margin-right:5px}.modal-backdrop{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.68);display:grid;place-items:center;padding:18px}.modal-backdrop[hidden]{display:none}.confirm-box{width:min(410px,100%);background:linear-gradient(180deg,#0e1a2e,#07111f);border:1px solid color-mix(in srgb,var(--accent) 50%,transparent);border-radius:22px;padding:22px;text-align:center;box-shadow:0 28px 80px rgba(0,0,0,.55),0 0 28px color-mix(in srgb,var(--accent) 18%,transparent)}.confirm-icon{font-size:34px}.confirm-box h3{margin:8px 0}.confirm-box p{color:var(--muted)}.confirm-actions{display:flex;justify-content:center;gap:8px;margin-top:16px}.preview-banner{border:1px dashed color-mix(in srgb,var(--accent) 40%,transparent);border-radius:18px;padding:12px;background:rgba(8,17,31,.55)}
+@media(max-width:900px){.admin-head{margin:-14px -14px 16px;padding:10px 14px}.head-brand span,#systemText{display:none}.head-status{padding:7px 9px}.layout,.layout.side-collapsed{grid-template-columns:1fr}.side{position:fixed;left:-300px;top:0;width:280px;height:100vh;z-index:80;transition:left .22s ease}.layout.mobile-open .side{left:0}.layout.side-collapsed .side a span,.layout.side-collapsed .nav-title,.layout.side-collapsed .brand-text,.layout.side-collapsed .side-profile{display:initial}.layout.side-collapsed .side a{justify-content:flex-start;font-size:13px}.main{padding:14px}.notif-bell{top:auto;bottom:18px}.theme-grid{grid-template-columns:1fr}}
+</style><script src="/socket.io/socket.io.js"></script></head><body class="theme-${themeId} bg-${bgMode} ${efeitos?'effects-on':'effects-off'}"><div class="toast-wrap" id="toastWrap"></div><div class="layout" id="adminLayout"><aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside><main class="main"><div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>${body}</main></div><div class="modal-backdrop" id="confirmModal" hidden><div class="confirm-box"><div class="confirm-icon">⚠️</div><h3 id="confirmTitle">Confirmar ação</h3><p id="confirmText">Deseja continuar?</p><div class="confirm-actions"><button type="button" class="btn gray" id="confirmCancel">Cancelar</button><button type="button" class="btn green" id="confirmOk">Confirmar</button></div></div></div><script>
 (function(){
  const socket=io(); let total=0;
  const wrap=document.getElementById('toastWrap');
+ const layout=document.getElementById('adminLayout'), toggle=document.getElementById('menuToggle');
+ try{ if(localStorage.getItem('cu_sidebar')==='collapsed' && innerWidth>900) layout?.classList.add('side-collapsed'); }catch(_){}
+ toggle?.addEventListener('click',()=>{ if(innerWidth<=900){ layout?.classList.toggle('mobile-open'); }else{ layout?.classList.toggle('side-collapsed'); try{localStorage.setItem('cu_sidebar',layout?.classList.contains('side-collapsed')?'collapsed':'open')}catch(_){}} });
+ document.addEventListener('click',e=>{ if(innerWidth<=900 && layout?.classList.contains('mobile-open') && !e.target.closest('#adminSide') && !e.target.closest('#menuToggle')) layout.classList.remove('mobile-open'); });
+ function updateClock(){ const el=document.getElementById('headClock'); if(el) el.textContent=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}); } updateClock(); setInterval(updateClock,30000);
+ const dot=document.getElementById('systemDot'), systemText=document.getElementById('systemText');
+ socket.on('connect',()=>{dot?.classList.remove('off');if(systemText)systemText.textContent='Sistema online'}); socket.on('disconnect',()=>{dot?.classList.add('off');if(systemText)systemText.textContent='Reconectando…'});
+ const confirmModal=document.getElementById('confirmModal'), confirmText=document.getElementById('confirmText'), confirmOk=document.getElementById('confirmOk'), confirmCancel=document.getElementById('confirmCancel'); let pendingForm=null;
+ function openConfirm(form,msg){pendingForm=form;if(confirmText)confirmText.textContent=msg||'Deseja continuar?';if(confirmModal)confirmModal.hidden=false}
+ confirmCancel?.addEventListener('click',()=>{if(confirmModal)confirmModal.hidden=true;pendingForm=null});
+ confirmOk?.addEventListener('click',()=>{const f=pendingForm;pendingForm=null;if(confirmModal)confirmModal.hidden=true;if(f){f.dataset.confirmed='1';f.requestSubmit();}});
+ document.addEventListener('submit',e=>{const f=e.target;if(!(f instanceof HTMLFormElement))return;const msg=f.dataset.confirm;if(msg && f.dataset.confirmed!=='1'){e.preventDefault();openConfirm(f,msg)}else if(f.dataset.confirmed==='1'){delete f.dataset.confirmed;}});
  const bell=document.createElement('div'); bell.className='notif-bell'; bell.innerHTML='🔔 <span id="notifCount">0</span>'; document.body.appendChild(bell);
  function toast(n){ total++; const c=document.getElementById('notifCount'); if(c)c.textContent=total; const el=document.createElement('div'); el.className='toast'; el.innerHTML='<b>'+((n&&n.titulo)||'Notificação')+'</b><div>'+((n&&n.mensagem)||'Atualização recebida')+'</div><small>'+((n&&n.hora)||'')+'</small>'; wrap.appendChild(el); setTimeout(()=>el.remove(),7000); }
  window.confirmarAcaoPedido=function(form){
@@ -1250,13 +1281,20 @@ function page(title, body) {
    if(!acao){ alert('Escolha uma ação.'); return false; }
    if(acao==='cancelar'){
      if(motivo){ motivo.style.display='block'; motivo.required=true; if(!motivo.value.trim()){ motivo.focus(); alert('Informe o motivo do cancelamento.'); return false; } }
-     return confirm('Cancelar este pedido?');
+     form.dataset.confirm='Cancelar este pedido?'; return true;
    }
    if(motivo){ motivo.required=false; }
-   if(acao==='finalizar') return confirm('Finalizar este pedido?');
-   if(acao==='processo') return confirm('Colocar este pedido em processo?');
+   if(acao==='finalizar'){ form.dataset.confirm='Finalizar este pedido?'; return true; }
+   if(acao==='processo'){ form.dataset.confirm='Colocar este pedido em processo?'; return true; }
    return true;
  };
+
+ document.addEventListener('submit',function(e){
+   const f=e.target;if(!(f instanceof HTMLFormElement)||!f.classList.contains('status-action-form'))return;
+   if(f.dataset.confirmed==='1')return;
+   const ok=window.confirmarAcaoPedido(f); if(!ok){e.preventDefault();return;}
+   if(f.dataset.confirm){e.preventDefault();openConfirm(f,f.dataset.confirm);}
+ },true);
  document.addEventListener('change',function(e){
    if(e.target && e.target.matches('.status-action-form select[name=acao]')){
      const form=e.target.closest('form'); const motivo=form&&form.querySelector('input[name=motivo]');
@@ -1264,7 +1302,14 @@ function page(title, body) {
    }
  });
  socket.on('notificacao', toast);
- socket.on('dashboard-update', ()=>{ const live=document.querySelector('[data-live-dashboard]'); if(live){ setTimeout(()=>location.reload(),900); } });
+ async function refreshDashboard(){
+   if(!document.querySelector('[data-live-dashboard]')) return;
+   try{const r=await fetch('/admin/api/dashboard');if(!r.ok)return;const d=await r.json();for(const [k,v] of Object.entries(d)){const el=document.querySelector('[data-metric="'+k+'"]');if(el)el.textContent=v;}}
+   catch(_){}
+ }
+ socket.on('dashboard-update', ()=>{ refreshDashboard(); });
+ if(document.querySelector('[data-live-dashboard]')) setInterval(refreshDashboard,20000);
+ const qs=new URLSearchParams(location.search); if(qs.get('ok')) setTimeout(()=>toast({titulo:'✅ Salvo',mensagem:qs.get('ok')}),250);
 })();
 </script></body></html>`;
 }
@@ -2361,6 +2406,106 @@ async function numeroPodeAdministrarPorWhatsApp(numero) {
     WHERE ativo=1 AND canal='WHATSAPP' AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(destino,'+',''),' ',''),'-',''),'(',''),')','')=?
     LIMIT 1`, [numeroNorm]);
   return Boolean(autorizado);
+}
+
+function numeroSessaoWhatsApp(socketAtual, sessao=null) {
+  const candidatos = [
+    sessao?.numero,
+    jidToNumber(socketAtual?.user?.id || ''),
+    socketAtual?.user?.id || ''
+  ];
+  for (const candidato of candidatos) {
+    const n = normalizarNumeroWhatsApp(candidato);
+    if (n) return n;
+  }
+  return '';
+}
+
+function sessaoPertenceAoAdminPrincipal(socketAtual, sessao=null) {
+  const numero = numeroSessaoWhatsApp(socketAtual, sessao);
+  return Boolean(numero && ADMIN_NUMBERS.includes(numero));
+}
+
+function comandoAvisosAdmin(texto) {
+  const cmd = String(texto || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (cmd === 'ativar avisos' || cmd === 'ativar aviso') return 'ATIVAR';
+  if (cmd === 'desativar avisos' || cmd === 'desativar aviso') return 'DESATIVAR';
+  return '';
+}
+
+function numeroConversaMensagemWhatsApp(msg) {
+  const candidatos = [
+    msg?.key?.remoteJidAlt,
+    msg?.key?.participantAlt,
+    msg?.senderPn,
+    msg?.key?.remoteJid
+  ].filter(Boolean);
+  const jidTelefone = candidatos.find(j => String(j).endsWith('@s.whatsapp.net')) || '';
+  const jidResposta = jidTelefone || msg?.key?.remoteJid || '';
+  const numero = normalizarNumeroWhatsApp(jidToNumber(jidTelefone || jidResposta));
+  return { numero, jidResposta };
+}
+
+async function tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao=null, msg, texto }) {
+  const acao = comandoAvisosAdmin(texto);
+  if (!acao || !msg?.key?.fromMe) return false;
+
+  // Segurança: somente mensagens realmente enviadas pelo número principal do admin
+  // podem autorizar ou remover outro WhatsApp.
+  if (!sessaoPertenceAoAdminPrincipal(socketAtual, sessao)) {
+    console.log('🔒 COMANDO DE AVISOS IGNORADO: sessão não pertence ao ADMIN_NUMBER/ADMIN_NUMBERS.');
+    return true;
+  }
+
+  const { numero: destino, jidResposta } = numeroConversaMensagemWhatsApp(msg);
+  const numeroAdmin = numeroSessaoWhatsApp(socketAtual, sessao);
+  if (!destino || !/^55\d{10,11}$/.test(destino) || !jidResposta || jidResposta.endsWith('@g.us')) {
+    console.log('⚠️ COMANDO DE AVISOS: não foi possível identificar o número da conversa.');
+    return true;
+  }
+  if (destino === numeroAdmin) {
+    try { await socketAtual.sendMessage(jidResposta, { text: 'ℹ️ Abra a conversa com o número que deseja autorizar e envie *ativar avisos*.' }); } catch (_) {}
+    return true;
+  }
+
+  if (acao === 'ATIVAR') {
+    const existente = await get(`SELECT * FROM destinatarios_avisos WHERE canal='WHATSAPP' AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(destino,'+',''),' ',''),'-',''),'(',''),')','')=? LIMIT 1`, [destino]);
+    if (existente) {
+      await run(`UPDATE destinatarios_avisos
+        SET destino=?, ativo=1, novos_servicos=1, pedidos_esim=1, pagamentos=1, finalizados=1, cancelados=1, atualizado_em=CURRENT_TIMESTAMP
+        WHERE id=?`, [destino, existente.id]);
+    } else {
+      await run(`INSERT INTO destinatarios_avisos
+        (nome, canal, destino, novos_servicos, pedidos_esim, pagamentos, finalizados, cancelados, ativo)
+        VALUES (?, 'WHATSAPP', ?, 1, 1, 1, 1, 1, 1)`, [`WhatsApp ${destino.slice(-4)}`, destino]);
+    }
+    whatsappJidPorNumero.set(destino, jidResposta);
+    if (sessao?.id) whatsappSessaoPorNumeroCliente.set(destino, sessao.id);
+    notificarPainel('whatsapp', '🔔 Destinatário autorizado', `+${destino} — avisos e comandos administrativos`);
+    await socketAtual.sendMessage(jidResposta, { text: `✅ *NÚMERO AUTORIZADO*
+
+📱 +${destino}
+🔔 Avisos de serviços: ATIVO
+📋 Comando pedidos: ATIVO
+🔎 Comando buscar: ATIVO
+
+A partir de agora este número recebe os avisos e pode usar *pedidos* e *buscar*.` });
+    console.log('✅ AVISOS AUTORIZADOS PELO ADMIN:', destino);
+    return true;
+  }
+
+  await run(`UPDATE destinatarios_avisos SET ativo=0, atualizado_em=CURRENT_TIMESTAMP
+    WHERE canal='WHATSAPP' AND REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(destino,'+',''),' ',''),'-',''),'(',''),')','')=?`, [destino]);
+  adminSessao.delete(`wa:${destino}`);
+  notificarPainel('whatsapp', '🔕 Destinatário desautorizado', `+${destino}`);
+  await socketAtual.sendMessage(jidResposta, { text: `🔕 *AUTORIZAÇÃO REMOVIDA*
+
+📱 +${destino}
+🔔 Avisos de serviços: INATIVO
+📋 Comando pedidos: INATIVO
+🔎 Comando buscar: INATIVO` });
+  console.log('🔕 AVISOS DESATIVADOS PELO ADMIN:', destino);
+  return true;
 }
 
 async function listarServicosPedidosAdminWhatsApp(from) {
@@ -4938,12 +5083,21 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     });
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify' || !sessao.funcaoBot) return;
+      if (type !== 'notify') return;
       for (const msg of messages || []) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
-          if (!jidPrincipal || msg?.key?.fromMe || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+          if (!jidPrincipal || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+
+          // V90: o admin principal pode autorizar/desautorizar a própria conversa
+          // enviando "ativar avisos" ou "desativar avisos" pelo WhatsApp.
+          if (msg?.key?.fromMe) {
+            const textoEnviado = textoMensagemBaileys(msg?.message || {});
+            if (await tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao, msg, texto: textoEnviado })) continue;
+            continue;
+          }
+          if (!sessao.funcaoBot) continue;
           const idMensagem = msg?.key?.id || '';
           if (mensagemWhatsAppJaProcessada(idMensagem)) continue;
           const jidTelefone = [jidAlternativo, jidPrincipal].find(j => String(j || '').endsWith('@s.whatsapp.net')) || '';
@@ -5421,12 +5575,19 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       const funcoesAtivas = await funcoesSessaoServicos();
-      if (!funcoesAtivas.bot) return; // sessão pode ficar conectada apenas para anúncios
       for (const msg of messages || []) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
-          if (!jidPrincipal || msg?.key?.fromMe || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+          if (!jidPrincipal || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+
+          // V90: também funciona na sessão legada enquanto a migração não terminar.
+          if (msg?.key?.fromMe) {
+            const textoEnviado = textoMensagemBaileys(msg?.message || {});
+            if (await tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, msg, texto: textoEnviado })) continue;
+            continue;
+          }
+          if (!funcoesAtivas.bot) continue; // sessão pode ficar conectada apenas para anúncios
 
           // O Baileys pode reenviar o mesmo evento durante sincronização/reconexão.
           // Usa o ID nativo da mensagem para garantir uma única resposta do bot.
@@ -5587,11 +5748,12 @@ app.get('/admin', async (req, res) => {
   const hoje = await get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")');
   const rev = await get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"');
   const ult = await all('SELECT * FROM pedidos ORDER BY id DESC LIMIT 8');
+  const waConectados = Array.from(whatsappSessoes.values()).filter(x => x.conectado && x.socket).length;
   let table = '<table><tr><th>ID</th><th>Entrada</th><th>Serviço</th><th>Cliente/Revenda</th><th>Status</th></tr>';
   for (const o of ult) table += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}</td><td>${safeHtml(o.servico_nome)}</td><td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td><span class="pill">${safeHtml(o.status)}</span></td></tr>`;
   table += '</table>';
   res.send(page('Dashboard', `<div data-live-dashboard="1"></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Painel seguro</div><h1>Painel <span>CentralUnlocker</span></h1><p>Controle total de pedidos, revendas, saldo, IMEI, Lock Code e serviços manuais.</p></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>API Principal</span><span class="online">ONLINE</span></div><div class="system-row"><span>Bot Telegram</span><span class="online">${tgBot ? 'CONECTADO' : 'OFFLINE'}</span></div><div class="system-row"><span>WhatsApp</span><span class="online">${conectado ? 'CONECTADO' : whatsappStatus}</span></div><div class="system-row"><span>Processador</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de Dados</span><span class="online">ONLINE</span></div></div></div><div class="topbar"><h1>Resumo geral</h1><span class="clock-box">🕒 ${dateBR(new Date())}</span></div><div class="grid">
-  <div class="card metric"><h2>🟡 Pendentes</h2><h1>${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1>${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1>${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1>${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1>${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1>${rev.qtd}</h1></div>
+  <div class="card metric"><h2>🟡 Pendentes</h2><h1 data-metric="pendentes">${p.qtd}</h1></div><div class="card metric"><h2>🔄 Em Processo</h2><h1 data-metric="processo">${ep.qtd}</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1 data-metric="finalizados">${f.qtd}</h1></div><div class="card metric"><h2>❌ Cancelados</h2><h1 data-metric="cancelados">${c.qtd}</h1></div><div class="card metric"><h2>💰 Hoje</h2><h1 data-metric="hoje">${brl(hoje.total)}</h1></div><div class="card metric"><h2>💳 Balanço revendas</h2><h1 data-metric="saldo">${brl(saldo.total)}</h1></div><div class="card metric"><h2>🏪 Revendas ativas</h2><h1 data-metric="revendas">${rev.qtd}</h1></div><div class="card metric"><h2>📲 WhatsApps conectados</h2><h1 data-metric="whatsapp">${waConectados}</h1></div>
   </div><div class="card"><h2>Últimos pedidos</h2>${table}</div>`));
 });
 
@@ -5609,7 +5771,7 @@ function pedidoActions(o, back = '/admin/pedidos') {
     ? `<a class="btn purple" href="/admin/pedido/${o.id}/entregar-esim">📤 Enviar QR Code</a>`
     : '';
   return `${botaoQr}
-  <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao" onsubmit="return confirmarAcaoPedido(this)">
+  <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao">
     <select name="acao" required>
       <option value="">Escolher ação</option>
       <option value="processo">🔄 Colocar em processo</option>
@@ -5619,7 +5781,7 @@ function pedidoActions(o, back = '/admin/pedidos') {
     <input name="motivo" placeholder="Motivo do cancelamento" style="display:none;margin-top:6px" oninput="this.dataset.changed='1'">
     <button class="btn green">Aplicar</button>
   </form>
-  <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/apagar" onsubmit="return confirm('Apagar definitivamente o pedido #${o.id}?')">
+  <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/apagar" data-confirm="Apagar definitivamente o pedido #${o.id}?">
     <button class="btn red">🗑️ Apagar</button>
   </form>`;
 }
@@ -6699,12 +6861,45 @@ app.post('/admin/whatsapp/anuncios/:id/agora',async(req,res)=>{const c=await get
 app.post('/admin/whatsapp/anuncios/:id/apagar',async(req,res)=>{const c=await get('SELECT * FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);if(c?.imagem)try{fs.unlinkSync(c.imagem)}catch(_){}await run('DELETE FROM campanhas_grupos_whatsapp WHERE id=?',[req.params.id]);res.redirect('/admin/whatsapp/anuncios');});
 app.post('/admin/whatsapp/anuncios/cancelar',(req,res)=>{cancelarCampanhaAds=true;res.redirect('/admin/whatsapp/anuncios');});
 
+
+app.get('/admin/api/dashboard', async (req, res) => {
+  try {
+    const [p, ep, f, c, saldo, hoje, rev] = await Promise.all([
+      get('SELECT COUNT(*) qtd FROM pedidos WHERE status="PENDENTE"'),
+      get('SELECT COUNT(*) qtd FROM pedidos WHERE status="EM PROCESSO"'),
+      get('SELECT COUNT(*) qtd FROM pedidos WHERE status="FINALIZADO"'),
+      get('SELECT COUNT(*) qtd FROM pedidos WHERE status="CANCELADO"'),
+      get('SELECT COALESCE(SUM(saldo),0) total FROM revendas WHERE status="ATIVA"'),
+      get('SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE date(criado_em)=date("now")'),
+      get('SELECT COUNT(*) qtd FROM revendas WHERE status="ATIVA"')
+    ]);
+    const waConectados = Array.from(whatsappSessoes.values()).filter(x => x.conectado && x.socket).length;
+    res.json({ pendentes:p?.qtd||0, processo:ep?.qtd||0, finalizados:f?.qtd||0, cancelados:c?.qtd||0, hoje:brl(hoje?.total||0), saldo:brl(saldo?.total||0), revendas:rev?.qtd||0, whatsapp:waConectados });
+  } catch (e) { res.status(500).json({erro:'status_indisponivel'}); }
+});
+
+function temasPainelHtml() {
+  return Object.entries(TEMAS_PAINEL).map(([id,t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div>${id===PAINEL_TEMA?'<span class="theme-current">ATUAL</span>':''}<h3>${safeHtml(t.nome)}</h3><p class="muted">Muda fundo, menu, cards, botões e detalhes do painel.</p><div class="theme-actions"><a class="btn gray" href="/admin/temas/preview/${id}">👁️ Visualizar</a><form method="post" action="/admin/temas/aplicar"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">${id===PAINEL_TEMA?'✅ Aplicado':'Aplicar tema'}</button></form></div></div>`).join('');
+}
+app.get('/admin/temas', async (req,res) => {
+  const themes=temasPainelHtml();
+  res.send(page('Temas do Painel', `<div class="hero"><h1>🎨 Temas do Painel</h1><p>Visualize antes de aplicar. O tema escolhido e a personalização ficam salvos no disco/banco e continuam após reiniciar ou fazer deploy no Render.</p></div><div class="card"><h2>Temas prontos</h2><div class="theme-grid">${themes}</div></div><div class="card"><h2>✨ Personalizar tema</h2><p class="muted">Controle a intensidade da foto de fundo e os efeitos visuais do painel.</p><form method="post" action="/admin/temas/personalizar"><div class="personalize-grid"><div><label>Foto de fundo</label><div class="choice-row"><label><input type="radio" name="bg_mode" value="strong" ${PAINEL_BG_MODE==='strong'?'checked':''}> Imagem forte</label><label><input type="radio" name="bg_mode" value="soft" ${PAINEL_BG_MODE==='soft'?'checked':''}> Imagem suave</label><label><input type="radio" name="bg_mode" value="none" ${PAINEL_BG_MODE==='none'?'checked':''}> Sem imagem</label></div></div><div><label>Efeitos visuais</label><select name="efeitos"><option value="1" ${PAINEL_EFEITOS?'selected':''}>Ativados</option><option value="0" ${!PAINEL_EFEITOS?'selected':''}>Desativados</option></select><p class="mini-help">Ativa transparência, animações leves e efeito de vidro.</p></div></div><button class="btn green">💾 Salvar personalização</button></form></div>`));
+});
+app.get('/admin/temas/preview/:id', async (req,res) => {
+  const id=String(req.params.id||''); if(!TEMAS_PAINEL[id]) return res.redirect('/admin/temas');
+  const t=TEMAS_PAINEL[id];
+  const preview=`<div class="preview-banner"><span class="pill">PRÉVIA — nada foi alterado</span></div><div class="hero-hacker"><div class="hero-content"><div class="eyebrow">Visualização do tema</div><h1>${safeHtml(t.nome)}</h1><p>Confira como ficam o fundo, o menu, os cards, botões e indicadores antes de aplicar.</p><div class="theme-actions"><form method="post" action="/admin/temas/aplicar"><input type="hidden" name="theme" value="${id}"><button class="btn green">✅ Aplicar este tema</button></form><a class="btn gray" href="/admin/temas">← Voltar sem aplicar</a></div></div><div class="system-card"><h3>Status do sistema</h3><div class="system-row"><span>WhatsApp</span><span class="online">CONECTADO</span></div><div class="system-row"><span>Telegram</span><span class="online">ONLINE</span></div><div class="system-row"><span>Banco de dados</span><span class="online">ONLINE</span></div></div></div><div class="grid"><div class="card metric"><h2>🟡 Pendentes</h2><h1>12</h1></div><div class="card metric"><h2>🔄 Em processo</h2><h1>4</h1></div><div class="card metric"><h2>✅ Finalizados</h2><h1>38</h1></div><div class="card metric"><h2>📲 WhatsApps</h2><h1>3</h1></div></div><div class="card"><h2>Exemplo de conteúdo</h2><p>Esta é somente uma prévia. O tema atual do painel continua igual até você tocar em <b>Aplicar este tema</b>.</p><button class="btn">Botão padrão</button><button class="btn green">Ação principal</button><button class="btn red">Ação crítica</button></div>`;
+  res.send(page('Prévia '+t.nome, preview, {themeOverride:id}));
+});
+app.post('/admin/temas/aplicar', async (req,res) => { const theme=String(req.body.theme||''); if(TEMAS_PAINEL[theme]){PAINEL_TEMA=theme;await setConfig('painel_tema',theme);notificarPainel('tema','🎨 Tema alterado',TEMAS_PAINEL[theme].nome);} res.redirect('/admin/temas?ok='+encodeURIComponent('Tema aplicado e salvo')); });
+app.post('/admin/temas/personalizar', async (req,res) => { const bg=String(req.body.bg_mode||'soft'); PAINEL_BG_MODE=['strong','soft','none'].includes(bg)?bg:'soft'; PAINEL_EFEITOS=String(req.body.efeitos||'1')==='1'; await setConfig('painel_bg_mode',PAINEL_BG_MODE); await setConfig('painel_efeitos',PAINEL_EFEITOS?'1':'0'); res.redirect('/admin/temas?ok='+encodeURIComponent('Personalização salva')); });
+
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();
-  const temasHtml = Object.entries(TEMAS_PAINEL).map(([id, t]) => `<div class="theme-card"><div class="theme-preview preview-${id}"></div><b>${safeHtml(t.nome)}</b><p class="muted">${id === PAINEL_TEMA ? 'Tema atual ✅' : 'Clique para aplicar'}</p><form method="post" action="/admin/config/theme"><input type="hidden" name="theme" value="${id}"><button class="btn ${id===PAINEL_TEMA?'green':''}">Aplicar</button></form></div>`).join('');
+  const temasHtml = temasPainelHtml();
   const iaCfg = await configuracaoIAWhatsApp();
   const iaCard = `<div class="card"><h2>🤖 IA do Bot de Serviços</h2><p class="muted">A IA responde somente perguntas livres no Bot de Serviços e consulta automaticamente produtos, preços, categorias, estoque e campanhas ativas no banco. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
-  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Temas prontos</h2><p class="muted">Escolha um tema e aplique com 1 clique.</p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Aparência do painel</h2><p class="muted">Temas completos, pré-visualização e intensidade da foto de fundo.</p><p><a class="btn green" href="/admin/temas">Abrir Temas do Painel</a></p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional: escolha uma imagem do celular. Ela substitui o banner do tema e salva como <b>/img/hacker.png</b>.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
 });
 app.post('/admin/config/ia', async (req, res) => {
   await setConfig('ia_ativa', String(req.body.ia_ativa || '0') === '1' ? '1' : '0');
@@ -6716,7 +6911,7 @@ app.post('/admin/config/ia', async (req, res) => {
   notificarPainel('ia', '🤖 Configuração da IA atualizada', (await getConfig('ia_ativa','0')) === '1' ? 'Ativada no WhatsApp' : 'Desativada');
   res.redirect('/admin/config');
 });
-app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/config'); });
+app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'hacker-green'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/temas?ok='+encodeURIComponent('Tema aplicado e salvo')); });
 app.post('/admin/config/suporte', async (req, res) => {
   const usuario = normalizarTelegramSuporte(req.body.telegram_suporte || '');
   if (usuario) {
