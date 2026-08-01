@@ -1405,6 +1405,23 @@ body:is(.theme-central-hacker-pro,.theme-command-blue,.theme-cyber-purple,.theme
 @media(max-width:1150px){body:is(.theme-central-hacker-pro,.theme-command-blue,.theme-cyber-purple,.theme-security-red,.theme-gold-premium) .layout{grid-template-columns:220px minmax(0,1fr)}.pro-kpis{grid-template-columns:repeat(3,1fr)}.pro-dashboard{grid-template-columns:1fr}.pro-mid{grid-template-columns:1fr}.pro-bottom{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:900px){body:is(.theme-central-hacker-pro,.theme-command-blue,.theme-cyber-purple,.theme-security-red,.theme-gold-premium) .layout{grid-template-columns:1fr}.pro-search{display:none}.pro-head-items>span:nth-child(1){display:none}.pro-head-items{gap:10px}.pro-dashboard{grid-template-columns:1fr}.pro-hero{height:175px}.pro-hero-copy{left:18px;bottom:20px}.pro-hero-copy h1{font-size:24px}.pro-kpis{grid-template-columns:repeat(2,1fr)}.pro-kpi{min-height:125px}.pro-mid,.pro-bottom{grid-template-columns:1fr}.pro-status-panel{display:none}.pro-quote-card{display:none}}
 
+/* V107 — correção mobile do menu nas páginas Pedidos/Clientes */
+@media(max-width:900px){
+  html,body{max-width:100%;overflow-x:hidden}
+  .layout,.main{min-width:0;max-width:100%;overflow-x:hidden}
+  .main{position:relative}
+  .admin-head{position:sticky;top:0;z-index:160;isolation:isolate;width:100%;max-width:100%}
+  .menu-toggle{position:relative;z-index:170;pointer-events:auto;touch-action:manipulation;flex:0 0 auto}
+  .side{z-index:220}
+  .topbar{min-width:0;max-width:100%;flex-wrap:wrap;align-items:flex-start}
+  .topbar>div{min-width:0;max-width:100%;display:flex;flex-wrap:wrap;gap:4px}
+  .card,.grid,.service-card,.form-grid{min-width:0;max-width:100%}
+  table{display:block;width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap}
+  table tbody,table thead,table tr{width:max-content;min-width:100%}
+  input,select,textarea{max-width:100%}
+  .actions{white-space:normal;min-width:0}
+}
+
 /* V105 — 5 temas Hacker Pro com o mesmo layout premium */
 .pro-quick-card{margin:12px 0!important}.pro-quick-card h2{font-size:15px;margin:0 0 12px}.pro-quick-card .quick-actions{grid-template-columns:repeat(6,1fr)}
 body.theme-command-blue{--card:#030914;--card2:#061326;--soft:#08182e;--line:#123957;--text:#f2fbff;--muted:#9db2c2}body.theme-cyber-purple{--card:#0d0613;--card2:#160920;--soft:#1e0d2b;--line:#48205b;--text:#fff4ff;--muted:#bba6c3}body.theme-security-red{--card:#120505;--card2:#1d0808;--soft:#260b0b;--line:#5d1919;--text:#fff5f5;--muted:#c1a5a5}body.theme-gold-premium{--card:#0e0b04;--card2:#171106;--soft:#201807;--line:#5a4514;--text:#fffaf0;--muted:#c2b79d}
