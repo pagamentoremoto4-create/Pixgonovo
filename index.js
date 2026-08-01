@@ -1355,6 +1355,57 @@ async function enviarWhatsAppTexto(numero, text) {
   }
   return false;
 }
+async function enviarTesteBotoesWhatsApp(numero) {
+  if (!WHATSAPP_ENABLED || !['baileys', 'qrcode'].includes(WHATSAPP_PROVIDER)) {
+    throw new Error('O teste de botões exige o WhatsApp de Serviços conectado pelo Baileys');
+  }
+  if (!whatsappSocket || !conectado) throw new Error('WhatsApp de Serviços não conectado');
+
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number) throw new Error('Número de WhatsApp inválido');
+  const destino = await resolverJidWhatsAppEnvio(number);
+  if (!destino) throw new Error('Não foi possível localizar o destinatário no WhatsApp');
+
+  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 15000, 'carregar recursos de botões');
+  const { proto, generateWAMessageFromContent } = baileys;
+  if (!proto?.Message?.InteractiveMessage || typeof generateWAMessageFromContent !== 'function') {
+    throw new Error('Esta versão do Baileys não possui suporte à mensagem interativa usada no teste');
+  }
+
+  const interactiveMessage = proto.Message.InteractiveMessage.create({
+    header: proto.Message.InteractiveMessage.Header.create({
+      title: '🧪 TESTE DE BOTÕES',
+      hasMediaAttachment: false
+    }),
+    body: proto.Message.InteractiveMessage.Body.create({
+      text: 'Se os botões aparecerem abaixo, seu WhatsApp aceita mensagens interativas pelo bot.'
+    }),
+    footer: proto.Message.InteractiveMessage.Footer.create({
+      text: 'CentralUnlocker • Apenas um teste'
+    }),
+    nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+      buttons: [
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '👍 Funcionou', id: 'TESTE_BOTOES_FUNCIONOU' }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '👎 Não apareceu', id: 'TESTE_BOTOES_NAO_APARECEU' }) },
+        { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '❌ Cancelar', id: 'TESTE_BOTOES_CANCELAR' }) }
+      ]
+    })
+  });
+
+  const mensagem = generateWAMessageFromContent(destino, {
+    viewOnceMessage: {
+      message: {
+        messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+        interactiveMessage
+      }
+    }
+  }, { userJid: whatsappSocket.user?.id });
+
+  await whatsappSocket.relayMessage(destino, mensagem.message, { messageId: mensagem.key.id });
+  console.log(`🧪 Teste de botões enviado para ${number} (${destino})`);
+  return true;
+}
+
 async function enviarTexto(to, text) {
   try {
     if (!to) return false;
@@ -4568,6 +4619,14 @@ function textoMensagemBaileys(message = {}) {
     m.listResponseMessage?.singleSelectReply?.selectedRowId ||
     m.templateButtonReplyMessage?.selectedDisplayText ||
     m.templateButtonReplyMessage?.selectedId ||
+    (() => {
+      try {
+        const json = m.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+        if (!json) return '';
+        const dados = JSON.parse(json);
+        return dados.id || dados.selected_id || dados.display_text || '';
+      } catch (_) { return ''; }
+    })() ||
     ''
   ).trim();
 }
@@ -5075,7 +5134,7 @@ app.get('/admin/destinatarios-avisos', async (req, res) => {
   let tabela = `<table><tr><th>Nome</th><th>Canal</th><th>Destino</th><th>Avisos</th><th>Status</th><th>Último envio</th><th>Ações</th></tr>`;
   for (const d of rows) {
     const tipos = [d.novos_servicos ? 'Serviços' : '', d.pedidos_esim ? 'eSIM' : '', d.pagamentos ? 'Pagamentos' : '', d.finalizados ? 'Finalizados' : '', d.cancelados ? 'Cancelados' : ''].filter(Boolean).join(', ') || 'Nenhum';
-    tabela += `<tr><td><b>${safeHtml(d.nome)}</b></td><td>${d.canal === 'WHATSAPP' ? '📱 WhatsApp' : '✈️ Telegram'}</td><td>${safeHtml(d.destino)}</td><td>${safeHtml(tipos)}</td><td><span class="pill">${d.ativo ? '✅ ATIVO' : '⛔ DESATIVADO'}</span><br><small class="muted">${safeHtml(d.ultimo_status || 'Nunca testado')}</small></td><td>${safeHtml(d.ultimo_envio ? dateBR(d.ultimo_envio) : '-')}</td><td><div class="actions"><form method="post" action="/admin/destinatarios-avisos/${d.id}/testar"><button class="btn green">🧪 Testar</button></form><form method="post" action="/admin/destinatarios-avisos/${d.id}/toggle"><button class="btn orange">${d.ativo ? 'Desativar' : 'Ativar'}</button></form><form method="post" action="/admin/destinatarios-avisos/${d.id}/excluir" onsubmit="return confirm('Excluir este destinatário?')"><button class="btn red">🗑️ Excluir</button></form></div></td></tr>`;
+    tabela += `<tr><td><b>${safeHtml(d.nome)}</b></td><td>${d.canal === 'WHATSAPP' ? '📱 WhatsApp' : '✈️ Telegram'}</td><td>${safeHtml(d.destino)}</td><td>${safeHtml(tipos)}</td><td><span class="pill">${d.ativo ? '✅ ATIVO' : '⛔ DESATIVADO'}</span><br><small class="muted">${safeHtml(d.ultimo_status || 'Nunca testado')}</small></td><td>${safeHtml(d.ultimo_envio ? dateBR(d.ultimo_envio) : '-')}</td><td><div class="actions"><form method="post" action="/admin/destinatarios-avisos/${d.id}/testar"><button class="btn green">🧪 Testar aviso</button></form>${d.canal === 'WHATSAPP' ? `<form method="post" action="/admin/destinatarios-avisos/${d.id}/testar-botoes"><button class="btn">🔘 Testar botões</button></form>` : ''}<form method="post" action="/admin/destinatarios-avisos/${d.id}/toggle"><button class="btn orange">${d.ativo ? 'Desativar' : 'Ativar'}</button></form><form method="post" action="/admin/destinatarios-avisos/${d.id}/excluir" onsubmit="return confirm('Excluir este destinatário?')"><button class="btn red">🗑️ Excluir</button></form></div></td></tr>`;
   }
   tabela += '</table>';
   const msg = req.query.ok ? `<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>` : req.query.erro ? `<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>` : '';
@@ -5107,6 +5166,21 @@ app.post('/admin/destinatarios-avisos/:id/testar', async (req, res) => {
   } catch (e) { erro = e.message; await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [`ERRO: ${String(erro).slice(0,180)}`, d.id]); }
   res.redirect('/admin/destinatarios-avisos?' + (ok ? 'ok=' + encodeURIComponent('Mensagem de teste enviada para ' + d.nome + '.') : 'erro=' + encodeURIComponent('Falha no teste: ' + erro)));
 });
+app.post('/admin/destinatarios-avisos/:id/testar-botoes', async (req, res) => {
+  const d = await get('SELECT * FROM destinatarios_avisos WHERE id=?', [req.params.id]);
+  if (!d) return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('Destinatário não encontrado.'));
+  if (d.canal !== 'WHATSAPP') return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('O teste de botões está disponível somente para WhatsApp.'));
+  try {
+    await enviarTesteBotoesWhatsApp(d.destino);
+    await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status="BOTÕES ENVIADOS", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [d.id]);
+    return res.redirect('/admin/destinatarios-avisos?ok=' + encodeURIComponent('Teste de botões enviado para ' + d.nome + '. Confira se os três botões apareceram no WhatsApp.'));
+  } catch (e) {
+    const erro = String(e.message || e).slice(0, 180);
+    await run('UPDATE destinatarios_avisos SET ultimo_envio=CURRENT_TIMESTAMP, ultimo_status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [`ERRO BOTÕES: ${erro}`, d.id]);
+    return res.redirect('/admin/destinatarios-avisos?erro=' + encodeURIComponent('Falha ao enviar os botões: ' + erro));
+  }
+});
+
 app.post('/admin/destinatarios-avisos/:id/toggle', async (req, res) => { await run('UPDATE destinatarios_avisos SET ativo=CASE WHEN ativo=1 THEN 0 ELSE 1 END, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.params.id]); res.redirect('/admin/destinatarios-avisos'); });
 app.post('/admin/destinatarios-avisos/:id/excluir', async (req, res) => { await run('DELETE FROM destinatarios_avisos WHERE id=?', [req.params.id]); res.redirect('/admin/destinatarios-avisos?ok=' + encodeURIComponent('Destinatário excluído.')); });
 
