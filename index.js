@@ -4625,7 +4625,11 @@ function emitirStatusExtra(sessao) {
 function agendarReconexaoExtra(key) {
   const sessao = whatsappExtra[key];
   if (!sessao || sessao.timer || !sessao.enabled) return;
-  sessao.timer = setTimeout(() => { sessao.timer = null; iniciarWhatsAppExtra(key).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message)); }, 5000);
+  sessao.timer = setTimeout(() => {
+    sessao.timer = null;
+    const possuiSessao = sessaoWhatsAppRegistrada(sessao.sessionDir);
+    iniciarWhatsAppExtra(key, { modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message));
+  }, 5000);
 }
 async function processarMensagemSuporte({ numero, nome, texto, jid }) {
   const sessao = whatsappExtra.support;
@@ -4701,7 +4705,11 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       }
     });
     // A sessão de anúncios deliberadamente não registra messages.upsert.
-  } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null; emitirStatusExtra(sessao); console.log(`❌ INICIAR WHATSAPP ${key}:`, e.stack || e.message); }
+  } catch (e) {
+    sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null; emitirStatusExtra(sessao);
+    console.log(`❌ INICIAR WHATSAPP ${key}:`, e.stack || e.message);
+    if (sessao.connectionMode === 'restaurar' && sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoExtra(key);
+  }
   finally { sessao.iniciando = false; }
 }
 async function desconectarWhatsAppExtra(key) {
@@ -4711,15 +4719,36 @@ async function desconectarWhatsAppExtra(key) {
   sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'qr'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
   try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); emitirStatusExtra(sessao);
 }
+async function funcoesSessaoServicos() {
+  return {
+    bot: String(await getConfig('whatsapp_services_funcao_bot', '1')) !== '0',
+    anuncios: String(await getConfig('whatsapp_services_funcao_anuncios', '0')) === '1'
+  };
+}
+
+async function sessaoParaAnuncios() {
+  const funcoes = await funcoesSessaoServicos();
+  // Quando o número do Bot de Serviços também estiver marcado para anúncios,
+  // ele passa a ser a sessão usada pelas campanhas em grupos.
+  if (funcoes.anuncios && whatsappSocket && conectado) {
+    return { socket: whatsappSocket, conectado: true, numero: whatsappNumeroConectado, origem: 'services', label: 'Bot de Serviços' };
+  }
+  const ads = whatsappExtra.ads;
+  if (ads?.socket && ads?.conectado) {
+    return { socket: ads.socket, conectado: true, numero: ads.numero, origem: 'ads', label: 'Anúncios' };
+  }
+  return null;
+}
+
 async function listarGruposAnuncios() {
-  const sessao = whatsappExtra.ads;
-  if (!sessao.socket || !sessao.conectado) return [];
+  const sessao = await sessaoParaAnuncios();
+  if (!sessao?.socket || !sessao.conectado) return [];
   // Evita que a tela de campanhas fique presa caso o WhatsApp demore
-  // ou deixe de responder ao buscar os grupos da sessão de anúncios.
+  // ou deixe de responder ao buscar os grupos da sessão escolhida para anúncios.
   const grupos = await comTimeoutWhatsApp(
     sessao.socket.groupFetchAllParticipating(),
     15000,
-    'listar grupos da sessão de anúncios'
+    `listar grupos da sessão de anúncios (${sessao.label})`
   );
   return Object.values(grupos || {}).map(g => ({ id: g.id, nome: g.subject || g.id, participantes: Array.isArray(g.participants) ? g.participants.length : 0 })).sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 }
@@ -4747,8 +4776,8 @@ async function solicitarCodigoPareamentoComRetry(socketAtual, numero, descricao 
 }
 
 async function executarCampanhaAds({ grupoIds, texto, imagemBuffer, intervaloSegundos }) {
-  const sessao = whatsappExtra.ads;
-  if (!sessao.socket || !sessao.conectado) throw new Error('WhatsApp de anúncios não está conectado.');
+  const sessao = await sessaoParaAnuncios();
+  if (!sessao?.socket || !sessao.conectado) throw new Error('Nenhum WhatsApp habilitado para anúncios está conectado.');
   if (campanhaAdsEmAndamento) throw new Error('Já existe uma campanha em andamento.');
   campanhaAdsEmAndamento = true; cancelarCampanhaAds = false;
   progressoCampanhaAds = { status: 'ENVIANDO', total: grupoIds.length, enviados: 0, falhas: 0, grupoAtual: '', inicio: new Date().toISOString(), fim: null };
@@ -4786,10 +4815,10 @@ async function executarCampanhaAdsAvancada(campanha, origem='agendada') {
   let imagemBuffer=null;
   if (campanha.imagem && fs.existsSync(campanha.imagem)) imagemBuffer=fs.readFileSync(campanha.imagem);
   const hist=await run(`INSERT INTO historico_campanhas_grupos (campanha_id,nome,total,status) VALUES (?,?,?,'ENVIANDO')`,[campanha.id,campanha.nome,grupos.length]);
-  const sessao=whatsappExtra.ads;
-  if (!sessao.socket || !sessao.conectado) {
+  const sessao=await sessaoParaAnuncios();
+  if (!sessao?.socket || !sessao.conectado) {
     await run(`UPDATE historico_campanhas_grupos SET status='ERRO: WHATSAPP DESCONECTADO',finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[hist.lastID]);
-    throw new Error('WhatsApp de anúncios não está conectado.');
+    throw new Error('Nenhum WhatsApp habilitado para anúncios está conectado.');
   }
   if (campanhaAdsEmAndamento) throw new Error('Já existe uma campanha em andamento.');
   campanhaAdsEmAndamento=true; cancelarCampanhaAds=false;
@@ -4829,7 +4858,9 @@ function agendarReconexaoWhatsApp() {
   if (whatsappReconectarTimer || !WHATSAPP_ENABLED) return;
   whatsappReconectarTimer = setTimeout(() => {
     whatsappReconectarTimer = null;
-    iniciarWhatsAppQrCode().catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
+    const possuiSessao = sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
+    console.log(possuiSessao ? '🔄 Reconectando automaticamente com a sessão salva.' : '📷 Sessão não registrada; aguardando novo QR Code.');
+    iniciarWhatsAppQrCode({ modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
   }, 5000);
 }
 
@@ -4963,6 +4994,8 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
+      const funcoesAtivas = await funcoesSessaoServicos();
+      if (!funcoesAtivas.bot) return; // sessão pode ficar conectada apenas para anúncios
       for (const msg of messages || []) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
@@ -5000,6 +5033,9 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     whatsappSocket = null;
     console.log('❌ INICIAR WHATSAPP QR CODE:', e.stack || e.message);
     io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
+    // Se há credenciais persistidas, uma falha transitória do Render/Baileys não
+    // deve obrigar o usuário a clicar em Gerar QR Code. Tenta restaurar sozinho.
+    if (whatsappConnectionMode === 'restaurar' && sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) agendarReconexaoWhatsApp();
   } finally {
     whatsappIniciando = false;
   }
@@ -6068,6 +6104,7 @@ app.get('/admin/relatorios', async (req, res) => { const tipo = req.query.tipo |
 app.get('/admin/whatsapp', async (req, res) => {
   const iaServicos = await configuracaoIAWhatsApp();
   const iaSuporte = await configuracaoIASuporte();
+  const funcoesServices = await funcoesSessaoServicos();
   const cardSessao = (titulo, chave, status, conectadoSessao, numero, qr, erro, descricao) => {
     const label = conectadoSessao ? '🟢 CONECTADO' : status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : status === 'REGERANDO_QR' ? '🟠 GERANDO NOVO QR CODE' : `🔴 ${safeHtml(status)}`;
     const qrHtml = qr ? `<div style="text-align:center"><img src="${qr}" style="width:min(300px,100%);background:#fff;padding:10px;border-radius:16px"><p class="mini-help">WhatsApp → Aparelhos conectados → Conectar aparelho.</p></div>` : '';
@@ -6076,7 +6113,7 @@ app.get('/admin/whatsapp', async (req, res) => {
   };
   const support = whatsappExtra.support, ads = whatsappExtra.ads;
   const botNumero = iaSuporte.numeroBot || whatsappNumeroConectado || '';
-  const cfgHtml = `<div class="card"><h2>⚙️ Funções das sessões</h2><form method="post" action="/admin/whatsapp/configurar"><label>IA do Suporte</label><select name="ia_suporte_ativa"><option value="1" ${iaSuporte.ativa?'selected':''}>Ativada</option><option value="0" ${!iaSuporte.ativa?'selected':''}>Desativada</option></select><label>IA do Bot de Serviços</label><select name="ia_servicos_ativa"><option value="1" ${iaServicos.ativa?'selected':''}>Ativada</option><option value="0" ${!iaServicos.ativa?'selected':''}>Desativada</option></select><label>Número do Bot de Serviços</label><input name="bot_servicos_numero" value="${safeHtml(botNumero)}" placeholder="5511999999999"><p class="mini-help">A IA do suporte usará este número para encaminhar compras, PIX, pedidos, saldo e eSIM.</p><button class="btn green">💾 Salvar configurações</button></form></div>`;
+  const cfgHtml = `<div class="card"><h2>⚙️ Funções das sessões</h2><form method="post" action="/admin/whatsapp/configurar"><h3>🤖 Uso do número do Bot de Serviços</h3><p class="mini-help">Escolha o que este mesmo WhatsApp conectado pode fazer. Você pode marcar uma opção ou as duas.</p><label style="display:block;padding:10px 0"><input type="checkbox" name="services_funcao_bot" value="1" ${funcoesServices.bot?'checked':''}> 🛠 <b>Bot de serviços</b> — atende clientes, menu, saldo, PIX, eSIM e pedidos</label><label style="display:block;padding:10px 0"><input type="checkbox" name="services_funcao_anuncios" value="1" ${funcoesServices.anuncios?'checked':''}> 📢 <b>Anúncios em grupos</b> — usa este mesmo número para as campanhas</label><p class="mini-help">Se “Anúncios em grupos” estiver marcado aqui, as campanhas usam primeiro este número. Se não estiver marcado, continuam usando a sessão exclusiva de Anúncios.</p><hr style="border-color:#233"><label>IA do Suporte</label><select name="ia_suporte_ativa"><option value="1" ${iaSuporte.ativa?'selected':''}>Ativada</option><option value="0" ${!iaSuporte.ativa?'selected':''}>Desativada</option></select><label>IA do Bot de Serviços</label><select name="ia_servicos_ativa"><option value="1" ${iaServicos.ativa?'selected':''}>Ativada</option><option value="0" ${!iaServicos.ativa?'selected':''}>Desativada</option></select><label>Número do Bot de Serviços</label><input name="bot_servicos_numero" value="${safeHtml(botNumero)}" placeholder="5511999999999"><p class="mini-help">A IA do suporte usará este número para encaminhar compras, PIX, pedidos, saldo e eSIM.</p><button class="btn green">💾 Salvar configurações</button></form></div>`;
   const statusQuePrecisaAtualizar = new Set(['INICIANDO','AGUARDANDO_QR','REGERANDO_QR']);
   const precisaAtualizar = statusQuePrecisaAtualizar.has(String(support.status || '')) || statusQuePrecisaAtualizar.has(String(whatsappStatus || '')) || statusQuePrecisaAtualizar.has(String(ads.status || ''));
   // Antes esta tela recarregava a cada 3 segundos para sempre. No celular isso
@@ -6089,6 +6126,8 @@ app.post('/admin/whatsapp/configurar', async (req, res) => {
   await setConfig('ia_suporte_ativa', String(req.body.ia_suporte_ativa || '0') === '1' ? '1' : '0');
   await setConfig('ia_ativa', String(req.body.ia_servicos_ativa || '0') === '1' ? '1' : '0');
   await setConfig('whatsapp_bot_servicos_numero', normalizarNumeroWhatsApp(req.body.bot_servicos_numero || ''));
+  await setConfig('whatsapp_services_funcao_bot', req.body.services_funcao_bot ? '1' : '0');
+  await setConfig('whatsapp_services_funcao_anuncios', req.body.services_funcao_anuncios ? '1' : '0');
   historicoIASuporte.clear(); historicoIAWhatsApp.clear(); res.redirect('/admin/whatsapp');
 });
 app.post('/admin/whatsapp/:sessao/conectar', async (req, res) => {
