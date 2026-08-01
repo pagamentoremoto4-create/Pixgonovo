@@ -4950,6 +4950,96 @@ function sessaoWhatsAppRegistrada(sessionDir) {
   }
 }
 
+// V94: mantém todas as credenciais das sessões novas em um caminho canônico
+// dentro do disco persistente (/data/whatsapp-sessions/<session_key>).
+function pastaCanonicaSessaoWhatsApp(sessionKey) {
+  const key = String(sessionKey || '').replace(/[^a-zA-Z0-9._-]/g, '_') || `wa-${Date.now()}`;
+  return path.join(WHATSAPP_MULTI_DIR, key);
+}
+
+function numeroCredencialSessao(sessionDir) {
+  try {
+    const arquivo = path.join(sessionDir, 'creds.json');
+    if (!fs.existsSync(arquivo)) return '';
+    const creds = JSON.parse(fs.readFileSync(arquivo, 'utf8'));
+    const jid = creds?.me?.id || creds?.me?.lid || '';
+    return normalizarNumeroWhatsApp(jidToNumber(jid));
+  } catch (_) { return ''; }
+}
+
+function copiarDiretorioSessao(origem, destino) {
+  if (!origem || !destino || path.resolve(origem) === path.resolve(destino)) return;
+  fs.mkdirSync(path.dirname(destino), { recursive: true });
+  fs.rmSync(destino, { recursive: true, force: true });
+  fs.cpSync(origem, destino, { recursive: true, force: true });
+}
+
+function listarPastasComCredenciaisWhatsApp() {
+  const encontradas = new Set();
+  const adicionar = dir => {
+    try { if (dir && sessaoWhatsAppRegistrada(dir)) encontradas.add(path.resolve(dir)); } catch (_) {}
+  };
+  adicionar(WHATSAPP_SESSION_DIR);
+  adicionar(path.join(DATA_DIR, 'whatsapp-session'));
+  adicionar(path.join(DATA_DIR, 'whatsapp-services-session'));
+  adicionar(WHATSAPP_ADS_SESSION_DIR);
+  adicionar(WHATSAPP_SUPPORT_SESSION_DIR);
+  try {
+    if (fs.existsSync(WHATSAPP_MULTI_DIR)) {
+      for (const nome of fs.readdirSync(WHATSAPP_MULTI_DIR)) {
+        const dir = path.join(WHATSAPP_MULTI_DIR, nome);
+        try { if (fs.statSync(dir).isDirectory()) adicionar(dir); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  return Array.from(encontradas);
+}
+
+async function repararPastasSessoesWhatsApp() {
+  fs.mkdirSync(WHATSAPP_MULTI_DIR, { recursive: true });
+  const rows = await all('SELECT * FROM whatsapp_sessoes WHERE ativo=1 ORDER BY id ASC');
+  const candidatas = listarPastasComCredenciaisWhatsApp();
+  const usadas = new Set();
+
+  for (const row of rows) {
+    const canonica = pastaCanonicaSessaoWhatsApp(row.session_key);
+    const atual = String(row.session_dir || '').trim();
+    let origem = '';
+
+    // 1) Se a pasta canônica já possui credenciais, ela sempre vence.
+    if (sessaoWhatsAppRegistrada(canonica)) origem = canonica;
+    // 2) Compatibilidade com versões que gravaram outro caminho no banco.
+    else if (atual && sessaoWhatsAppRegistrada(atual)) origem = atual;
+    else {
+      const numeroEsperado = normalizarNumeroWhatsApp(row.numero || '');
+      // 3) Procura uma sessão persistida com o mesmo número conectado.
+      if (numeroEsperado) {
+        origem = candidatas.find(dir => !usadas.has(dir) && numeroCredencialSessao(dir) === numeroEsperado) || '';
+      }
+      // 4) Se só existe uma sessão cadastrada e uma credencial disponível,
+      // recupera automaticamente mesmo que o número não esteja no creds.me.
+      if (!origem && rows.length === 1) {
+        const livres = candidatas.filter(dir => !usadas.has(dir));
+        if (livres.length === 1) origem = livres[0];
+      }
+    }
+
+    try {
+      if (origem && path.resolve(origem) !== path.resolve(canonica)) {
+        copiarDiretorioSessao(origem, canonica);
+        console.log(`🛠️ V94: credenciais de ${row.nome} migradas de ${origem} para ${canonica}`);
+      }
+      fs.mkdirSync(canonica, { recursive: true });
+      if (String(row.session_dir || '') !== canonica) {
+        await run('UPDATE whatsapp_sessoes SET session_dir=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [canonica, row.id]);
+      }
+      if (origem) usadas.add(path.resolve(origem));
+    } catch (e) {
+      console.log(`⚠️ V94: falha ao reparar pasta da sessão #${row.id}:`, e.message);
+    }
+  }
+}
+
 // ========================= V87: WHATSAPP MULTISSESSÃO =========================
 function normalizarFuncaoCheckbox(v) { return Number(v) === 1 || v === true || v === '1' || v === 'on'; }
 
@@ -4993,6 +5083,7 @@ async function garantirMigracaoSessoesLegadas() {
 
 async function carregarSessoesWhatsApp() {
   await garantirMigracaoSessoesLegadas();
+  await repararPastasSessoesWhatsApp();
   const rows = await all('SELECT * FROM whatsapp_sessoes WHERE ativo=1 ORDER BY id ASC');
   const ids = new Set(rows.map(r => Number(r.id)));
   for (const row of rows) criarRuntimeSessaoWhatsApp(row);
@@ -5072,6 +5163,10 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
         if (connection === 'open') {
           if (sessao.socket !== socketAtual) return;
+          // V94: força a gravação final do creds.json no disco persistente assim
+          // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
+          // em memória e perdida após restart/deploy.
+          try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
           sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
@@ -5180,6 +5275,9 @@ async function iniciarTodasSessoesWhatsAppSalvas() {
   const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
   console.log(`🔄 V93: ${sessoes.length} sessão(ões) ativa(s) encontrada(s) para restauração automática.`);
   for (const sessao of sessoes) {
+    // Reconsulta o caminho salvo após a rotina de reparo/migração da V94.
+    const rowAtual = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [sessao.id]);
+    if (rowAtual) criarRuntimeSessaoWhatsApp(rowAtual);
     if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) {
       sessao.status = 'DESCONECTADO';
       sessao.erro = 'Sessão sem credenciais válidas. Gere QR Code somente para esta sessão.';
@@ -6771,7 +6869,7 @@ app.post('/admin/whatsapp/adicionar', async (req, res) => {
   const bot = req.body.funcao_bot ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
   if (!nome || (!bot && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="/admin/whatsapp/adicionar">Voltar</a>'));
   const key = `wa-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  const dir = path.join(WHATSAPP_MULTI_DIR, key);
+  const dir = pastaCanonicaSessaoWhatsApp(key);
   fs.mkdirSync(dir, { recursive: true });
   const r = await run(`INSERT INTO whatsapp_sessoes (nome,session_key,session_dir,funcao_bot,funcao_grupos,funcao_status,ativo) VALUES (?,?,?,?,?,?,1)`, [nome,key,dir,bot,grupos,status]);
   const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [r.lastID]);
