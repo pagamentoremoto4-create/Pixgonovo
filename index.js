@@ -5177,13 +5177,46 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
 
 async function iniciarTodasSessoesWhatsAppSalvas() {
   await carregarSessoesWhatsApp();
-  for (const sessao of whatsappSessoes.values()) {
-    if (!sessao.ativo) continue;
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) {
-      iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log(`❌ V87 START #${sessao.id}:`, e.message));
-    } else {
-      sessao.status = 'DESCONECTADO'; sessao.erro = ''; emitirStatusSessaoMulti(sessao);
+  const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
+  console.log(`🔄 V93: ${sessoes.length} sessão(ões) ativa(s) encontrada(s) para restauração automática.`);
+  for (const sessao of sessoes) {
+    if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+      sessao.status = 'DESCONECTADO';
+      sessao.erro = 'Sessão sem credenciais válidas. Gere QR Code somente para esta sessão.';
+      emitirStatusSessaoMulti(sessao);
+      console.log(`⚠️ V93: ${sessao.nome} sem credenciais registradas em ${sessao.sessionDir}`);
+      continue;
     }
+    try {
+      console.log(`🔐 V93: restaurando automaticamente ${sessao.nome} (${sessao.sessionDir})`);
+      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' });
+    } catch (e) {
+      console.log(`❌ V93 START #${sessao.id}:`, e.message);
+      agendarReconexaoSessaoMulti(sessao);
+    }
+    // Pequeno intervalo evita abrir várias conexões Baileys simultaneamente no boot.
+    await new Promise(r => setTimeout(r, 1200));
+  }
+}
+
+let whatsappMultiWatchdogRodando = false;
+async function watchdogSessoesWhatsApp() {
+  if (whatsappMultiWatchdogRodando || !WHATSAPP_ENABLED || !['baileys','qrcode'].includes(WHATSAPP_PROVIDER)) return;
+  whatsappMultiWatchdogRodando = true;
+  try {
+    await carregarSessoesWhatsApp();
+    for (const sessao of whatsappSessoes.values()) {
+      if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
+      if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) continue;
+      console.log(`🩺 V93 WATCHDOG: ${sessao.nome} está offline com sessão válida; reconectando automaticamente.`);
+      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }); }
+      catch (e) { console.log(`❌ V93 WATCHDOG #${sessao.id}:`, e.message); }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  } catch (e) {
+    console.log('❌ V93 WATCHDOG:', e.message);
+  } finally {
+    whatsappMultiWatchdogRodando = false;
   }
 }
 
@@ -6981,8 +7014,17 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // Inicializa o banco pelo fluxo do Telegram e, em seguida, carrega todas as
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
-  .then(() => iniciarTodasSessoesWhatsAppSalvas())
-  .catch(e => console.log('❌ V87 START:', e.message));
+  .then(async () => {
+    // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
+    await new Promise(r => setTimeout(r, 2500));
+    await iniciarTodasSessoesWhatsAppSalvas();
+    setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
+  })
+  .catch(e => console.log('❌ V93 START:', e.message));
+
+// Redeploy/restart do Render não deve exigir botão "Reconectar".
+// O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
+setInterval(() => watchdogSessoesWhatsApp().catch(()=>{}), 15000);
 
 // A antiga sessão separada “Suporte + IA” não é iniciada na V87, porque o novo
 // painel centraliza as funções nas sessões configuráveis. As credenciais antigas
