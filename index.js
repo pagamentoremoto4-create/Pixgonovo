@@ -1046,6 +1046,17 @@ async function initDB() {
   await addColumnIfMissing('pedidos', 'tipo_entrada', "TEXT DEFAULT 'IMEI'");
   await addColumnIfMissing('pedidos', 'entrada_label', "TEXT DEFAULT 'IMEI'");
   await addColumnIfMissing('pedidos', 'lote_id', 'TEXT');
+  // V118: data/hora fixa em que o cliente enviou o serviço.
+  // Para pedidos antigos, preserva a data original de criação.
+  await addColumnIfMissing('pedidos', 'enviado_em', 'TEXT');
+  await run(`UPDATE pedidos SET enviado_em=COALESCE(NULLIF(enviado_em,''), criado_em, CURRENT_TIMESTAMP) WHERE enviado_em IS NULL OR enviado_em=''`);
+  await run(`CREATE TRIGGER IF NOT EXISTS trg_pedidos_enviado_em
+    AFTER INSERT ON pedidos
+    FOR EACH ROW
+    WHEN NEW.enviado_em IS NULL OR NEW.enviado_em=''
+    BEGIN
+      UPDATE pedidos SET enviado_em=COALESCE(NEW.criado_em, CURRENT_TIMESTAMP) WHERE id=NEW.id;
+    END`);
 
   await run(`CREATE TABLE IF NOT EXISTS pagamentos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6507,9 +6518,9 @@ function pedidoActions(o, back = '/admin/pedidos') {
     <button class="btn red">🗑️ Apagar</button>
   </form>`;
 }
-function pedidoTable(rows, showServico = true) {
-  let html = `<table><tr><th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Ações</th></tr>`;
-  for (const o of rows) html += `<tr><td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${pedidoActions(o)}</td></tr>`;
+function pedidoTable(rows, showServico = true, selectable = false) {
+  let html = `<table><tr>${selectable ? '<th><input type="checkbox" id="selectAllPedidos" title="Selecionar todos"></th>' : ''}<th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Enviado em</th><th>Ações</th></tr>`;
+  for (const o of rows) html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td><td>${pedidoActions(o)}</td></tr>`;
   html += '</table>';
   return html;
 }
@@ -7383,7 +7394,68 @@ app.post('/admin/servico/:id/editar', async (req, res) => {
 });
 app.post('/admin/servico/:id/toggle', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); if (s) await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?', [s.ativo ? 0 : 1, s.id]); res.redirect('/admin/servicos'); });
 app.post('/admin/servico/:id/excluir', async (req, res) => { await run('DELETE FROM precos_revenda WHERE servico_id=?', [req.params.id]); await run('DELETE FROM pedidos WHERE servico_id=?', [req.params.id]); await run('DELETE FROM servicos_catalogo WHERE id=?', [req.params.id]); res.redirect('/admin/servicos'); });
-app.get('/admin/servico/:id/imeis', async (req, res) => { const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [req.params.id]); const rows = await all('SELECT * FROM pedidos WHERE servico_id=? ORDER BY id DESC LIMIT 500', [req.params.id]); res.send(page('IMEIs', `<h1>📋 Pedidos - ${safeHtml(s.nome)}</h1>${pedidoTable(rows, false)}`)); });
+app.get('/admin/servico/:id/imeis', async (req, res) => {
+  const servicoId = Number(req.params.id);
+  const s = await get('SELECT * FROM servicos_catalogo WHERE id=?', [servicoId]);
+  if (!s) return res.status(404).send(page('Serviço não encontrado', '<h1>❌ Serviço não encontrado</h1>'));
+
+  const statusPermitidos = ['PENDENTE', 'EM PROCESSO', 'FINALIZADO'];
+  const status = statusPermitidos.includes(String(req.query.status || '').toUpperCase()) ? String(req.query.status).toUpperCase() : '';
+  const contagens = await get(`SELECT
+    SUM(CASE WHEN status='PENDENTE' THEN 1 ELSE 0 END) pendentes,
+    SUM(CASE WHEN status='EM PROCESSO' THEN 1 ELSE 0 END) processo,
+    SUM(CASE WHEN status='FINALIZADO' THEN 1 ELSE 0 END) finalizados
+    FROM pedidos WHERE servico_id=?`, [servicoId]);
+
+  const params = [servicoId];
+  let sql = 'SELECT * FROM pedidos WHERE servico_id=?';
+  if (status) { sql += ' AND status=?'; params.push(status); }
+  sql += ' ORDER BY id DESC LIMIT 1000';
+  const rows = await all(sql, params);
+
+  const base = `/admin/servico/${servicoId}/imeis`;
+  const tabs = `<div class="topbar"><div><a class="btn gray" href="${base}">Todos</a><a class="btn" href="${base}?status=PENDENTE">🟡 Pendente (${Number(contagens?.pendentes||0)})</a><a class="btn orange" href="${base}?status=${encodeURIComponent('EM PROCESSO')}">🔄 Em processo (${Number(contagens?.processo||0)})</a><a class="btn green" href="${base}?status=FINALIZADO">✅ Finalizado (${Number(contagens?.finalizados||0)})</a></div></div>`;
+
+  const download = `<form id="downloadSelecionadosForm" method="post" action="/admin/servico/${servicoId}/baixar-imeis" class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <input type="hidden" name="status" value="${safeHtml(status)}">
+    <button type="button" class="btn gray" id="marcarTodosPedidos">☑️ Selecionar todos</button>
+    <button type="button" class="btn gray" id="desmarcarTodosPedidos">⬜ Desmarcar todos</button>
+    <button class="btn green" type="submit">⬇️ Baixar selecionados (.txt)</button>
+    <span class="muted" id="qtdSelecionados">0 selecionado(s)</span>
+  </form>`;
+
+  const js = `<script>(function(){
+    const checks=()=>Array.from(document.querySelectorAll('.pedido-check'));
+    const all=document.getElementById('selectAllPedidos');
+    const qtd=document.getElementById('qtdSelecionados');
+    function update(){const c=checks(),n=c.filter(x=>x.checked).length;if(qtd)qtd.textContent=n+' selecionado(s)';if(all){all.checked=c.length>0&&n===c.length;all.indeterminate=n>0&&n<c.length;}}
+    all?.addEventListener('change',()=>{checks().forEach(x=>x.checked=all.checked);update();});
+    document.getElementById('marcarTodosPedidos')?.addEventListener('click',()=>{checks().forEach(x=>x.checked=true);update();});
+    document.getElementById('desmarcarTodosPedidos')?.addEventListener('click',()=>{checks().forEach(x=>x.checked=false);update();});
+    document.addEventListener('change',e=>{if(e.target?.classList?.contains('pedido-check'))update();});
+    document.getElementById('downloadSelecionadosForm')?.addEventListener('submit',e=>{if(!checks().some(x=>x.checked)){e.preventDefault();alert('Selecione pelo menos um IMEI.');}});
+    update();
+  })();</script>`;
+
+  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${tabs}${download}${rows.length ? pedidoTable(rows, false, true) : '<div class="card empty">Nenhum pedido neste status.</div>'}${js}`));
+});
+
+app.post('/admin/servico/:id/baixar-imeis', async (req, res) => {
+  const servicoId = Number(req.params.id);
+  let ids = req.body.pedido_ids || [];
+  if (!Array.isArray(ids)) ids = [ids];
+  ids = ids.map(Number).filter(Number.isInteger);
+  if (!ids.length) return res.status(400).send('Nenhum IMEI selecionado.');
+  const marks = ids.map(()=>'?').join(',');
+  const rows = await all(`SELECT id, entrada_valor, imei FROM pedidos WHERE servico_id=? AND id IN (${marks}) ORDER BY id ASC`, [servicoId, ...ids]);
+  const valores = rows.map(r => String(r.entrada_valor || r.imei || '').trim()).filter(Boolean);
+  if (!valores.length) return res.status(404).send('Nenhum IMEI encontrado.');
+  const servico = await get('SELECT nome FROM servicos_catalogo WHERE id=?', [servicoId]);
+  const nome = String(servico?.nome || 'servico').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase() || 'servico';
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${nome}-selecionados.txt"`);
+  res.send(valores.join('\n') + '\n');
+});
 
 
 app.get('/admin/pagamentos-config', async (req, res) => {
