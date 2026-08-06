@@ -953,7 +953,7 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
   await addColumnIfMissing('revendas', 'bot_ativo', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('revendas', 'perfil_bot', "TEXT DEFAULT 'NORMAL'");
-  await run("UPDATE revendas SET perfil_bot='NORMAL' WHERE perfil_bot IS NULL OR TRIM(perfil_bot)=''");
+  await run("UPDATE revendas SET perfil_bot='NORMAL' WHERE perfil_bot IS NULL OR TRIM(perfil_bot)='' OR UPPER(TRIM(perfil_bot))='VIP'");
 
   await run(`CREATE TABLE IF NOT EXISTS whatsapp_vinculos (
     codigo TEXT PRIMARY KEY,
@@ -2834,9 +2834,6 @@ function extrairMensagemWhatsApp(body) {
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
 
-function clienteEhVip(cliente) {
-  return String(cliente?.perfil_bot || 'NORMAL').trim().toUpperCase() === 'VIP';
-}
 
 function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
   const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
@@ -3179,7 +3176,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   const cadastroWhatsApp = await cadastrarClienteWhatsApp(numeroNorm, nome);
   const novo = cadastroWhatsApp.novo;
   // Recarrega sempre o cadastro diretamente do banco para aplicar imediatamente
-  // mudanças de perfil (NORMAL/VIP) e ativação feitas pelo painel.
+  // mudanças de ativação feitas pelo painel.
   let cliente = await get('SELECT * FROM revendas WHERE id=?', [cadastroWhatsApp.cliente.id]) || cadastroWhatsApp.cliente;
   let autoAtivadoPorGrupo = false;
 
@@ -3239,8 +3236,9 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     }
   }
 
-  // Sessão exclusiva da IA: evita que respostas como "2", "sim" ou "não"
-  // sejam interpretadas pelo menu tradicional.
+  // V121: regra única para todos os clientes. Fora de um fluxo iniciado por
+  // "menu", o Bot de Serviços permanece totalmente silencioso. Uma antiga
+  // sessão de IA também é encerrada para não responder mensagens livres.
   if (iaWhatsAppAtivaPara(numeroNorm)) {
     const comandoIA = comandoSaidaIAWhatsApp(textoOriginal);
     if (comandoIA === 'menu') {
@@ -3250,74 +3248,29 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarMenuWhatsApp(from, cliente, false);
       return;
     }
-    if (detectarIntencaoCompraIA(textoOriginal) || /\b(quero pagar|pagar agora|pode gerar|vamos fechar)\b/i.test(textoOriginal)) {
-      if (await iniciarItemDoContextoIA(from, numeroNorm, cliente)) return;
-      // Sem item identificado, a IA continua a conversa e pergunta qual produto/serviço.
-    }
-
-    if (comandoIA === 'comprar') {
-      encerrarSessaoIAWhatsApp(numeroNorm);
-      await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
-      await enviarListaEsim(from);
-      return;
-    }
-    if (comandoIA === 'servicos') {
-      encerrarSessaoIAWhatsApp(numeroNorm);
-      await salvarSessaoPedido(from, { etapa: 'servico_escolha' });
-      const revendaAtual = await getRevendaByJidOrNumber(from);
-      await enviarTexto(from, await listarServicosTexto(revendaAtual));
-      return;
-    }
-    if (comandoIA === 'suporte') {
-      encerrarSessaoIAWhatsApp(numeroNorm);
-      await apagarSessaoPedido(from);
-      await enviarTexto(from, '👨‍💻 Atendimento humano solicitado. Aguarde o retorno de um atendente.\n\nDigite *menu* quando quiser voltar às opções automáticas.');
-      notificarPainel('suporte', '🆘 Solicitação de suporte pela IA', `${cliente.nome} - +${numeroNorm}`);
-      await avisarAdminTelegram(`🆘 Solicitação de atendimento humano\n\nCliente: ${cliente.nome}\nWhatsApp: +${numeroNorm}`);
-      return;
-    }
-    if (comandoIA === 'cancelar') {
-      encerrarSessaoIAWhatsApp(numeroNorm, true);
-      await apagarSessaoPedido(from);
-      await enviarTexto(from, '✅ Conversa com a IA encerrada.\n\nDigite *menu* para abrir as opções novamente.');
-      return;
-    }
-
-    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
-    if (ia.respondeu) {
-      await enviarTexto(from, ia.texto);
-      return;
-    }
-    // Em caso de falha da API, encerra a sessão para não prender o cliente.
-    encerrarSessaoIAWhatsApp(numeroNorm);
-    await enviarTexto(from, '⚠️ A assistente está temporariamente indisponível. Digite *menu* para usar as opções ou *atendente* para suporte humano.');
+    encerrarSessaoIAWhatsApp(numeroNorm, true);
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 MENSAGEM LIVRE IGNORADA — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
+
 
   if (['cancelar', 'sair', 'voltar'].includes(lower)) {
-    await apagarSessaoPedido(from);
-    await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    const sessCancelar = await carregarSessaoPedido(from);
+    if (sessCancelar) {
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '✅ Operação cancelada.\n\nDigite menu para começar novamente.');
+    }
     return;
   }
 
-  // Saudações e comandos simples abrem o menu automaticamente.
-  // A limpeza das pontuações permite reconhecer mensagens como "Oi!" e "Olá.".
+  // V121: somente a palavra "menu" inicia novamente o atendimento automático.
+  // Saudações e mensagens livres não abrem o menu e não recebem resposta.
   const comandoMenu = lower
     .replace(/[!?.,;:]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const palavrasMenu = [
-    'menu',
-    'oi',
-    'ola',
-    'olá',
-    'bom dia',
-    'boa tarde',
-    'boa noite',
-    'inicio',
-    'início',
-    'start'
-  ];
+  const palavrasMenu = ['menu'];
 
   if (palavrasMenu.includes(comandoMenu)) {
     encerrarSessaoIAWhatsApp(numeroNorm);
@@ -3410,17 +3363,8 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   // ter prioridade mesmo após reinício do Render.
   sess = sess || await carregarSessaoPedido(from);
   if (!sess) {
-    if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
-      const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
-      if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
-    }
-    // Perfil VIP: mensagens livres fora de um fluxo ativo são ignoradas em silêncio.
-    // Perfil NORMAL mantém o comportamento tradicional do menu rígido.
-    if (clienteEhVip(cliente)) {
-      console.log('👑 MENSAGEM FORA DO FLUXO IGNORADA (VIP):', numeroNorm, textoOriginal);
-      return;
-    }
-    await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
+    // V121: fora do menu, nenhuma mensagem automática é enviada.
+    console.log('🔇 V121 FORA DO MENU — SILÊNCIO:', numeroNorm, textoOriginal);
     return;
   }
 
@@ -3432,12 +3376,14 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nValor mínimo: R$ 10,00\nExemplo: 50');
       return;
     }
-    await enviarTexto(from, 'Escolha 5 para adicionar saldo ou 0 para voltar.');
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 OPÇÃO FORA DO FLUXO CONTA — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
   if (sess?.etapa === 'historico') {
-    await enviarTexto(from, 'Digite 0 para voltar ao menu.');
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 OPÇÃO FORA DO HISTÓRICO — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
@@ -3453,7 +3399,8 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarHistoricoRevenda(from, cliente);
       return;
     }
-    await enviarTexto(from, 'Escolha 1 para falar com o suporte, 2 para consultar pedido ou 0 para voltar.');
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 OPÇÃO FORA DO SUPORTE — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
@@ -3471,26 +3418,17 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 💬 Digite a opção desejada.`); return; }
 
-    // Para o perfil VIP, a etapa "menu" não é considerada fluxo ativo.
-    // Portanto, qualquer texto que não seja uma opção válida é ignorado em silêncio.
-    if (clienteEhVip(cliente)) {
-      console.log('👑 MENSAGEM LIVRE NO MENU IGNORADA (VIP):', numeroNorm, textoOriginal);
-      return;
-    }
-
-    // Cliente NORMAL mantém o funcionamento atual e pode usar a IA antes do aviso.
-    if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
-      const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
-      if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
-    }
-    await enviarTexto(from, '❌ Não consegui responder agora. Digite um número de 1 a 6, escreva *menu* ou tente novamente em instantes.');
+    // V121: qualquer conteúdo fora das opções válidas cancela o menu sem resposta.
+    await apagarSessaoPedido(from);
+    encerrarSessaoIAWhatsApp(numeroNorm, true);
+    console.log('🔇 V121 OPÇÃO FORA DO MENU — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
     const planos = await planosEsimDisponiveis();
     const plano = planos[Number(opcao) - 1];
-    if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
+    if (!plano) { await apagarSessaoPedido(from); console.log('🔇 V121 PLANO INVÁLIDO — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
     await enviarTexto(from, `📱 Confirmar eSIM
 
@@ -3504,9 +3442,15 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
+  if (sess?.etapa === 'esim_escolha') {
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 MENSAGEM FORA DA ESCOLHA ESIM — MENU CANCELADO:', numeroNorm, textoOriginal);
+    return;
+  }
+
   if (sess?.etapa === 'esim_confirmar') {
     if (opcao === '2' || lower === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para cancelar.'); return; }
+    if (opcao !== '1') { await apagarSessaoPedido(from); console.log('🔇 V121 CONFIRMAÇÃO ESIM INVÁLIDA — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
     await apagarSessaoPedido(from);
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     await entregarEsimRevenda(from, revAtual || cliente, sess.plano);
@@ -3516,9 +3460,15 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[Number(opcao) - 1];
-    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
+    if (!servico) { await apagarSessaoPedido(from); console.log('🔇 V121 SERVIÇO INVÁLIDO — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
     await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+    return;
+  }
+
+  if (sess?.etapa === 'servico_escolha') {
+    await apagarSessaoPedido(from);
+    console.log('🔇 V121 MENSAGEM FORA DA ESCOLHA DE SERVIÇO — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
@@ -3560,17 +3510,10 @@ ${detalhesEntradas}
     return;
   }
 
-  if (mensagemPodeIrParaIA(textoOriginal, sess, numeroNorm)) {
-    const ia = await responderComOpenAIWhatsApp(numeroNorm, textoOriginal, cliente);
-    if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
-  }
-  // A sessão de menu não é considerada um atendimento em andamento.
-  // Por isso, clientes VIP podem conversar normalmente sem receber aviso automático.
-  if (clienteEhVip(cliente)) {
-    console.log('👑 MENSAGEM FORA DO FLUXO IGNORADA (VIP):', numeroNorm, textoOriginal);
-    return;
-  }
-  await enviarTexto(from, '❌ Opção inválida. Digite *menu* para abrir as opções ou digite *6* para falar com o suporte.');
+  // V121: se nenhuma etapa reconheceu a mensagem, encerra o fluxo e fica em silêncio.
+  await apagarSessaoPedido(from);
+  encerrarSessaoIAWhatsApp(numeroNorm, true);
+  console.log('🔇 V121 MENSAGEM FORA DO FLUXO — MENU CANCELADO:', numeroNorm, textoOriginal);
   return;
 }
 
@@ -7024,31 +6967,106 @@ app.post('/admin/esim/:id/reenviar', async (req, res) => {
 });
 
 app.get('/admin/revendas', async (req, res) => {
-  const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY id DESC');
-  let html = `<h1>👥 Clientes Telegram e WhatsApp</h1>
-  <div class="card">
-    <h2>➕ Cadastrar pelo ID do Telegram</h2>
-    <form method="post">
-      <div class="grid">
-        <div><label>Nome</label><input name="nome" placeholder="Nome do cliente" required></div>
-        <div><label>ID do Telegram</label><input name="telegram_id" placeholder="Ex: 5319809013" required></div>
-        <div><label>Usuário de login</label><input name="login" placeholder="Deixe vazio para gerar automático"></div>
-        <div><label>Senha</label><input name="senha" placeholder="Deixe vazio para gerar automático"></div>
-        <div><label>Tipo</label><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div>
-      </div>
-      <button class="btn green">Adicionar / Atualizar</button>
-    </form>
-    <p class="muted">Clientes novos do WhatsApp são cadastrados automaticamente. Para recuperar o histórico antigo do Telegram, use o botão <b>Vincular ao Telegram</b> na conta criada pelo WhatsApp.</p>
-  </div>
-  <table><tr><th>ID</th><th>Nome</th><th>Telegram</th><th>WhatsApp</th><th>Tipo</th><th>Status</th><th>Perfil</th><th>Bot</th><th>Saldo</th><th>Ações</th></tr>`;
+  const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY nome COLLATE NOCASE ASC, id DESC');
+  const ativos = rows.filter(r => r.status === 'ATIVA').length;
+  const bloqueados = rows.filter(r => r.status === 'BLOQUEADA').length;
+
+  let lista = '';
   for (const r of rows) {
     const somenteWhatsApp = Boolean(r.whatsapp && !r.telegram_id);
-    const vinculo = somenteWhatsApp ? `<a class="btn green" href="/admin/revenda/${r.id}/vincular-telegram">🔗 Vincular ao Telegram</a>` : '';
     const botAtivo = Number(r.bot_ativo || 0) === 1;
-    const acaoBot = `<form class="forms-inline" method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${botAtivo ? 0 : 1}"><button class="btn ${botAtivo ? 'orange' : 'green'}">${botAtivo ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form>`;
-    html += `<tr><td>#${r.id}</td><td>${safeHtml(r.nome)}</td><td>${safeHtml(r.telegram_id || '-')}</td><td>${safeHtml(r.whatsapp ? '+' + r.whatsapp : '-')}</td><td><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></td><td><span class="pill">${safeHtml(r.status)}</span></td><td><span class="pill">${clienteEhVip(r) ? '👑 VIP' : '👤 Normal'}</span></td><td><span class="pill">${botAtivo ? '🟢 Ativado' : '🔴 Desativado'}</span></td><td>${brl(r.saldo)}</td><td class="actions">${vinculo}${acaoBot}<a class="btn" href="/admin/revenda/${r.id}/editar">✏️ Editar</a><a class="btn" href="/admin/revenda/${r.id}/precos">💰 Preços</a><a class="btn gray" href="/admin/revenda/${r.id}/conta">💳 Conta</a><a class="btn" href="/admin/revenda/${r.id}/historico">Histórico</a><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/status"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="btn orange">${r.status === 'BLOQUEADA' ? '🔓 Desbloquear' : '🔒 Bloquear'}</button></form><form class="forms-inline" method="post" action="/admin/revenda/${r.id}/remover"><button class="btn red" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')">🗑️ Remover</button></form></td></tr>`;
+    const clienteAtivo = r.status === 'ATIVA';
+    const identificador = `${String(r.nome || '').toLowerCase()} ${String(r.whatsapp || '')} ${String(r.telegram_id || '')} ${String(r.id)}`;
+    const vinculo = somenteWhatsApp
+      ? `<a class="cli-action" href="/admin/revenda/${r.id}/vincular-telegram"><span>🔗</span><b>Vincular Telegram</b><small>Associar conta antiga</small></a>`
+      : '';
+
+    lista += `<div class="cli-item" data-search="${safeHtml(identificador)}">
+      <button type="button" class="cli-head" onclick="toggleCliente(${r.id})" aria-expanded="false">
+        <span class="cli-avatar">👤</span>
+        <span class="cli-main"><b>${safeHtml(r.nome || 'Cliente')}</b><small>${r.whatsapp ? '📱 +' + safeHtml(r.whatsapp) : '📱 Sem WhatsApp'}${r.telegram_id ? ' &nbsp; ✈️ ' + safeHtml(r.telegram_id) : ''}</small></span>
+        <span class="cli-badges"><em class="${clienteAtivo ? 'ok' : 'off'}">${clienteAtivo ? 'ATIVO' : 'BLOQUEADO'}</em><strong>${brl(r.saldo || 0)}</strong></span>
+        <span class="cli-arrow" id="arr-${r.id}">⌄</span>
+      </button>
+      <div class="cli-options" id="cli-${r.id}">
+        <div class="cli-actions-grid">
+          <a class="cli-action" href="/admin/revenda/${r.id}/editar"><span>✏️</span><b>Editar Cliente</b><small>Dados cadastrais</small></a>
+          <a class="cli-action" href="/admin/revenda/${r.id}/conta"><span>💳</span><b>Saldo / Conta</b><small>Crédito e movimentações</small></a>
+          <a class="cli-action" href="/admin/revenda/${r.id}/precos"><span>💰</span><b>Editar Preços</b><small>Preços personalizados</small></a>
+          <a class="cli-action" href="/admin/revenda/${r.id}/historico"><span>📦</span><b>Serviços / Pedidos</b><small>Histórico do cliente</small></a>
+          ${vinculo}
+          <form method="post" action="/admin/revenda/${r.id}/bot" class="cli-form"><input type="hidden" name="bot_ativo" value="${botAtivo ? 0 : 1}"><button class="cli-action cli-button" type="submit"><span>${botAtivo ? '🔇' : '🤖'}</span><b>${botAtivo ? 'Desativar Bot' : 'Ativar Bot'}</b><small>${botAtivo ? 'Bot atualmente ativo' : 'Bot atualmente inativo'}</small></button></form>
+          <form method="post" action="/admin/revenda/${r.id}/status" class="cli-form"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="cli-action cli-button" type="submit"><span>${r.status === 'BLOQUEADA' ? '✅' : '⛔'}</span><b>${r.status === 'BLOQUEADA' ? 'Ativar Cliente' : 'Bloquear Cliente'}</b><small>${r.status === 'BLOQUEADA' ? 'Liberar acesso' : 'Suspender acesso'}</small></button></form>
+          <form method="post" action="/admin/revenda/${r.id}/remover" class="cli-form"><button class="cli-action cli-button danger" type="submit" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')"><span>🗑️</span><b>Remover Cliente</b><small>Manter histórico no banco</small></button></form>
+        </div>
+      </div>
+    </div>`;
   }
-  html += '</table>';
+
+  if (!lista) lista = '<div class="card"><p class="muted">Nenhum cliente cadastrado.</p></div>';
+
+  const html = `<style>
+    .cli-top{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}.cli-top button{width:100%;font-size:16px;padding:15px;border-radius:14px}
+    .cli-panel{display:none}.cli-panel.active{display:block}.cli-summary{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px}.cli-summary span{padding:7px 11px;border:1px solid rgba(148,163,184,.2);border-radius:999px;font-size:13px}
+    .cli-search{position:relative;margin-bottom:14px}.cli-search input{width:100%;padding:15px 16px 15px 45px;border-radius:14px}.cli-search:before{content:'🔎';position:absolute;left:15px;top:13px;font-size:18px}
+    .cli-list{display:grid;gap:9px}.cli-item{border:1px solid rgba(148,163,184,.17);border-radius:14px;background:rgba(15,23,42,.48);overflow:hidden}.cli-head{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr) auto 28px;align-items:center;gap:10px;padding:13px 14px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}.cli-head:hover{background:rgba(59,130,246,.06)}
+    .cli-avatar{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:rgba(59,130,246,.12);font-size:19px}.cli-main{min-width:0}.cli-main b{display:block;font-size:15px}.cli-main small{display:block;color:#94a3b8;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cli-badges{display:flex;align-items:flex-end;flex-direction:column;gap:4px}.cli-badges em{font-style:normal;font-size:10px;font-weight:800;padding:3px 7px;border-radius:999px}.cli-badges em.ok{color:#22c55e;background:rgba(34,197,94,.12)}.cli-badges em.off{color:#f97316;background:rgba(249,115,22,.12)}.cli-badges strong{font-size:12px}.cli-arrow{font-size:22px;transition:.2s}.cli-item.open .cli-arrow{transform:rotate(180deg)}
+    .cli-options{display:none;border-top:1px solid rgba(148,163,184,.14);padding:12px}.cli-item.open .cli-options{display:block}.cli-actions-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.cli-action{min-height:86px;padding:12px;border:1px solid rgba(148,163,184,.16);border-radius:12px;text-decoration:none;color:inherit;background:rgba(30,41,59,.38);display:flex;flex-direction:column;justify-content:center}.cli-action:hover{border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.08)}.cli-action span{font-size:19px;margin-bottom:5px}.cli-action b{font-size:13px}.cli-action small{font-size:11px;color:#94a3b8;margin-top:3px}.cli-form{margin:0}.cli-button{width:100%;text-align:left;cursor:pointer;font-family:inherit}.cli-action.danger{border-color:rgba(239,68,68,.22)}
+    .cli-empty{display:none;padding:20px;text-align:center;color:#94a3b8}.cadastro-card{max-width:950px}
+    @media(max-width:760px){.cli-top{grid-template-columns:1fr 1fr}.cli-head{grid-template-columns:38px minmax(0,1fr) 24px}.cli-badges{display:none}.cli-actions-grid{grid-template-columns:1fr 1fr}.cli-action{min-height:78px}.cli-main small{font-size:11px}}
+    @media(max-width:430px){.cli-top{grid-template-columns:1fr}.cli-actions-grid{grid-template-columns:1fr 1fr}}
+  </style>
+  <h1>👥 Clientes</h1>
+  <div class="cli-top">
+    <button type="button" class="btn" id="tabCadastro" onclick="showClienteTab('cadastro')">➕ Cadastrar Cliente</button>
+    <button type="button" class="btn green" id="tabLocalizar" onclick="showClienteTab('localizar')">🔎 Localizar Cliente</button>
+  </div>
+
+  <div id="painelCadastro" class="cli-panel">
+    <div class="card cadastro-card">
+      <h2>➕ Cadastrar pelo ID do Telegram</h2>
+      <form method="post">
+        <div class="grid">
+          <div><label>Nome</label><input name="nome" placeholder="Nome do cliente" required></div>
+          <div><label>ID do Telegram</label><input name="telegram_id" placeholder="Ex: 5319809013" required></div>
+          <div><label>Usuário de login</label><input name="login" placeholder="Deixe vazio para gerar automático"></div>
+          <div><label>Senha</label><input name="senha" placeholder="Deixe vazio para gerar automático"></div>
+          <div><label>Tipo</label><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div>
+        </div>
+        <button class="btn green">Adicionar / Atualizar</button>
+      </form>
+      <p class="muted">Clientes novos do WhatsApp são cadastrados automaticamente.</p>
+    </div>
+  </div>
+
+  <div id="painelLocalizar" class="cli-panel active">
+    <div class="cli-summary"><span>👥 Total: <b>${rows.length}</b></span><span>🟢 Ativos: <b>${ativos}</b></span><span>🔒 Bloqueados: <b>${bloqueados}</b></span></div>
+    <div class="cli-search"><input id="clienteBusca" type="search" placeholder="Buscar por nome, WhatsApp, Telegram ou ID..." oninput="filtrarClientes()"></div>
+    <div class="cli-list" id="clienteLista">${lista}</div>
+    <div class="cli-empty" id="clienteVazio">Nenhum cliente encontrado.</div>
+  </div>
+
+  <script>
+    function showClienteTab(tab){
+      const cad=document.getElementById('painelCadastro'), loc=document.getElementById('painelLocalizar');
+      const bc=document.getElementById('tabCadastro'), bl=document.getElementById('tabLocalizar');
+      const isCad=tab==='cadastro';
+      cad.classList.toggle('active',isCad); loc.classList.toggle('active',!isCad);
+      bc.classList.toggle('green',isCad); bl.classList.toggle('green',!isCad);
+    }
+    function toggleCliente(id){
+      const box=document.getElementById('cli-'+id); if(!box)return;
+      const item=box.closest('.cli-item'); const abrir=!item.classList.contains('open');
+      document.querySelectorAll('.cli-item.open').forEach(el=>{if(el!==item)el.classList.remove('open')});
+      item.classList.toggle('open',abrir);
+      const head=item.querySelector('.cli-head'); if(head)head.setAttribute('aria-expanded',abrir?'true':'false');
+    }
+    function filtrarClientes(){
+      const q=(document.getElementById('clienteBusca').value||'').toLowerCase().trim(); let vis=0;
+      document.querySelectorAll('#clienteLista .cli-item').forEach(el=>{const ok=!q||(el.dataset.search||'').includes(q);el.style.display=ok?'':'none';if(ok)vis++});
+      document.getElementById('clienteVazio').style.display=vis?'none':'block';
+    }
+  </script>`;
   res.send(page('Clientes', html));
 });
 
@@ -7139,17 +7157,6 @@ Selecione uma das opções do menu abaixo:`);
   res.redirect(voltar);
 });
 
-app.post('/admin/revenda/:id/perfil-bot', async (req, res) => {
-  const perfilBot = String(req.body.perfil_bot || 'NORMAL').toUpperCase() === 'VIP' ? 'VIP' : 'NORMAL';
-  await run('UPDATE revendas SET perfil_bot=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [perfilBot, req.params.id]);
-  const cliente = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
-  if (cliente) notificarPainel('cliente', perfilBot === 'VIP' ? '👑 Cliente definido como VIP' : '👤 Cliente definido como Normal', `${cliente.nome} - ${cliente.whatsapp || cliente.telegram_id || ''}`);
-  const voltar = String(req.get('referer') || '').includes(`/admin/revenda/${req.params.id}/editar`)
-    ? `/admin/revenda/${req.params.id}/editar`
-    : '/admin/revendas';
-  res.redirect(voltar);
-});
-
 app.post('/admin/revenda/:id/status', async (req, res) => {
   await run('UPDATE revendas SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.status, req.params.id]);
   const rStatus = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
@@ -7200,23 +7207,19 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
     <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
-    <label>Perfil do cliente</label><select name="perfil_bot"><option value="NORMAL" ${!clienteEhVip(r)?'selected':''}>👤 Normal — responde opção inválida fora do fluxo</option><option value="VIP" ${clienteEhVip(r)?'selected':''}>👑 VIP — ignora mensagens fora do fluxo</option></select><br><span class="muted">Clique em Salvar cadastro para gravar as alterações deste formulário.</span><br><br>
+    <span class="muted">Regra do bot: mensagens fora do menu são ignoradas para todos os clientes.</span><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <div class="card"><b>Comunicação com o bot:</b> ${Number(r.bot_ativo || 0) === 1 ? '🟢 Ativada' : '🔴 Desativada'}<br><span class="muted">Ao ativar, a saudação e o menu são enviados imediatamente pelo WhatsApp.</span></div>
     <button class="btn green">Salvar cadastro</button>
   </form>
   <hr>
-  <b>Alteração rápida do perfil:</b><br><br>
-  <form class="forms-inline" method="post" action="/admin/revenda/${r.id}/perfil-bot"><input type="hidden" name="perfil_bot" value="VIP"><button class="btn ${clienteEhVip(r) ? 'green' : ''}">👑 Definir como VIP</button></form>
-  <form class="forms-inline" method="post" action="/admin/revenda/${r.id}/perfil-bot"><input type="hidden" name="perfil_bot" value="NORMAL"><button class="btn ${!clienteEhVip(r) ? 'green' : 'gray'}">👤 Definir como Normal</button></form><br><br>
   <form method="post" action="/admin/revenda/${r.id}/bot"><input type="hidden" name="bot_ativo" value="${Number(r.bot_ativo || 0) === 1 ? 0 : 1}"><button class="btn ${Number(r.bot_ativo || 0) === 1 ? 'orange' : 'green'}">${Number(r.bot_ativo || 0) === 1 ? '🔇 Desativar Bot' : '🤖 Ativar Bot'}</button></form></div>`));
 });
 app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
   const jid = telegramId ? tgJid(telegramId) : '';
   const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
-  const perfilBot = String(req.body.perfil_bot || 'NORMAL').toUpperCase() === 'VIP' ? 'VIP' : 'NORMAL';
-  await run('UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, perfil_bot=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), perfilBot, req.params.id]);
+  await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/precos', async (req, res) => {
