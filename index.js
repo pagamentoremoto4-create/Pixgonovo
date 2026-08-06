@@ -11,6 +11,7 @@ const cron = require('node-cron');
 const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
 const crypto = require('crypto');
+const ExcelJS = require('exceljs');
 let TelegramBot = null;
 let tgBot = null; // Instância global: o painel pode consultar com segurança durante a inicialização.
 try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
@@ -7421,6 +7422,7 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     <button type="button" class="btn gray" id="marcarTodosPedidos">☑️ Selecionar todos</button>
     <button type="button" class="btn gray" id="desmarcarTodosPedidos">⬜ Desmarcar todos</button>
     <button class="btn green" type="submit">⬇️ Baixar selecionados (.txt)</button>
+    <button class="btn" type="submit" formaction="/admin/servico/${servicoId}/baixar-excel">📊 Baixar controle Excel (.xlsx)</button>
     <span class="muted" id="qtdSelecionados">0 selecionado(s)</span>
   </form>`;
 
@@ -7455,6 +7457,121 @@ app.post('/admin/servico/:id/baixar-imeis', async (req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${nome}-selecionados.txt"`);
   res.send(valores.join('\n') + '\n');
+});
+
+app.post('/admin/servico/:id/baixar-excel', async (req, res) => {
+  try {
+    const servicoId = Number(req.params.id);
+    let ids = req.body.pedido_ids || [];
+    if (!Array.isArray(ids)) ids = [ids];
+    ids = ids.map(Number).filter(Number.isInteger);
+    if (!ids.length) return res.status(400).send('Nenhum IMEI selecionado.');
+
+    const marks = ids.map(()=>'?').join(',');
+    const rows = await all(`SELECT p.id, p.entrada_valor, p.imei, p.entrada_label, p.status, p.enviado_em, p.criado_em, p.revenda_nome, p.cliente_nome, p.revenda_numero, p.cliente_whatsapp, p.revenda_jid, p.cliente_jid, s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.servico_id=? AND p.id IN (${marks}) ORDER BY p.id ASC`, [servicoId, ...ids]);
+    if (!rows.length) return res.status(404).send('Nenhum pedido encontrado.');
+
+    const servico = await get('SELECT nome FROM servicos_catalogo WHERE id=?', [servicoId]);
+    const nomeServico = String(servico?.nome || 'servico');
+    const nomeArquivo = nomeServico.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').toLowerCase() || 'servico';
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'CentralUnlocker';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('Controle');
+
+    ws.mergeCells('A1:F1');
+    ws.getCell('A1').value = `Controle - ${nomeServico}`;
+    ws.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+    ws.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF111827' } };
+    ws.getCell('A1').alignment = { vertical: 'middle', horizontal: 'center' };
+    ws.getRow(1).height = 28;
+
+    ws.mergeCells('A2:F2');
+    ws.getCell('A2').value = 'Planilha somente para controle. Alterar o Status aqui não modifica o painel.';
+    ws.getCell('A2').font = { italic: true, color: { argb: 'FF6B7280' } };
+    ws.getCell('A2').alignment = { horizontal: 'center' };
+
+    const headers = ['IMEI / Entrada', 'Serviço', 'Cliente', 'WhatsApp', 'Enviado em', 'Status'];
+    ws.getRow(4).values = headers;
+    ws.getRow(4).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF047857' } };
+    ws.getRow(4).alignment = { vertical: 'middle', horizontal: 'center' };
+    ws.getRow(4).height = 24;
+
+    const statusExcel = (status) => {
+      const st = String(status || '').toUpperCase();
+      if (st === 'EM PROCESSO') return 'Em processo';
+      if (st === 'FINALIZADO') return 'Finalizado';
+      return 'Pendente';
+    };
+    const dataExcel = (valor) => {
+      if (!valor) return '';
+      const d = new Date(valor);
+      return Number.isNaN(d.getTime()) ? String(valor) : d;
+    };
+
+    for (const r of rows) {
+      const cliente = r.revenda_nome || r.cliente_nome || '-';
+      const numero = r.revenda_numero || r.cliente_whatsapp || r.revenda_jid || r.cliente_jid || '-';
+      ws.addRow([
+        String(r.entrada_valor || r.imei || '').trim(),
+        r.servico_nome || nomeServico,
+        cliente,
+        numero,
+        dataExcel(r.enviado_em || r.criado_em),
+        statusExcel(r.status)
+      ]);
+    }
+
+    const lastRow = ws.rowCount;
+    if (lastRow >= 5) {
+      for (let row = 5; row <= lastRow; row++) {
+        const cell = ws.getCell(`F${row}`);
+        cell.dataValidation = {
+          type: 'list',
+          allowBlank: false,
+          formulae: ['"Pendente,Em processo,Finalizado"'],
+          showErrorMessage: true,
+          errorTitle: 'Status inválido',
+          error: 'Escolha Pendente, Em processo ou Finalizado.'
+        };
+        ws.getCell(`E${row}`).numFmt = 'dd/mm/yyyy hh:mm';
+      }
+    }
+
+    ws.columns = [
+      { key: 'entrada', width: 24 },
+      { key: 'servico', width: 28 },
+      { key: 'cliente', width: 24 },
+      { key: 'whatsapp', width: 22 },
+      { key: 'enviado', width: 20 },
+      { key: 'status', width: 18 }
+    ];
+    ws.views = [{ state: 'frozen', ySplit: 4 }];
+    ws.autoFilter = { from: 'A4', to: `F${lastRow}` };
+
+    for (let row = 5; row <= lastRow; row++) {
+      for (let col = 1; col <= 6; col++) {
+        const c = ws.getCell(row, col);
+        c.alignment = { vertical: 'middle', horizontal: col === 1 ? 'center' : 'left' };
+        c.border = {
+          top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+        };
+      }
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}-controle.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (e) {
+    console.error('Erro ao gerar Excel de controle:', e);
+    if (!res.headersSent) res.status(500).send('Erro ao gerar planilha Excel.');
+  }
 });
 
 
