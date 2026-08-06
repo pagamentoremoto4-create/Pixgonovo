@@ -7551,6 +7551,30 @@ app.post('/admin/servico/:id/baixar-excel', async (req, res) => {
     ws.views = [{ state: 'frozen', ySplit: 4 }];
     ws.autoFilter = { from: 'A4', to: `F${lastRow}` };
 
+    // Cores automáticas para controle conforme o Status escolhido no Excel.
+    // A cor é aplicada à linha inteira e não altera nenhum status no painel.
+    if (lastRow >= 5) {
+      ws.addConditionalFormatting({
+        ref: `A5:F${lastRow}`,
+        rules: [
+          {
+            type: 'expression',
+            formulae: ['$F5=\"Em processo\"'],
+            style: {
+              fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFE699' }, fgColor: { argb: 'FFFFE699' } }
+            }
+          },
+          {
+            type: 'expression',
+            formulae: ['$F5=\"Finalizado\"'],
+            style: {
+              fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFC6E0B4' }, fgColor: { argb: 'FFC6E0B4' } }
+            }
+          }
+        ]
+      });
+    }
+
     for (let row = 5; row <= lastRow; row++) {
       for (let col = 1; col <= 6; col++) {
         const c = ws.getCell(row, col);
