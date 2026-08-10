@@ -3239,7 +3239,11 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   // V121: regra única para todos os clientes. Fora de um fluxo iniciado por
   // "menu", o Bot de Serviços permanece totalmente silencioso. Uma antiga
   // sessão de IA também é encerrada para não responder mensagens livres.
-  if (iaWhatsAppAtivaPara(numeroNorm)) {
+  // V122: uma sessão estruturada do bot (ex.: saldo insuficiente / PIX / eSIM)
+  // sempre tem prioridade sobre a regra de silêncio/IA. Antes, ao cliente digitar
+  // "1" em "Pagar este serviço", esta regra podia apagar a sessão e ignorar a resposta.
+  const sessaoEstruturadaAntesIA = await carregarSessaoPedido(from);
+  if (iaWhatsAppAtivaPara(numeroNorm) && !sessaoEstruturadaAntesIA) {
     const comandoIA = comandoSaidaIAWhatsApp(textoOriginal);
     if (comandoIA === 'menu') {
       encerrarSessaoIAWhatsApp(numeroNorm);
@@ -4280,6 +4284,18 @@ Nenhum plano disponível no momento.
 async function criarPedidoEsimManualRevenda(from, revenda, plano) {
   const valor = Number(plano.preco_revenda || 0);
   if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+    // V122: preserva o contexto da compra mesmo quando não há QR em estoque.
+    // Assim, a opção 1 (Pagar este serviço) sabe qual eSIM liberar após o PIX.
+    await salvarSessaoPedido(from, {
+      etapa: 'saldo_insuficiente_servico',
+      tipo_compra: 'ESIM',
+      plano: {
+        nome_plano: plano.nome_plano,
+        preco_revenda: valor
+      },
+      totalPedido: valor,
+      entradas: []
+    });
     await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${plano.nome_plano}`));
     return;
   }
