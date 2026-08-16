@@ -947,7 +947,8 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'senha', 'TEXT');
   await addColumnIfMissing('revendas', 'status', "TEXT DEFAULT 'ATIVA'");
   await addColumnIfMissing('revendas', 'saldo', 'REAL DEFAULT 0');
-  await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'POS_PAGO'");
+  await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'PRE_PAGO'");
+  await addColumnIfMissing('revendas', 'modalidade_esim', "TEXT DEFAULT 'PRE_PAGO'");
   await addColumnIfMissing('revendas', 'telegram_id', 'TEXT');
   await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
@@ -1007,6 +1008,20 @@ async function initDB() {
     servico_id INTEGER,
     preco REAL DEFAULT 0,
     PRIMARY KEY (revenda_id, servico_id)
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS modalidades_servico_revenda (
+    revenda_id INTEGER,
+    servico_id INTEGER,
+    modalidade TEXT DEFAULT 'PRE_PAGO',
+    PRIMARY KEY (revenda_id, servico_id)
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS precos_esim_revenda (
+    revenda_id INTEGER,
+    plano_id INTEGER,
+    preco REAL DEFAULT 0,
+    PRIMARY KEY (revenda_id, plano_id)
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS pedidos (
@@ -1157,6 +1172,14 @@ async function initDB() {
     valor TEXT,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Migração V123: preserva a regra financeira antiga do eSIM para clientes já existentes.
+  // Depois disso, cada cliente pode ter eSIM pré/pós independente dos demais serviços.
+  const migracaoModalidadeEsim = await getConfig('migracao_modalidade_esim_v123', '0');
+  if (migracaoModalidadeEsim !== '1') {
+    await run(`UPDATE revendas SET modalidade_esim=CASE WHEN UPPER(COALESCE(tipo_revenda,'')) LIKE '%POS%' THEN 'POS_PAGO' ELSE 'PRE_PAGO' END`);
+    await setConfig('migracao_modalidade_esim_v123', '1');
+  }
 
   // Migração executada uma única vez: todos os clientes já cadastrados começam
   // com a comunicação automática desativada nesta versão.
@@ -1602,6 +1625,21 @@ async function precoDaRevenda(revendaId, servicoId) {
   if (pr && Number(pr.preco) > 0) return Number(pr.preco);
   const s = await get('SELECT preco_padrao FROM servicos_catalogo WHERE id=?', [servicoId]);
   return Number(s?.preco_padrao || 0);
+}
+async function modalidadeServicoRevenda(revendaId, servicoId) {
+  const cfg = await get('SELECT modalidade FROM modalidades_servico_revenda WHERE revenda_id=? AND servico_id=?', [revendaId, servicoId]);
+  if (cfg?.modalidade) return normalizarTipoRevenda(cfg.modalidade);
+  const r = await get('SELECT tipo_revenda FROM revendas WHERE id=?', [revendaId]);
+  return normalizarTipoRevenda(r?.tipo_revenda || 'PRE_PAGO');
+}
+async function modalidadeEsimRevenda(revenda) {
+  return normalizarTipoRevenda(revenda?.modalidade_esim || revenda?.tipo_revenda || 'PRE_PAGO');
+}
+async function precoEsimDaRevenda(revendaId, planoId) {
+  const pr = await get('SELECT preco FROM precos_esim_revenda WHERE revenda_id=? AND plano_id=?', [revendaId, planoId]);
+  if (pr && Number(pr.preco) > 0) return Number(pr.preco);
+  const p = await get('SELECT preco_revenda FROM esim_planos WHERE id=?', [planoId]);
+  return Number(p?.preco_revenda || 0);
 }
 async function getRevendaByJidOrNumber(jid) {
   const numeros = variantesNumero(jidToNumber(jid));
@@ -2388,13 +2426,9 @@ async function vincularContaWhatsAppPeloAdmin(whatsappId, telegramId) {
 }
 
 function menuTelegramTexto(cliente) {
-  const tipo = labelTipoRevenda(cliente?.tipo_revenda || 'PRE_PAGO');
   const saldo = brl(cliente?.saldo || 0);
-  const linhaFinanceira = isRevendaPosPaga(cliente)
-    ? `💳 Tipo: ${tipo}
-📌 Débito atual: ${saldo}`
-    : `💳 Tipo: ${tipo}
-💰 Saldo: ${saldo}`;
+  const linhaFinanceira = `🏷 Perfil: REVENDA
+💰 Saldo / situação: ${saldo}`;
   return `🏠 *MENU PRINCIPAL*
 
 Olá, ${cliente?.nome || 'cliente'}!
@@ -2450,7 +2484,8 @@ async function enviarServicosBotoesTelegram(chatId, cliente) {
   });
 }
 async function enviarEsimBotoesTelegram(chatId) {
-  const planos = await planosEsimDisponiveis();
+  const clienteEsim = await get('SELECT * FROM revendas WHERE telegram_id=? AND status="ATIVA"', [String(chatId)]);
+  const planos = await planosEsimDisponiveis(clienteEsim?.id || null);
   if (!planos.length) {
     await tgBot.sendMessage(chatId, '❌ Nenhum plano eSIM cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
     return;
@@ -2664,11 +2699,11 @@ Digite *menu* para voltar.`);
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
-    const planos = await planosEsimDisponiveis();
+    const planos = await planosEsimDisponiveis(cliente.id);
     const plano = planos[Number(opcao) - 1];
     if (!plano) { await enviarTexto(from, '❌ Plano inválido. Escolha um número da lista, digite *0* para voltar ou faça sua pergunta normalmente.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
-    await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
+    await enviarTexto(from, `📱 ${plano.nome_plano}\n\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}\n\n1️⃣ Confirmar compra\n2️⃣ Cancelar`);
     return;
   }
 
@@ -2736,7 +2771,8 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
-    if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
+    const modalidadeServico = await modalidadeServicoRevenda(cliente.id, servico.id);
+    if (modalidadeServico === 'PRE_PAGO' && Number((revAtual || cliente).saldo || 0) < totalPedido) {
       await salvarSessaoPedido(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
       await enviarSaldoInsuficienteTelegram(msg.chat.id, revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas);
       return;
@@ -2745,7 +2781,7 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     const entradaLabel = labelEntradaServico(servico);
     const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
-    const prePago = isRevendaPrePaga(revAtual || cliente);
+    const prePago = modalidadeServico === 'PRE_PAGO';
     let criados = [];
     let duplicados = [];
     for (const entrada of validacao.entradas) {
@@ -3430,7 +3466,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
-    const planos = await planosEsimDisponiveis();
+    const planos = await planosEsimDisponiveis(cliente.id);
     const plano = planos[Number(opcao) - 1];
     if (!plano) { await apagarSessaoPedido(from); console.log('🔇 V121 PLANO INVÁLIDO — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
@@ -3484,7 +3520,8 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
-    if (isRevendaPrePaga(revAtual || cliente) && Number((revAtual || cliente).saldo || 0) < totalPedido) {
+    const modalidadeServico = await modalidadeServicoRevenda(cliente.id, servico.id);
+    if (modalidadeServico === 'PRE_PAGO' && Number((revAtual || cliente).saldo || 0) < totalPedido) {
       await salvarSessaoPedido(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
       await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
@@ -3492,9 +3529,11 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     await apagarSessaoPedido(from);
     const criados = [];
     for (const entrada of validacao.entradas) {
-      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0)`, [cliente.id, cliente.nome, from, numeroNorm, servico.id, servico.nome, entrada, entrada, normalizarTipoEntrada(servico.tipo_entrada), labelEntradaServico(servico), valor]);
+      const prePago = modalidadeServico === 'PRE_PAGO';
+      const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?)`, [cliente.id, cliente.nome, from, numeroNorm, servico.id, servico.nome, entrada, entrada, normalizarTipoEntrada(servico.tipo_entrada), labelEntradaServico(servico), valor, prePago ? 1 : 0]);
       criados.push({ id: ins.lastID, entrada });
     }
+    if (modalidadeServico === 'PRE_PAGO' && criados.length) await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor * criados.length, cliente.id]);
     notificarPainel('pedido', '🔔 Novo pedido WhatsApp', `${cliente.nome} - ${servico.nome}`);
     if (criados.length === 1) await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
     else await avisarNovoLoteAdmins(cliente, servico, criados.length, totalPedido);
@@ -3713,7 +3752,7 @@ Seu cadastro foi criado e vinculado ao Telegram.
 
 🆔 ID Telegram: ${cliente.telegram_id || msg.from.id}
 👤 Nome: ${cliente.nome}
-🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
 💰 Saldo: ${brl(cliente.saldo)}
 
 Use o menu abaixo para solicitar serviços, comprar eSIM, consultar histórico, ver sua conta ou gerar PIX.
@@ -3735,7 +3774,7 @@ Escolha uma opção abaixo.`);
 
 🆔 ID Telegram: ${cliente.telegram_id || msg.from.id}
 👤 Nome: ${cliente.nome}
-🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
 💰 Saldo: ${brl(cliente.saldo)}
 
 Digite /menu para solicitar serviços pelo Telegram.`);
@@ -3909,13 +3948,14 @@ Exemplo:
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS qtd
             FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
             WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
+          if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
           await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
           return tgBot.sendMessage(chatId, `📱 ${plano.nome_plano}
 
 💰 Valor: ${brl(plano.preco_revenda)}
 💳 Seu saldo: ${brl(cliente.saldo)}
-🏷 Tipo: ${labelTipoRevenda(cliente.tipo_revenda)}
+🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
 
 Confirmar compra?`, {
             reply_markup: { inline_keyboard: [
@@ -3927,6 +3967,7 @@ Confirmar compra?`, {
         const confMatch = data.match(/^esim_confirmar_(\d+)$/);
         if (confMatch) {
           const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(confMatch[1])]);
+          if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
           pedidoSessao.delete(from);
           const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
@@ -4093,7 +4134,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(texto)) {
-    const planos = await planosEsimDisponiveis();
+    const planos = await planosEsimDisponiveis(revenda.id);
     const plano = planos[Number(texto) - 1];
     if (!plano) { await enviarTexto(from, '❌ Plano inválido. Digite menu para começar novamente.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano });
@@ -4101,7 +4142,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
 
 💰 Valor: ${brl(plano.preco_revenda)}
 💳 Seu saldo: ${brl(revenda.saldo)}
-🏷 Tipo: ${labelTipoRevenda(revenda.tipo_revenda)}
+🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(revenda))}
 
 1️⃣ Confirmar compra
 2️⃣ Cancelar`);
@@ -4151,14 +4192,15 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
 
     const valor = await precoDaRevenda(revenda.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
-    if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < totalPedido) {
+    const modalidadeServico = await modalidadeServicoRevenda(revenda.id, servico.id);
+    if (modalidadeServico === 'PRE_PAGO' && Number(revenda.saldo || 0) < totalPedido) {
       await enviarTexto(from, textoSaldoInsuficiente(revenda, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
       return;
     }
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     const entradaLabel = labelEntradaServico(servico);
     const loteId = validacao.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
-    const prePago = isRevendaPrePaga(revenda);
+    const prePago = modalidadeServico === 'PRE_PAGO';
     let criados = [];
     let duplicados = [];
 
@@ -4240,9 +4282,9 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
 }
 
 
-async function planosEsimDisponiveis() {
+async function planosEsimDisponiveis(revendaId=null) {
   // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
-  return await all(`
+  const rows = await all(`
     SELECT
       p.id,
       p.nome_plano,
@@ -4257,9 +4299,14 @@ async function planosEsimDisponiveis() {
     GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente
     ORDER BY p.nome_plano ASC
   `);
+  if (revendaId) {
+    for (const row of rows) row.preco_revenda = await precoEsimDaRevenda(revendaId, row.id);
+  }
+  return rows;
 }
 async function enviarListaEsim(from) {
-  const planos = await planosEsimDisponiveis();
+  const revendaLista = await getRevendaByJidOrNumber(from);
+  const planos = await planosEsimDisponiveis(revendaLista?.id || null);
   if (!planos.length) {
     await enviarTexto(from, `📱 Comprar eSIM
 
@@ -4282,14 +4329,16 @@ Nenhum plano disponível no momento.
 }
 
 async function criarPedidoEsimManualRevenda(from, revenda, plano) {
-  const valor = Number(plano.preco_revenda || 0);
-  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+  const valor = await precoEsimDaRevenda(revenda.id, plano.id);
+  const prePago = await modalidadeEsimRevenda(revenda) === 'PRE_PAGO';
+  if (prePago && Number(revenda.saldo || 0) < valor) {
     // V122: preserva o contexto da compra mesmo quando não há QR em estoque.
     // Assim, a opção 1 (Pagar este serviço) sabe qual eSIM liberar após o PIX.
     await salvarSessaoPedido(from, {
       etapa: 'saldo_insuficiente_servico',
       tipo_compra: 'ESIM',
       plano: {
+        id: plano.id,
         nome_plano: plano.nome_plano,
         preco_revenda: valor
       },
@@ -4302,10 +4351,10 @@ async function criarPedidoEsimManualRevenda(from, revenda, plano) {
 
   const ins = await run(`INSERT INTO pedidos
     (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado)
-    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', 1)`,
-    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${plano.nome_plano}`, plano.nome_plano, valor]);
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM Manual', ?, 'PENDENTE', ?)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${plano.nome_plano}`, plano.nome_plano, valor, prePago ? 1 : 0]);
 
-  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
+  if (prePago) await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
 
@@ -4329,7 +4378,7 @@ Seu pedido ficou pendente para o admin enviar o QR.
 }
 
 async function entregarEsimRevenda(from, revenda, plano) {
-  const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND preco_revenda=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, plano.preco_revenda]);
+  const item = await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano]);
 
   // Sem QR no estoque: cria pedido manual em vez de bloquear a venda.
   if (!item) {
@@ -4337,12 +4386,15 @@ async function entregarEsimRevenda(from, revenda, plano) {
     return;
   }
 
-  const valor = Number(item.preco_revenda || 0);
-  if (isRevendaPrePaga(revenda) && Number(revenda.saldo || 0) < valor) {
+  const planoId = Number(plano.id || 0) || Number((await get('SELECT id FROM esim_planos WHERE nome_plano=? AND ativo=1 ORDER BY id ASC LIMIT 1', [item.nome_plano]))?.id || 0);
+  const valor = planoId ? await precoEsimDaRevenda(revenda.id, planoId) : Number(item.preco_revenda || 0);
+  const prePago = await modalidadeEsimRevenda(revenda) === 'PRE_PAGO';
+  if (prePago && Number(revenda.saldo || 0) < valor) {
     await salvarSessaoPedido(from, {
       etapa: 'saldo_insuficiente_servico',
       tipo_compra: 'ESIM',
       plano: {
+        id: planoId,
         nome_plano: item.nome_plano,
         preco_revenda: valor
       },
@@ -4353,8 +4405,8 @@ async function entregarEsimRevenda(from, revenda, plano) {
     return;
   }
   const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
-    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', 1, CURRENT_TIMESTAMP)`,
-    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor]);
+    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', ?, CURRENT_TIMESTAMP)`,
+    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor, 1]);
   await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
   await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`, [revenda.id, revenda.nome, ins.lastID, item.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
@@ -4404,7 +4456,7 @@ async function concluirEntregaEsimManualTelegram(chatId, msg) {
   else await enviarTexto(destino, textoEntrega);
   await enviarTexto(destino, mensagemInstrucaoEsim());
 
-  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
+  await finalizarPedido(p);
   adminSessao.delete(from);
   notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
   await tgBot.sendMessage(chatId, `✅ Pedido #${p.id} entregue e finalizado.`);
@@ -4468,7 +4520,7 @@ async function concluirEntregaEsimManualAdmin(from, msg, textoOriginal) {
   }
   await enviarTexto(destino, mensagemInstrucaoEsim());
 
-  await run(`UPDATE pedidos SET status='FINALIZADO', finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [p.id]);
+  await finalizarPedido(p);
   adminSessao.delete(from);
   notificarPainel('esim', '✅ eSIM manual entregue', `Pedido #${p.id} - ${p.revenda_nome || '-'}`);
   await enviarTexto(from, `✅ Pedido #${p.id} entregue para ${p.revenda_nome || p.revenda_numero}.`);
@@ -4511,7 +4563,8 @@ async function enviarContaRevenda(from, revenda) {
 👤 Nome: ${atual.nome}
 💰 Saldo: ${brl(atual.saldo)}
 📦 Pedidos pendentes: ${Number(p?.qtd || 0)}
-🏷 Tipo de conta: ${labelTipoRevenda(atual.tipo_revenda)}
+🏷 Perfil: REVENDA
+⚙️ Cobrança: definida por serviço e para eSIM
 
 5️⃣ 💳 Adicionar saldo
 0️⃣ ⬅️ Voltar`);
@@ -4582,7 +4635,7 @@ async function enviarBoasVindasTutorialRevenda(revenda) {
 
 🆔 ID Telegram: ${revenda.telegram_id || '-'}
 👤 Nome: ${revenda.nome || '-'}
-🏷 Tipo: ${labelTipoRevenda(revenda.tipo_revenda)}
+🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(revenda))}
 💰 Saldo: ${brl(revenda.saldo || 0)}
 
 Agora os serviços são solicitados diretamente pelo Telegram.
@@ -4634,7 +4687,7 @@ async function cadastrarRevendaDireto(from, nome, whatsapp) {
     await run('UPDATE revendas SET nome=?, whatsapp=?, jid=?, status="ATIVA", atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome, w, jid, revenda.id]);
     revenda = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   } else {
-    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
+    const ins = await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, jid, `rev${Date.now()}`, 'sem-senha', 'PRE_PAGO']);
     revenda = await get('SELECT * FROM revendas WHERE id=?', [ins.lastID]);
   }
 
@@ -4838,7 +4891,7 @@ async function adminAddRevenda(from, texto) {
   const [nome, whats] = texto.split('|').map(s => s?.trim());
   if (!nome || !whats) { await enviarTexto(from, 'Use: addrevenda Nome | 5575999999999'); return; }
   const w = onlyDigits(whats);
-  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', 'POS_PAGO']);
+  await run('INSERT INTO revendas (nome, whatsapp, jid, login, senha, status, saldo, tipo_revenda) VALUES (?, ?, ?, ?, ?, "ATIVA", 0, ?)', [nome, w, numberToJid(w), `rev${Date.now()}`, 'sem-senha', 'PRE_PAGO']);
   await enviarTexto(from, `✅ Revenda adicionada:\n${nome}\n${w}`);
 }
 async function adminListRevendas(from) { await enviarBuscaRevenda(from, ''); }
@@ -7008,7 +7061,7 @@ app.get('/admin/revendas', async (req, res) => {
         <div class="cli-actions-grid">
           <a class="cli-action" href="/admin/revenda/${r.id}/editar"><span>✏️</span><b>Editar Cliente</b><small>Dados cadastrais</small></a>
           <a class="cli-action" href="/admin/revenda/${r.id}/conta"><span>💳</span><b>Saldo / Conta</b><small>Crédito e movimentações</small></a>
-          <a class="cli-action" href="/admin/revenda/${r.id}/precos"><span>💰</span><b>Editar Preços</b><small>Preços personalizados</small></a>
+          <a class="cli-action" href="/admin/revenda/${r.id}/precos"><span>💰</span><b>Preços / Pré-Pós</b><small>Preço e cobrança por serviço</small></a>
           <a class="cli-action" href="/admin/revenda/${r.id}/historico"><span>📦</span><b>Serviços / Pedidos</b><small>Histórico do cliente</small></a>
           ${vinculo}
           <form method="post" action="/admin/revenda/${r.id}/bot" class="cli-form"><input type="hidden" name="bot_ativo" value="${botAtivo ? 0 : 1}"><button class="cli-action cli-button" type="submit"><span>${botAtivo ? '🔇' : '🤖'}</span><b>${botAtivo ? 'Desativar Bot' : 'Ativar Bot'}</b><small>${botAtivo ? 'Bot atualmente ativo' : 'Bot atualmente inativo'}</small></button></form>
@@ -7047,7 +7100,7 @@ app.get('/admin/revendas', async (req, res) => {
           <div><label>ID do Telegram</label><input name="telegram_id" placeholder="Ex: 5319809013" required></div>
           <div><label>Usuário de login</label><input name="login" placeholder="Deixe vazio para gerar automático"></div>
           <div><label>Senha</label><input name="senha" placeholder="Deixe vazio para gerar automático"></div>
-          <div><label>Tipo</label><select name="tipo_revenda"><option value="PRE_PAGO">Pré-pago</option><option value="POS_PAGO" selected>Pós-pago</option></select></div>
+          <div><label>Perfil comercial</label><input value="REVENDA" disabled></div>
         </div>
         <button class="btn green">Adicionar / Atualizar</button>
       </form>
@@ -7118,7 +7171,7 @@ app.post('/admin/revenda/:id/vincular-telegram', async (req, res) => {
 app.post('/admin/revendas', async (req, res) => {
   const nome = String(req.body.nome || '').trim();
   const telegramId = onlyDigits(req.body.telegram_id || '');
-  const tipoRevenda = normalizarTipoRevenda(req.body.tipo_revenda);
+  const tipoRevenda = 'PRE_PAGO';
   if (!nome || !telegramId) return res.redirect('/admin/revendas');
   let login = String(req.body.login || '').trim() || gerarLogin(nome, telegramId);
   const senha = String(req.body.senha || '').trim() || gerarSenha(8);
@@ -7222,7 +7275,7 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>Usuário de login</label><input name="login" value="${safeHtml(r.login || '')}"><br><br>
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
-    <label>Tipo da revenda</label><select name="tipo_revenda"><option value="PRE_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${normalizarTipoRevenda(r.tipo_revenda)==='POS_PAGO'?'selected':''}>Pós-pago</option></select><br><br>
+    <label>Perfil comercial</label><input value="REVENDA" disabled><br><span class="muted">Pré/pós-pago agora é configurado por serviço e, separadamente, para eSIM em Editar Preços.</span><br><br>
     <span class="muted">Regra do bot: mensagens fora do menu são ignoradas para todos os clientes.</span><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
     <div class="card"><b>Comunicação com o bot:</b> ${Number(r.bot_ativo || 0) === 1 ? '🟢 Ativada' : '🔴 Desativada'}<br><span class="muted">Ao ativar, a saudação e o menu são enviados imediatamente pelo WhatsApp.</span></div>
@@ -7235,49 +7288,78 @@ app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
   const jid = telegramId ? tgJid(telegramId) : '';
   const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
-  await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, tipo_revenda=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, normalizarTipoRevenda(req.body.tipo_revenda), req.params.id]);
+  await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, req.params.id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/precos', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (!r) return res.redirect('/admin/revendas');
   const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-  let html = `<h1>💰 Preços dos serviços</h1><div class="card"><h2>${safeHtml(r.nome)}</h2><p class="muted">Telegram ID: ${safeHtml(r.telegram_id || '-')} | Login: ${safeHtml(r.login || '-')}</p><p>Coloque aqui o preço que essa revenda vai pagar em cada serviço. Se deixar 0, usa o preço padrão do serviço.</p></div><form method="post"><table><tr><th>Serviço</th><th>Preço padrão</th><th>Preço dessa revenda</th></tr>`;
-  for (const s of servs) {
-    const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [r.id, s.id]);
+  const planos = await all('SELECT * FROM esim_planos WHERE ativo=1 ORDER BY nome_plano COLLATE NOCASE ASC, id ASC');
+  let html = `<h1>💰 Preços e cobrança</h1>
+  <div class="card"><h2>${safeHtml(r.nome)}</h2>
+  <p class="muted">Todos os clientes usam perfil REVENDA. Defina abaixo o preço e se cada serviço será pré-pago ou pós-pago.</p></div>
+  <form method="post">
+  <div class="card"><h2>🛠 Serviços</h2>
+  <table><tr><th>Serviço</th><th>Preço padrão</th><th>Preço deste cliente</th><th>Cobrança</th></tr>`;
+  for (const sv of servs) {
+    const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [r.id, sv.id]);
+    const mod = await modalidadeServicoRevenda(r.id, sv.id);
     const preco = pr ? Number(pr.preco || 0) : 0;
-    html += `<tr><td>${safeHtml(s.nome)}<br><span class="muted">${safeHtml(labelEntradaServico(s))}</span></td><td>${brl(s.preco_padrao)}</td><td><input name="preco_${s.id}" value="${preco || ''}" placeholder="0 = preço padrão"></td></tr>`;
+    html += `<tr><td><b>${safeHtml(sv.nome)}</b><br><span class="muted">${safeHtml(labelEntradaServico(sv))}</span></td><td>${brl(sv.preco_padrao)}</td><td><input name="preco_${sv.id}" value="${preco || ''}" placeholder="Padrão ${Number(sv.preco_padrao||0).toFixed(2).replace('.',',')}"></td><td><select name="modalidade_${sv.id}"><option value="PRE_PAGO" ${mod==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${mod==='POS_PAGO'?'selected':''}>Pós-pago</option></select></td></tr>`;
   }
-  html += `</table><br><button class="btn green">Salvar preços</button> <a class="btn gray" href="/admin/revendas">Voltar</a></form>`;
-  res.send(page('Preços', html));
+  html += `</table></div>
+  <div class="card"><h2>📱 eSIM</h2>
+  <p><b>Forma de cobrança de todos os eSIMs deste cliente:</b></p>
+  <select name="modalidade_esim"><option value="PRE_PAGO" ${await modalidadeEsimRevenda(r)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${await modalidadeEsimRevenda(r)==='POS_PAGO'?'selected':''}>Pós-pago</option></select>
+  <p class="muted">Essa escolha vale para todos os planos eSIM. Os preços podem continuar personalizados por plano.</p>`;
+  if (planos.length) {
+    html += `<table><tr><th>Plano eSIM</th><th>Preço padrão</th><th>Preço deste cliente</th></tr>`;
+    for (const pl of planos) {
+      const pr = await get('SELECT preco FROM precos_esim_revenda WHERE revenda_id=? AND plano_id=?', [r.id, pl.id]);
+      const preco = pr ? Number(pr.preco || 0) : 0;
+      html += `<tr><td>${safeHtml(pl.nome_plano)}</td><td>${brl(pl.preco_revenda)}</td><td><input name="preco_esim_${pl.id}" value="${preco || ''}" placeholder="Padrão ${Number(pl.preco_revenda||0).toFixed(2).replace('.',',')}"></td></tr>`;
+    }
+    html += `</table>`;
+  } else html += `<p class="muted">Nenhum plano eSIM cadastrado.</p>`;
+  html += `</div><button class="btn green">💾 Salvar configurações</button> <a class="btn gray" href="/admin/revendas">Voltar</a></form>`;
+  res.send(page('Preços e cobrança', html));
 });
 app.post('/admin/revenda/:id/precos', async (req, res) => {
+  const id = Number(req.params.id);
   const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1');
-  for (const s of servs) {
-    const raw = String(req.body[`preco_${s.id}`] || '').trim();
+  for (const sv of servs) {
+    const raw = String(req.body[`preco_${sv.id}`] || '').trim();
     const preco = Number(raw.replace(',', '.'));
-    if (!raw || !preco || preco <= 0) await run('DELETE FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [req.params.id, s.id]);
-    else await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [req.params.id, s.id, preco]);
+    if (!raw || !Number.isFinite(preco) || preco <= 0) await run('DELETE FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [id, sv.id]);
+    else await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [id, sv.id, preco]);
+    const modalidade = normalizarTipoRevenda(req.body[`modalidade_${sv.id}`] || 'PRE_PAGO');
+    await run('INSERT OR REPLACE INTO modalidades_servico_revenda (revenda_id, servico_id, modalidade) VALUES (?, ?, ?)', [id, sv.id, modalidade]);
   }
-  res.redirect('/admin/revendas');
+  const modalidadeEsim = normalizarTipoRevenda(req.body.modalidade_esim || 'PRE_PAGO');
+  await run('UPDATE revendas SET modalidade_esim=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [modalidadeEsim, id]);
+  const planos = await all('SELECT * FROM esim_planos WHERE ativo=1');
+  for (const pl of planos) {
+    const raw = String(req.body[`preco_esim_${pl.id}`] || '').trim();
+    const preco = Number(raw.replace(',', '.'));
+    if (!raw || !Number.isFinite(preco) || preco <= 0) await run('DELETE FROM precos_esim_revenda WHERE revenda_id=? AND plano_id=?', [id, pl.id]);
+    else await run('INSERT OR REPLACE INTO precos_esim_revenda (revenda_id, plano_id, preco) VALUES (?, ?, ?)', [id, pl.id, preco]);
+  }
+  res.redirect(`/admin/revenda/${id}/precos?ok=${encodeURIComponent('Preços e formas de cobrança atualizados')}`);
 });
 app.get('/admin/revenda/:id/conta', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
   if (!r) return res.redirect('/admin/revendas');
   const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 50', [r.id]);
-  const tipo = normalizarTipoRevenda(r.tipo_revenda);
   const saldoAtual = Number(r.saldo || 0);
-  const tituloSaldo = tipo === 'PRE_PAGO' ? 'Saldo / Crédito atual' : 'Situação financeira';
-  const ajudaPagamento = tipo === 'PRE_PAGO'
-    ? 'Use para adicionar crédito ao cliente pré-pago.'
-    : 'Use para abater a dívida do cliente pós-pago.';
-  const ajudaDebito = tipo === 'PRE_PAGO'
-    ? 'Use para retirar saldo manualmente do cliente pré-pago.'
-    : 'Use para lançar uma nova cobrança/débito ao cliente pós-pago.';
+  const tituloSaldo = 'Saldo / situação financeira';
+  const ajudaPagamento = 'Use para adicionar crédito ou registrar pagamento do cliente.';
+  const ajudaDebito = 'Use para retirar crédito ou lançar um débito manual.';
 
   let html = `<h1>💳 Conta do Cliente</h1>
   <div class="card">
     <h2>${safeHtml(r.nome)}</h2>
-    <p><span class="pill">${labelTipoRevenda(r.tipo_revenda)}</span></p>
+    <p><span class="pill">REVENDA</span></p><p class="muted">Pré/pós-pago é definido por serviço; eSIM possui configuração geral própria.</p>
     <p class="muted">${tituloSaldo}</p>
     <h1>${textoSituacaoSaldo(saldoAtual).replace(/\n/g, '<br>')}</h1>
   </div>
