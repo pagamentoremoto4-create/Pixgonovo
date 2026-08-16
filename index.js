@@ -319,6 +319,27 @@ function all(sql, params = []) {
   return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => err ? reject(err) : resolve(rows || [])));
 }
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
+function documentoPixValido(v) {
+  const d = onlyDigits(v);
+  return d.length === 11 || d.length === 14;
+}
+function mascararDocumentoPix(v) {
+  const d = onlyDigits(v);
+  if (d.length === 11) return `***.***.***-${d.slice(-2)}`;
+  if (d.length === 14) return `**.***.***/****-${d.slice(-2)}`;
+  return 'Não cadastrado';
+}
+async function documentoPixCliente(cliente) {
+  if (!cliente?.id) return '';
+  const r = await get('SELECT pix_documento FROM revendas WHERE id=?', [cliente.id]);
+  const d = onlyDigits(r?.pix_documento || '');
+  return documentoPixValido(d) ? d : '';
+}
+async function textoCadastroPix(cliente) {
+  const doc = await documentoPixCliente(cliente);
+  if (!doc) return `🧾 Cadastrar PIX\n\nNenhum CPF/CNPJ está vinculado à sua conta.\n\n1️⃣ Cadastrar CPF/CNPJ\n0️⃣ ⬅️ Voltar`;
+  return `🧾 Cadastrar PIX\n\n✅ Documento vinculado: ${mascararDocumentoPix(doc)}\n\n1️⃣ Alterar CPF/CNPJ\n2️⃣ Remover CPF/CNPJ\n0️⃣ ⬅️ Voltar`;
+}
 
 function caminhoArquivoEsim(arquivoQr) {
   if (!arquivoQr) return '';
@@ -949,6 +970,7 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'saldo', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'tipo_revenda', "TEXT DEFAULT 'PRE_PAGO'");
   await addColumnIfMissing('revendas', 'modalidade_esim', "TEXT DEFAULT 'PRE_PAGO'");
+  await addColumnIfMissing('revendas', 'pix_documento', 'TEXT');
   await addColumnIfMissing('revendas', 'telegram_id', 'TEXT');
   await addColumnIfMissing('revendas', 'limite_credito', 'REAL DEFAULT 0');
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
@@ -2472,8 +2494,8 @@ function tecladoTelegramMenu() {
       inline_keyboard: [
         [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
         [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
-        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🆘 Suporte', callback_data: 'menu_suporte' }],
-        [{ text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
+        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🧾 Cadastrar PIX', callback_data: 'menu_cadastrar_pix' }],
+        [{ text: '🆘 Suporte', callback_data: 'menu_suporte' }, { text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
       ]
     }
   };
@@ -2637,6 +2659,19 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
+  const sessPixDocumentoTelegram = await carregarSessaoPedido(from);
+  if (sessPixDocumentoTelegram?.etapa === 'pix_documento_input') {
+    const documento = onlyDigits(textoOriginal);
+    if (!documentoPixValido(documento)) {
+      await tgBot.sendMessage(msg.chat.id, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.');
+      return;
+    }
+    await run('UPDATE revendas SET pix_documento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [documento, cliente.id]);
+    await apagarSessaoPedido(from);
+    await tgBot.sendMessage(msg.chat.id, `✅ CPF/CNPJ vinculado com sucesso.\n\n🧾 ${mascararDocumentoPix(documento)}`, { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
+    return;
+  }
+
   const sessValorPixTelegram = await carregarSessaoPedido(from);
   if (sessValorPixTelegram?.etapa === 'aguardando_valor_pix') {
     const expirou = Date.now() - Number(sessValorPixTelegram.atualizado_em_ms || 0) > 5 * 60 * 1000;
@@ -2717,6 +2752,8 @@ Digite *menu* para voltar.`);
     const cfg = await gatewaysPagamentoAtivos();
     if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
     if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    const documentoVinculado = await documentoPixCliente(cliente);
+    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
     await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
     await enviarTexto(from, `✅ PixGo selecionado.\n\n📄 Informe o CPF ou CNPJ do pagador.`); return;
   }
@@ -2911,7 +2948,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 2️⃣ 📱 Comprar eSIM
 3️⃣ 📋 Histórico
 4️⃣ 👤 Minha Conta
-5️⃣ 💳 PIX / Pagamentos
+5️⃣ 🧾 Cadastrar PIX
 6️⃣ 🆘 Suporte
 
 💬 Digite a opção desejada.`;
@@ -3415,10 +3452,10 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     const cfg = await gatewaysPagamentoAtivos();
     if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
     if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    const documentoVinculado = await documentoPixCliente(cliente);
+    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
     await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
-    await enviarTexto(from, `✅ PixGo selecionado.
-
-📄 Informe o CPF ou CNPJ do pagador.`); return;
+    await enviarTexto(from, `✅ PixGo selecionado.\n\n📄 Informe o CPF ou CNPJ do pagador.`); return;
   }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
@@ -3438,6 +3475,38 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 
 
   // Submenus e etapas do sistema têm prioridade absoluta.
+  if (sess?.etapa === 'pix_cadastro_menu') {
+    const docAtual = await documentoPixCliente(cliente);
+    if (opcao === '0' || lower === 'voltar') {
+      await salvarSessaoPedido(from, { etapa: 'menu' });
+      await enviarMenuWhatsApp(from, cliente, false, true);
+      return;
+    }
+    if (opcao === '1') {
+      await salvarSessaoPedido(from, { etapa: 'pix_documento_input' });
+      await enviarTexto(from, `📄 ${docAtual ? 'Informe o novo' : 'Informe o'} CPF ou CNPJ que deseja vincular à PixGo.\n\nEnvie somente os números.`);
+      return;
+    }
+    if (opcao === '2' && docAtual) {
+      await run('UPDATE revendas SET pix_documento=NULL, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
+      await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' });
+      await enviarTexto(from, '✅ CPF/CNPJ removido.\n\nNos próximos pagamentos PixGo, o documento será solicitado novamente.\n\n' + await textoCadastroPix(cliente));
+      return;
+    }
+    await enviarTexto(from, await textoCadastroPix(cliente));
+    return;
+  }
+  if (sess?.etapa === 'pix_documento_input') {
+    const documento = onlyDigits(textoOriginal);
+    if (!documentoPixValido(documento)) {
+      await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.');
+      return;
+    }
+    await run('UPDATE revendas SET pix_documento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [documento, cliente.id]);
+    await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' });
+    await enviarTexto(from, `✅ CPF/CNPJ vinculado com sucesso.\n\n🧾 ${mascararDocumentoPix(documento)}\n\n` + await textoCadastroPix(cliente));
+    return;
+  }
   if (sess?.etapa === 'conta') {
     if (opcao === '5' || lower.includes('adicionar saldo') || lower.includes('colocar saldo')) {
       await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
@@ -3477,7 +3546,7 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
     if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
     if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' }); await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nExemplo: 50\nDigite *cancelar* para sair.'); return; }
+    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' }); await enviarTexto(from, await textoCadastroPix(cliente)); return; }
     if (opcao === '6') { await salvarSessaoPedido(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
 
 1️⃣ Falar com o suporte
@@ -3908,6 +3977,23 @@ Exemplo: 50`);
         if (data === 'saldo_cancelar') {
           await apagarSessaoPedido(from);
           return tgBot.sendMessage(chatId, '❌ Pedido cancelado. Nenhuma cobrança foi realizada.', { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
+        }
+        if (data === 'menu_cadastrar_pix') {
+          await apagarSessaoPedido(from);
+          const doc = await documentoPixCliente(cliente);
+          const botoes = doc
+            ? [[{ text: '✏️ Alterar', callback_data: 'pixdoc_alterar' }, { text: '🗑️ Remover', callback_data: 'pixdoc_remover' }], [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]]
+            : [[{ text: '➕ Cadastrar', callback_data: 'pixdoc_cadastrar' }], [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]];
+          return tgBot.sendMessage(chatId, doc ? `🧾 *Cadastrar PIX*\n\n✅ Documento vinculado: ${mascararDocumentoPix(doc)}` : '🧾 *Cadastrar PIX*\n\nNenhum CPF/CNPJ está vinculado.', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: botoes } });
+        }
+        if (data === 'pixdoc_cadastrar' || data === 'pixdoc_alterar') {
+          await salvarSessaoPedido(from, { etapa: 'pix_documento_input' });
+          return tgBot.sendMessage(chatId, '📄 Envie o CPF ou CNPJ que deseja vincular à PixGo.\n\nEnvie somente os números.');
+        }
+        if (data === 'pixdoc_remover') {
+          await run('UPDATE revendas SET pix_documento=NULL, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
+          await apagarSessaoPedido(from);
+          return tgBot.sendMessage(chatId, '✅ CPF/CNPJ removido. Nos próximos pagamentos PixGo, o documento será solicitado novamente.', { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
         }
         if (data === 'menu_pagar') {
           await salvarSessaoPedido(from, { etapa: 'menu_pagamento' });
@@ -5166,6 +5252,10 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
   }
   const gateway = cfg.lista[0];
   if (gateway === 'pixgo') {
+    const documentoVinculado = await documentoPixCliente(cliente);
+    if (documentoVinculado) {
+      return finalizarGeracaoPix(chave, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, enviarMensagem, codigoMonoespacado);
+    }
     await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
     await enviarMensagem(`📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(sess.valor_pix)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return false;
@@ -7303,6 +7393,7 @@ app.get('/admin/revenda/:id/editar', async (req, res) => {
     <label>Usuário de login</label><input name="login" value="${safeHtml(r.login || '')}"><br><br>
     <label>Senha</label><input name="senha" value="${safeHtml(r.senha || '')}"><br><br>
     <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(r.whatsapp || '')}"><br><br>
+    <label>CPF/CNPJ PixGo</label><input name="pix_documento" value="${safeHtml(r.pix_documento || '')}" placeholder="Somente números - CPF ou CNPJ" inputmode="numeric"><br><span class="muted">Se cadastrado, a PixGo usará este documento automaticamente e não perguntará ao cliente.</span><br><br>
     <label>Perfil comercial</label><input value="REVENDA" disabled><br><span class="muted">Pré/pós-pago agora é configurado por serviço e, separadamente, para eSIM em Editar Preços.</span><br><br>
     <span class="muted">Regra do bot: mensagens fora do menu são ignoradas para todos os clientes.</span><br><br>
     <label>Status</label><select name="status"><option ${r.status==='ATIVA'?'selected':''}>ATIVA</option><option ${r.status==='BLOQUEADA'?'selected':''}>BLOQUEADA</option><option ${r.status==='REMOVIDA'?'selected':''}>REMOVIDA</option></select><br><br>
@@ -7316,7 +7407,9 @@ app.post('/admin/revenda/:id/editar', async (req, res) => {
   const telegramId = onlyDigits(req.body.telegram_id || '');
   const jid = telegramId ? tgJid(telegramId) : '';
   const w = normalizarNumeroWhatsApp(req.body.whatsapp || '');
-  await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, req.params.id]);
+  const pixDocumentoBruto = onlyDigits(req.body.pix_documento || '');
+  const pixDocumento = documentoPixValido(pixDocumentoBruto) ? pixDocumentoBruto : null;
+  await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, pix_documento=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, pixDocumento, req.params.id]);
   res.redirect('/admin/revendas');
 });
 app.get('/admin/revenda/:id/precos', async (req, res) => {
