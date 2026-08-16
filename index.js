@@ -555,14 +555,23 @@ function extrairImeisCancelamento(texto) {
 async function localizarPedidosCancelaveis(revendaId, imeis) {
   const resultados = [];
   for (const imei of imeis) {
-    const pedido = await get(`SELECT p.*, s.cancelamento_permitido
+    // V129: procura primeiro o pedido PENDENTE do próprio cliente. Antes o código
+    // pegava apenas o último pedido do IMEI e podia ignorar um PENDENTE válido.
+    const pedido = await get(`SELECT p.*,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM servicos_catalogo sx
+          WHERE sx.cancelamento_permitido=1
+            AND (sx.id=p.servico_id OR lower(trim(sx.nome))=lower(trim(p.servico_nome)))
+        ) THEN 1 ELSE 0 END AS cancelamento_permitido
       FROM pedidos p
-      LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
-      WHERE p.revenda_id=? AND p.imei=?
+      WHERE p.revenda_id=? AND p.imei=? AND upper(trim(p.status))='PENDENTE'
       ORDER BY p.id DESC LIMIT 1`, [revendaId, imei]);
-    if (!pedido) { resultados.push({ imei, motivo: 'NAO_ENCONTRADO' }); continue; }
+    if (!pedido) {
+      const outro = await get(`SELECT p.* FROM pedidos p WHERE p.revenda_id=? AND p.imei=? ORDER BY p.id DESC LIMIT 1`, [revendaId, imei]);
+      resultados.push({ imei, pedido: outro || undefined, motivo: outro ? 'STATUS' : 'NAO_ENCONTRADO' });
+      continue;
+    }
     if (!Number(pedido.cancelamento_permitido || 0)) { resultados.push({ imei, pedido, motivo: 'NAO_PERMITIDO' }); continue; }
-    if (String(pedido.status || '').toUpperCase() !== 'PENDENTE') { resultados.push({ imei, pedido, motivo: 'STATUS' }); continue; }
     const existente = await get(`SELECT id, status FROM solicitacoes_cancelamento WHERE pedido_id=?`, [pedido.id]);
     if (existente) { resultados.push({ imei, pedido, motivo: 'JA_SOLICITADO' }); continue; }
     resultados.push({ imei, pedido, motivo: 'OK' });
@@ -586,9 +595,13 @@ async function cancelarPedidosAutomaticamentePeloCliente(cliente, resultados) {
 
   for (const r of resultados.filter(x => x.motivo === 'OK')) {
     // V128: revalida tudo no instante da confirmação para evitar corrida de status.
-    const atual = await get(`SELECT p.*, s.cancelamento_permitido
+    const atual = await get(`SELECT p.*,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM servicos_catalogo sx
+          WHERE sx.cancelamento_permitido=1
+            AND (sx.id=p.servico_id OR lower(trim(sx.nome))=lower(trim(p.servico_nome)))
+        ) THEN 1 ELSE 0 END AS cancelamento_permitido
       FROM pedidos p
-      LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
       WHERE p.id=? AND p.revenda_id=? LIMIT 1`, [r.pedido.id, cliente.id]);
 
     if (!atual) continue;
