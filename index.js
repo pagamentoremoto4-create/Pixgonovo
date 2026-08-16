@@ -1629,10 +1629,19 @@ async function precoDaRevenda(revendaId, servicoId) {
 async function modalidadeServicoRevenda(revendaId, servicoId) {
   const cfg = await get('SELECT modalidade FROM modalidades_servico_revenda WHERE revenda_id=? AND servico_id=?', [revendaId, servicoId]);
   if (cfg?.modalidade) return normalizarTipoRevenda(cfg.modalidade);
+  // Compatibilidade com clientes antigos que ainda não possuem uma linha por
+  // serviço. Novas configurações do painel sempre gravam a modalidade acima.
   const r = await get('SELECT tipo_revenda FROM revendas WHERE id=?', [revendaId]);
   return normalizarTipoRevenda(r?.tipo_revenda || 'PRE_PAGO');
 }
 async function modalidadeEsimRevenda(revenda) {
+  // Sempre consulta o banco quando temos o ID. Assim uma alteração feita no
+  // painel passa a valer imediatamente e não depende de um objeto de revenda
+  // que possa ter sido carregado antes da mudança.
+  if (revenda?.id) {
+    const atual = await get('SELECT modalidade_esim, tipo_revenda FROM revendas WHERE id=?', [revenda.id]);
+    if (atual) return normalizarTipoRevenda(atual.modalidade_esim || atual.tipo_revenda || 'PRE_PAGO');
+  }
   return normalizarTipoRevenda(revenda?.modalidade_esim || revenda?.tipo_revenda || 'PRE_PAGO');
 }
 async function precoEsimDaRevenda(revendaId, planoId) {
@@ -1641,25 +1650,44 @@ async function precoEsimDaRevenda(revendaId, planoId) {
   const p = await get('SELECT preco_revenda FROM esim_planos WHERE id=?', [planoId]);
   return Number(p?.preco_revenda || 0);
 }
+async function escolherRevendaCorreta(rows, numeros=[], fallbackJid='') {
+  if (!rows?.length) return null;
+  const nums = new Set((numeros || []).flatMap(n => variantesNumero(n)));
+  const candidatos = [];
+  for (const r of rows) {
+    const whats = new Set(variantesNumero(r.whatsapp));
+    const jidNums = new Set(variantesNumero(jidToNumber(r.jid)));
+    const bateNumero = [...nums].some(n => whats.has(n) || jidNums.has(n));
+    const bateJid = !!fallbackJid && r.jid === fallbackJid;
+    if (!bateNumero && !bateJid) continue;
+
+    // Bancos antigos podem conter cadastros duplicados do mesmo WhatsApp.
+    // Preferimos o cadastro que possui configurações individuais explícitas,
+    // pois é nele que o admin alterou preço e pré/pós no painel.
+    const cfg = await get('SELECT COUNT(*) AS qtd FROM modalidades_servico_revenda WHERE revenda_id=?', [r.id]);
+    const precos = await get('SELECT COUNT(*) AS qtd FROM precos_revenda WHERE revenda_id=?', [r.id]);
+    let score = Number(cfg?.qtd || 0) * 20 + Number(precos?.qtd || 0) * 3;
+    if (r.modalidade_esim) score += 2;
+    if (bateJid) score += 8;
+    if ([...nums].some(n => whats.has(n))) score += 12;
+    candidatos.push({ r, score });
+  }
+  candidatos.sort((a,b) => (b.score - a.score) || (Number(b.r.id||0) - Number(a.r.id||0)));
+  return candidatos[0]?.r || null;
+}
 async function getRevendaByJidOrNumber(jid) {
   const numeros = variantesNumero(jidToNumber(jid));
   const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
-  for (const r of rows) {
-    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
-    if (r.jid === jid || numeros.some(n => rvNums.has(n))) return r;
-  }
-  return null;
+  return escolherRevendaCorreta(rows, numeros, jid);
 }
 async function getRevendaByMsg(msg, fallbackJid) {
   const numeros = numerosPossiveisDaMensagem(msg, fallbackJid);
   const rows = await all('SELECT * FROM revendas WHERE status="ATIVA"');
   console.log('🔎 BUSCA REVENDA numeros=', numeros.join(','));
-  for (const r of rows) {
-    const rvNums = new Set([...variantesNumero(r.whatsapp), ...variantesNumero(jidToNumber(r.jid))]);
-    if (r.jid === fallbackJid || numeros.some(n => rvNums.has(n))) {
-      console.log('✅ REVENDA ENCONTRADA:', r.id, r.nome, r.whatsapp);
-      return r;
-    }
+  const r = await escolherRevendaCorreta(rows, numeros, fallbackJid);
+  if (r) {
+    console.log('✅ REVENDA ENCONTRADA:', r.id, r.nome, r.whatsapp);
+    return r;
   }
   console.log('❌ REVENDA NÃO ENCONTRADA para:', numeros.join(','));
   return null;
