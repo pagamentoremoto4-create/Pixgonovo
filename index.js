@@ -548,6 +548,78 @@ function textoEntradaPedido(pedido) {
 }
 function today() { return new Date().toISOString().slice(0, 10); }
 function dateBR(v) { if (!v) return '-'; const d = new Date(v); return isNaN(d) ? String(v) : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
+function extrairImeisCancelamento(texto) {
+  const encontrados = String(texto || '').match(/\b\d{15}\b/g) || [];
+  return Array.from(new Set(encontrados)).slice(0, 10);
+}
+async function localizarPedidosCancelaveis(revendaId, imeis) {
+  const resultados = [];
+  for (const imei of imeis) {
+    const pedido = await get(`SELECT p.*, s.cancelamento_permitido
+      FROM pedidos p
+      LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
+      WHERE p.revenda_id=? AND p.imei=?
+      ORDER BY p.id DESC LIMIT 1`, [revendaId, imei]);
+    if (!pedido) { resultados.push({ imei, motivo: 'NAO_ENCONTRADO' }); continue; }
+    if (!Number(pedido.cancelamento_permitido || 0)) { resultados.push({ imei, pedido, motivo: 'NAO_PERMITIDO' }); continue; }
+    if (String(pedido.status || '').toUpperCase() !== 'PENDENTE') { resultados.push({ imei, pedido, motivo: 'STATUS' }); continue; }
+    const existente = await get(`SELECT id, status FROM solicitacoes_cancelamento WHERE pedido_id=?`, [pedido.id]);
+    if (existente) { resultados.push({ imei, pedido, motivo: 'JA_SOLICITADO' }); continue; }
+    resultados.push({ imei, pedido, motivo: 'OK' });
+  }
+  return resultados;
+}
+function textoConfirmacaoCancelamento(resultados) {
+  const ok = resultados.filter(r => r.motivo === 'OK');
+  if (!ok.length) return '❌ Nenhum serviço pendente disponível para cancelamento.';
+  let t = `🔄 *CANCELAMENTO*\n\n`;
+  ok.forEach((r, i) => {
+    t += `*${i+1}️⃣ ${r.imei}*\n${r.pedido.servico_nome || '-'}\n📅 ${dateBR(r.pedido.enviado_em || r.pedido.criado_em)}\n\n`;
+  });
+  t += `Deseja cancelar ${ok.length > 1 ? `estes *${ok.length} serviços*` : 'este serviço'}?\n\n1️⃣ ✅ Confirmar cancelamento\n2️⃣ ❌ Voltar`;
+  return t.trim();
+}
+
+async function cancelarPedidosAutomaticamentePeloCliente(cliente, resultados) {
+  const cancelados = [];
+  let totalEstornado = 0;
+
+  for (const r of resultados.filter(x => x.motivo === 'OK')) {
+    // V128: revalida tudo no instante da confirmação para evitar corrida de status.
+    const atual = await get(`SELECT p.*, s.cancelamento_permitido
+      FROM pedidos p
+      LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
+      WHERE p.id=? AND p.revenda_id=? LIMIT 1`, [r.pedido.id, cliente.id]);
+
+    if (!atual) continue;
+    if (String(atual.status || '').toUpperCase() !== 'PENDENTE') continue;
+    if (!Number(atual.cancelamento_permitido || 0)) continue;
+
+    const resultado = await cancelarPedidoComEstorno(atual.id, 'Cancelado pelo próprio cliente');
+    if (!resultado?.ok || resultado.jaCancelado) continue;
+
+    try {
+      await run(`INSERT OR IGNORE INTO solicitacoes_cancelamento
+        (pedido_id, revenda_id, imei, servico_id, servico_nome, status, solicitado_em, processado_em)
+        VALUES (?, ?, ?, ?, ?, 'CANCELADO', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [atual.id, cliente.id, atual.imei || atual.entrada_valor || r.imei, atual.servico_id, atual.servico_nome]);
+      await run(`UPDATE solicitacoes_cancelamento
+        SET status='CANCELADO', processado_em=CURRENT_TIMESTAMP
+        WHERE pedido_id=?`, [atual.id]);
+    } catch (_) {}
+
+    cancelados.push({ pedido: resultado.pedido || atual, estornou: !!resultado.estornou, valor: Number(resultado.valor || 0) });
+    if (resultado.estornou) totalEstornado += Number(resultado.valor || 0);
+  }
+
+  if (cancelados.length) {
+    const linhas = cancelados.map(x => `• ${x.pedido.imei || x.pedido.entrada_valor || '-'} — ${x.pedido.servico_nome || '-'}`).join('\n');
+    await enviarParaAdmins(`❌ *Cancelamento realizado pelo cliente*\n\n👤 Cliente: ${cliente.nome || '-'}\n📦 Quantidade: ${cancelados.length}\n\n${linhas}${totalEstornado > 0 ? `\n\n💰 Total estornado: ${brl(totalEstornado)}` : ''}\n\n🏢 Centralunlocker`, 'CANCELADO');
+  }
+
+  return { cancelados, totalEstornado };
+}
+
 function monthStart() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; }
 function yearStart() { return `${new Date().getFullYear()}-01-01`; }
 function isGroup(jid) { return String(jid || '').endsWith('@g.us'); }
@@ -1024,6 +1096,22 @@ async function initDB() {
   await addColumnIfMissing('servicos_catalogo', 'categoria', "TEXT DEFAULT 'Serviços'");
   await addColumnIfMissing('servicos_catalogo', 'descricao', "TEXT DEFAULT ''");
   await addColumnIfMissing('servicos_catalogo', 'prazo', "TEXT DEFAULT ''");
+  // V126: o administrador escolhe quais serviços aceitam solicitação de cancelamento.
+  await addColumnIfMissing('servicos_catalogo', 'cancelamento_permitido', 'INTEGER DEFAULT 0');
+
+  await run(`CREATE TABLE IF NOT EXISTS solicitacoes_cancelamento (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pedido_id INTEGER NOT NULL,
+    revenda_id INTEGER NOT NULL,
+    imei TEXT NOT NULL,
+    servico_id INTEGER,
+    servico_nome TEXT,
+    status TEXT DEFAULT 'PENDENTE',
+    solicitado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    processado_em TEXT,
+    UNIQUE(pedido_id)
+  )`);
+
 
   await run(`CREATE TABLE IF NOT EXISTS precos_revenda (
     revenda_id INTEGER,
@@ -2950,6 +3038,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 4️⃣ 👤 Minha Conta
 5️⃣ 🧾 Cadastrar PIX
 6️⃣ 🆘 Suporte
+7️⃣ ❌ Cancelamento
 
 💬 Digite a opção desejada.`;
 }
@@ -3541,6 +3630,48 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     return;
   }
 
+  if (sess?.etapa === 'cancelamento_imeis') {
+    if (opcao === '0' || lower === 'voltar' || lower === 'cancelar') {
+      await apagarSessaoPedido(from);
+      await salvarSessaoPedido(from, { etapa: 'menu' });
+      await enviarMenuWhatsApp(from, cliente);
+      return;
+    }
+    const todos = String(textoOriginal || '').match(/\b\d{15}\b/g) || [];
+    const imeis = Array.from(new Set(todos));
+    if (!imeis.length) { await enviarTexto(from, '❌ Não encontrei nenhum IMEI válido com 15 números. Envie de 1 até 10 IMEIs.'); return; }
+    if (imeis.length > 10) { await enviarTexto(from, '❌ O limite é de 10 IMEIs por solicitação. Envie no máximo 10.'); return; }
+    const resultados = await localizarPedidosCancelaveis(cliente.id, imeis);
+    const validos = resultados.filter(r => r.motivo === 'OK');
+    if (!validos.length) {
+      await enviarTexto(from, '❌ Nenhum serviço pendente disponível para cancelamento.');
+      return;
+    }
+    await salvarSessaoPedido(from, { etapa: 'cancelamento_confirmar', resultados });
+    await enviarTexto(from, textoConfirmacaoCancelamento(resultados));
+    return;
+  }
+
+  if (sess?.etapa === 'cancelamento_confirmar') {
+    if (opcao === '2' || opcao === '0' || lower === 'voltar' || lower === 'cancelar') {
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '✅ Solicitação de cancelamento não enviada.');
+      return;
+    }
+    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para voltar.'); return; }
+    const resultadoCancelamento = await cancelarPedidosAutomaticamentePeloCliente(cliente, sess.resultados || []);
+    await apagarSessaoPedido(from);
+    const qtdCancelados = resultadoCancelamento.cancelados.length;
+    if (!qtdCancelados) {
+      await enviarTexto(from, '❌ Nenhum serviço continuava PENDENTE no momento da confirmação.');
+      return;
+    }
+    let resposta = `✅ *Cancelamento realizado*\n\n📦 ${qtdCancelados} serviço${qtdCancelados > 1 ? 's foram cancelados' : ' foi cancelado'} com sucesso.`;
+    if (resultadoCancelamento.totalEstornado > 0) resposta += `\n\n💰 Valor estornado ao saldo: ${brl(resultadoCancelamento.totalEstornado)}`;
+    await enviarTexto(from, resposta);
+    return;
+  }
+
   if (sess?.etapa === 'menu') {
     if (opcao === '1') { await salvarSessaoPedido(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
     if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
@@ -3554,6 +3685,17 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
 0️⃣ ⬅️ Voltar
 
 💬 Digite a opção desejada.`); return; }
+    if (opcao === '7') {
+      await salvarSessaoPedido(from, { etapa: 'cancelamento_imeis' });
+      await enviarTexto(from, `❌ *Cancelamento*
+
+Envie de 1 até 10 IMEIs.
+
+Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizará somente os IMEIs dos seus próprios pedidos.
+
+0️⃣ ⬅️ Voltar`);
+      return;
+    }
 
     // V121: qualquer conteúdo fora das opções válidas cancela o menu sem resposta.
     await apagarSessaoPedido(from);
@@ -7583,9 +7725,34 @@ ${textoSituacaoSaldo(novo)}
   res.redirect(`/admin/revenda/${req.params.id}/conta`);
 });
 
+app.get('/admin/servicos/cancelamento', async (req, res) => {
+  const rows = await all('SELECT id, nome, ativo, cancelamento_permitido FROM servicos_catalogo ORDER BY id ASC');
+  const solicitacoes = await all(`SELECT sc.*, r.nome revenda_nome FROM solicitacoes_cancelamento sc LEFT JOIN revendas r ON r.id=sc.revenda_id ORDER BY sc.id DESC LIMIT 100`);
+  let html = `<div class="hero"><h1>❌ Cancelamento de Serviços</h1><p>Escolha quais serviços podem receber solicitação de cancelamento pelos clientes.</p></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
+  <div class="card"><h2>Permissões</h2>`;
+  if (!rows.length) html += `<div class="empty">Nenhum serviço cadastrado.</div>`;
+  for (const item of rows) {
+    html += `<div class="service-card"><div><div class="service-title">🛠 ${safeHtml(item.nome)}</div><div class="service-meta"><span class="tag">${item.ativo ? '✅ Ativo' : '⛔ Inativo'}</span><span class="tag">${item.cancelamento_permitido ? '❌ Cancelamento habilitado' : '🔒 Cancelamento desabilitado'}</span></div></div><form class="forms-inline" method="post" action="/admin/servicos/cancelamento/${item.id}/toggle"><button class="btn ${item.cancelamento_permitido ? 'red' : 'green'}">${item.cancelamento_permitido ? 'Desabilitar' : 'Permitir cancelamento'}</button></form></div>`;
+  }
+  html += `</div><div class="card"><h2>🔄 Solicitações recentes</h2>`;
+  if (!solicitacoes.length) html += `<div class="empty">Nenhuma solicitação de cancelamento.</div>`;
+  for (const c of solicitacoes) {
+    html += `<div class="service-card"><div><div class="service-title">📱 ${safeHtml(c.imei)}</div><div class="service-meta"><span class="tag">${safeHtml(c.servico_nome || '-')}</span><span class="tag">${safeHtml(c.revenda_nome || '-')}</span><span class="tag">${safeHtml(dateBR(c.solicitado_em))}</span><span class="tag">${safeHtml(c.status || 'PENDENTE')}</span></div></div></div>`;
+  }
+  html += `</div>`;
+  res.send(page('Cancelamento de Serviços', html));
+});
+app.post('/admin/servicos/cancelamento/:id/toggle', async (req, res) => {
+  const item = await get('SELECT cancelamento_permitido FROM servicos_catalogo WHERE id=?', [req.params.id]);
+  if (item) await run('UPDATE servicos_catalogo SET cancelamento_permitido=? WHERE id=?', [Number(item.cancelamento_permitido || 0) ? 0 : 1, req.params.id]);
+  res.redirect('/admin/servicos/cancelamento');
+});
+
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
   let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O Telegram solicita a entrada conforme o tipo escolhido.</p></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
   <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Blacklist SSP" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 200"></div><div><label>Categoria</label><input name="categoria" placeholder="Ex: SSP, Desbloqueios"></div><div><label>Prazo</label><input name="prazo" placeholder="Ex: 7 a 15 dias úteis"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div><div style="grid-column:span 2"><label>Descrição</label><textarea name="descricao" rows="3" placeholder="Explique o serviço para a IA e para o cliente"></textarea></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
   html += `<div class="topbar"><h1>Serviços cadastrados</h1><span class="muted">${rows.length} serviço(s)</span></div>`;
   if (!rows.length) html += `<div class="card empty">Nenhum serviço cadastrado ainda.</div>`;
