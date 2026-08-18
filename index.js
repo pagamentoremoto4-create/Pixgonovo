@@ -3652,7 +3652,13 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     }
     const todos = String(textoOriginal || '').match(/\b\d{15}\b/g) || [];
     const imeis = Array.from(new Set(todos));
-    if (!imeis.length) { await enviarTexto(from, '❌ Não encontrei nenhum IMEI válido com 15 números. Envie de 1 até 10 IMEIs.'); return; }
+    if (!imeis.length) {
+      // V131: qualquer texto que não contenha IMEI encerra o fluxo.
+      // O cliente precisa digitar "menu" para iniciar novamente.
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '❌ Operação de cancelamento encerrada.\n\nDigite *menu* para começar novamente.');
+      return;
+    }
     if (imeis.length > 10) { await enviarTexto(from, '❌ O limite é de 10 IMEIs por solicitação. Envie no máximo 10.'); return; }
     const resultados = await localizarPedidosCancelaveis(cliente.id, imeis);
     const validos = resultados.filter(r => r.motivo === 'OK');
@@ -3671,7 +3677,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarTexto(from, '✅ Solicitação de cancelamento não enviada.');
       return;
     }
-    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para voltar.'); return; }
+    if (opcao !== '1') {
+      // V131: mensagem diferente das opções esperadas encerra o cancelamento.
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '❌ Operação de cancelamento encerrada.\n\nDigite *menu* para começar novamente.');
+      return;
+    }
     const resultadoCancelamento = await cancelarPedidosAutomaticamentePeloCliente(cliente, sess.resultados || []);
     await apagarSessaoPedido(from);
     const qtdCancelados = resultadoCancelamento.cancelados.length;
@@ -5462,10 +5473,9 @@ async function entregarEsimPagoDireto(revendaId, jid, contexto) {
   const valor = Number(contexto?.totalPedido || plano.preco_revenda || 0);
   if (!cliente || !nomePlano || valor <= 0) return false;
 
-  const saldoUsado = Math.max(0, Math.min(Number(contexto?.saldoUsado || 0), valor));
-  if (saldoUsado > 0) {
-    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
-  }
+  // V131: o PIX do serviço já foi creditado na carteira. Debita agora o
+  // valor integral do eSIM, fazendo saldo anterior + PIX - pedido.
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, cliente.id]);
 
   const item = await get(`SELECT * FROM esim_estoque
     WHERE status='DISPONIVEL' AND nome_plano=?
@@ -5513,12 +5523,9 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   if (!cliente || !servico) return false;
   const valorUnitario = await precoDaRevenda(cliente.id, servico.id);
   const totalPedido = Number(contexto.totalPedido || (valorUnitario * contexto.entradas.length));
-  // O saldo parcial usado no pedido é congelado quando o PIX é gerado.
-  // Após a confirmação, esse valor é debitado uma única vez da carteira.
-  const saldoUsado = Math.max(0, Math.min(Number(contexto.saldoUsado || 0), totalPedido));
-  if (saldoUsado > 0) {
-    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
-  }
+  // V131: o PIX do serviço já foi creditado na carteira. Debita agora o
+  // valor integral do pedido. Ex.: -120 + 185 - 65 = 0.
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [totalPedido, cliente.id]);
   const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const entradaLabel = labelEntradaServico(servico);
   const loteId = contexto.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
@@ -5576,10 +5583,11 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
-          if (!pagamentoServico) {
-            novo = Number(rev.saldo || 0) + Number(valorPix || 0);
-            await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
-          }
+          // V131: todo PIX confirmado entra primeiro na carteira, inclusive quando
+          // foi gerado por "Pagar este serviço". Depois o valor integral do pedido
+          // é debitado na criação/entrega. Isso quita corretamente saldo negativo.
+          novo = Number(rev.saldo || 0) + Number(valorPix || 0);
+          await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
           await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
         }
       } else {
