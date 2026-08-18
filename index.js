@@ -5552,13 +5552,21 @@ ${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
   return true;
 }
 
+const pagamentosEmVerificacao = new Set();
+
 async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagamento='SALDO', contextoJson=null, gateway='pixgo') {
+  const chaveVerificacao = `${gateway}:${paymentId}`;
+  if (pagamentosEmVerificacao.has(chaveVerificacao)) return;
+  pagamentosEmVerificacao.add(chaveVerificacao);
+
   let tentativas = 0;
+  const finalizarVerificacao = () => pagamentosEmVerificacao.delete(chaveVerificacao);
   const interval = setInterval(async () => {
     tentativas++;
     const status = await consultarStatus(paymentId, gateway);
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
+      finalizarVerificacao();
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
       const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status!="completed"', [paymentId]);
       if (!marcado?.changes) return;
@@ -5622,9 +5630,9 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       }
     }
     if (status?.success && status.data?.status === 'expired') {
-      clearInterval(interval); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+      clearInterval(interval); finalizarVerificacao(); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
     }
-    if (tentativas >= 40) clearInterval(interval);
+    if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); }
   }, 30000);
 }
 
@@ -6673,9 +6681,50 @@ app.get('/', (req, res) => {
 });
 
 
-// Webhook PixGo - responde HTTP 200 para evitar alerta de falha.
-// O sistema já confirma pagamento por consulta automática, então este endpoint
-// serve para receber notificações da PixGo sem quebrar o fluxo atual.
+// Webhook PixGo - responde HTTP 200 imediatamente para evitar alerta de falha.
+// A confirmação do pagamento continua sendo validada diretamente na API PixGo;
+// portanto, nunca confiamos somente no conteúdo recebido pelo webhook.
+function extrairPaymentIdPixGo(payload = {}, query = {}) {
+  const candidatos = [
+    payload?.data?.payment_id, payload?.data?.id, payload?.data?.transaction_id,
+    payload?.payment_id, payload?.paymentId, payload?.id, payload?.transaction_id,
+    payload?.transactionId, payload?.external_id,
+    query?.payment_id, query?.paymentId, query?.id, query?.transaction_id
+  ];
+  const encontrado = candidatos.find(v => v !== undefined && v !== null && String(v).trim());
+  return encontrado ? String(encontrado).trim() : '';
+}
+
+app.post('/webhook/pixgo', (req, res) => {
+  // Confirma o recebimento antes de qualquer consulta ao banco/API.
+  res.status(200).json({ ok: true });
+
+  setImmediate(async () => {
+    try {
+      const paymentId = extrairPaymentIdPixGo(req.body || {}, req.query || {});
+      console.log('📥 WEBHOOK PIXGO RECEBIDO:', paymentId || 'sem payment_id');
+      if (!paymentId) return;
+
+      const p = await get('SELECT * FROM pix_pedidos WHERE payment_id=? AND COALESCE(gateway, "pixgo")="pixgo"', [paymentId]);
+      if (!p || p.status === 'completed' || p.status === 'expired') return;
+
+      verificarPagamento(
+        paymentId,
+        p.revenda_id,
+        p.cliente_jid || p.revenda_jid,
+        p.valor,
+        p.tipo_pagamento || 'SALDO',
+        p.contexto_json,
+        'pixgo'
+      );
+    } catch (e) {
+      console.log('⚠️ WEBHOOK PIXGO:', e.message || e);
+    }
+  });
+});
+
+// Rota de diagnóstico: permite confirmar pelo navegador/Postman que o endpoint está online.
+app.get('/webhook/pixgo', (req, res) => res.status(200).json({ ok: true, webhook: 'pixgo' }));
 
 
 // =========================
