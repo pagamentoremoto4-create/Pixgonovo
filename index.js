@@ -5630,7 +5630,18 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       }
     }
     if (status?.success && status.data?.status === 'expired') {
-      clearInterval(interval); finalizarVerificacao(); await run('UPDATE pix_pedidos SET status="expired" WHERE payment_id=?', [paymentId]); await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+      clearInterval(interval);
+      finalizarVerificacao();
+
+      // Só o primeiro processo que conseguir mudar pending -> expired envia o aviso.
+      // Isso evita mensagens duplicadas mesmo com verificações concorrentes ou reinícios.
+      const marcadoExpirado = await run(
+        'UPDATE pix_pedidos SET status="expired" WHERE payment_id=? AND status="pending"',
+        [paymentId]
+      );
+      if (Number(marcadoExpirado?.changes || 0) > 0) {
+        await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+      }
     }
     if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); }
   }, 30000);
