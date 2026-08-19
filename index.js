@@ -7937,8 +7937,8 @@ app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
   const contPrincipal=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE'`,[serv.id]);
   const contAguardando=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO'`,[serv.id]);
   const rows=aba==='aguardando'
-    ? await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO' ORDER BY id DESC LIMIT 500`,[serv.id])
-    : await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE' ORDER BY id DESC LIMIT 500`,[serv.id]);
+    ? await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO' ORDER BY datetime(COALESCE(criado_em, enviado_em)) ASC, id ASC LIMIT 500`,[serv.id])
+    : await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE' ORDER BY datetime(COALESCE(criado_em, enviado_em)) ASC, id ASC LIMIT 500`,[serv.id]);
   let cards='';
   for(const p of rows){
     const dono=Number(p.bloqueio_operador_id||0), eu=Number(req.operadorBloqueio.id), outro=dono && dono!==eu;
