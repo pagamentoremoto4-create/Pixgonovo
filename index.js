@@ -8097,14 +8097,14 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
   const controleNota = normalizarNomeServico(s.nome) === 'desbloqueio tim';
   const notaFiltro = controleNota && ['nao_enviadas', 'enviadas'].includes(String(req.query.notas || '')) ? String(req.query.notas) : '';
   const contagensNotas = controleNota ? await get(`SELECT
-    SUM(CASE WHEN COALESCE(nota_enviada,0)=0 THEN 1 ELSE 0 END) nao_enviadas,
+    SUM(CASE WHEN COALESCE(nota_enviada,0)=0 AND status IN ('PENDENTE','EM PROCESSO') THEN 1 ELSE 0 END) nao_enviadas,
     SUM(CASE WHEN COALESCE(nota_enviada,0)=1 THEN 1 ELSE 0 END) enviadas
     FROM pedidos WHERE servico_id=?`, [servicoId]) : null;
 
   const params = [servicoId];
   let sql = 'SELECT * FROM pedidos WHERE servico_id=?';
   if (status) { sql += ' AND status=?'; params.push(status); }
-  if (notaFiltro === 'nao_enviadas') sql += ' AND COALESCE(nota_enviada,0)=0';
+  if (notaFiltro === 'nao_enviadas') sql += " AND COALESCE(nota_enviada,0)=0 AND status IN ('PENDENTE','EM PROCESSO')";
   if (notaFiltro === 'enviadas') sql += ' AND COALESCE(nota_enviada,0)=1';
   sql += controleNota ? ' ORDER BY id ASC LIMIT 1000' : ' ORDER BY id DESC LIMIT 1000';
   const rows = await all(sql, params);
