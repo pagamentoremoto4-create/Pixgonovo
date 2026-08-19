@@ -7932,45 +7932,54 @@ app.get('/bloqueio-tim/logout',(req,res)=>{res.setHeader('Set-Cookie','bt_sessio
 app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
   const serv=await get(`SELECT id,nome FROM servicos_catalogo WHERE lower(trim(nome))='bloqueio tim' ORDER BY id ASC LIMIT 1`);
   if(!serv) return res.send(operadorPage('Bloqueio TIM','<div class="card"><h2>❌ Serviço Bloqueio TIM não encontrado.</h2></div>',req.operadorBloqueio));
-  // V133: esta fila mostra somente serviços ainda em aberto. Finalizados e cancelados somem da tela.
-  // EM PROCESSO continua visível porque corresponde ao botão AGUARDANDO BLOQUEIO.
-  const rows=await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,'')) IN ('PENDENTE','EM PROCESSO') ORDER BY id DESC LIMIT 500`,[serv.id]);
+  // V134: duas filas. Principal = pendentes; Aguardando = pedidos enviados para EM PROCESSO pelo botão AGUARDANDO.
+  const aba=String(req.query.aba||'principal').toLowerCase()==='aguardando'?'aguardando':'principal';
+  const contPrincipal=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE'`,[serv.id]);
+  const contAguardando=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO'`,[serv.id]);
+  const rows=aba==='aguardando'
+    ? await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO' ORDER BY id DESC LIMIT 500`,[serv.id])
+    : await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE' ORDER BY id DESC LIMIT 500`,[serv.id]);
   let cards='';
   for(const p of rows){
     const dono=Number(p.bloqueio_operador_id||0), eu=Number(req.operadorBloqueio.id), outro=dono && dono!==eu;
     const realizando=dono!==0;
-    const estado=realizando?`▶️ REALIZANDO BLOQUEIO — ${safeHtml(p.bloqueio_operador_nome||'Operador')}`:String(p.status||'').toUpperCase()==='EM PROCESSO'?'⏳ AGUARDANDO BLOQUEIO':'🟡 PENDENTE';
+    const estado=realizando?`▶️ REALIZANDO BLOQUEIO — ${safeHtml(p.bloqueio_operador_nome||'Operador')}`:aba==='aguardando'?'⏳ AGUARDANDO BLOQUEIO':'🟡 PENDENTE';
     const lock=outro?`<div class="msg warn">🔒 Este IMEI já está sendo realizado por <b>${safeHtml(p.bloqueio_operador_nome||'outro operador')}</b>.</div>`:'';
     let botoes='';
     if(outro){
-      botoes='<button class="btn blue" disabled>▶️ REALIZANDO BLOQUEIO</button><button class="btn orange" disabled>⏳ AGUARDANDO BLOQUEIO</button><button class="btn green" disabled>✅ BLOQUEIO REALIZADO</button><button class="btn red" disabled>❌ CANCELAR</button>';
+      botoes='<button class="btn blue" disabled>▶️ REALIZANDO BLOQUEIO</button>'+(aba==='aguardando'?'<button class="btn gray" disabled>↩️ DESFAZER AGUARDANDO</button>':'<button class="btn orange" disabled>⏳ AGUARDANDO BLOQUEIO</button>')+'<button class="btn green" disabled>✅ BLOQUEIO REALIZADO</button><button class="btn red" disabled>❌ CANCELAR</button>';
     } else {
       const botaoRealizando=dono===eu
-        ? `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/desfazer-realizando"><button class="btn gray">↩️ DESFAZER REALIZANDO BLOQUEIO</button></form>`
-        : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizando"><button class="btn blue">▶️ REALIZANDO BLOQUEIO</button></form>`;
-      botoes=`${botaoRealizando}<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/aguardando"><button class="btn orange">⏳ AGUARDANDO BLOQUEIO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizado"><button class="btn green" onclick="return confirm('Confirma que este bloqueio foi realizado?')">✅ BLOQUEIO REALIZADO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/cancelar" onsubmit="var m=prompt('Qual o motivo do cancelamento deste IMEI?');if(m===null)return false;m=m.trim();if(!m){alert('Digite o motivo do cancelamento.');return false;}this.elements.motivo.value=m;return confirm('Confirma o cancelamento deste pedido?');"><input type="hidden" name="motivo" value=""><button class="btn red">❌ CANCELAR</button></form>`;
+        ? `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/desfazer-realizando"><input type="hidden" name="aba" value="${aba}"><button class="btn gray">↩️ DESFAZER REALIZANDO BLOQUEIO</button></form>`
+        : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizando"><input type="hidden" name="aba" value="${aba}"><button class="btn blue">▶️ REALIZANDO BLOQUEIO</button></form>`;
+      const botaoFila=aba==='aguardando'
+        ? `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/desfazer-aguardando"><button class="btn gray" onclick="return confirm('Desfazer aguardando e devolver este IMEI para a aba Principal?')">↩️ DESFAZER AGUARDANDO</button></form>`
+        : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/aguardando"><button class="btn orange">⏳ AGUARDANDO BLOQUEIO</button></form>`;
+      botoes=`${botaoRealizando}${botaoFila}<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizado"><input type="hidden" name="aba" value="${aba}"><button class="btn green" onclick="return confirm('Confirma que este bloqueio foi realizado?')">✅ BLOQUEIO REALIZADO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/cancelar" onsubmit="var m=prompt('Qual o motivo do cancelamento deste IMEI?');if(m===null)return false;m=m.trim();if(!m){alert('Digite o motivo do cancelamento.');return false;}this.elements.motivo.value=m;return confirm('Confirma o cancelamento deste pedido?');"><input type="hidden" name="motivo" value=""><input type="hidden" name="aba" value="${aba}"><button class="btn red">❌ CANCELAR</button></form>`;
     }
     cards+=`<div class="pedido"><h3>📱 ${safeHtml(p.entrada_valor||p.imei||'-')}</h3><div><span class="pill">${estado}</span></div><p class="muted">Pedido #${p.id} · Cliente: ${safeHtml(p.revenda_nome||p.cliente_nome||'-')} · ${safeHtml(dateBR(p.enviado_em||p.criado_em))}</p>${dono?`<p class="muted">Operador: <b>${safeHtml(p.bloqueio_operador_nome||'-')}</b>${p.bloqueio_assumido_em?' · desde '+safeHtml(dateBR(p.bloqueio_assumido_em)):''}</p>`:''}${lock}<div class="actions">${botoes}</div></div>`;
   }
   const msg=req.query.msg?`<div class="msg">${safeHtml(req.query.msg)}</div>`:'';
-  res.send(operadorPage('Bloqueio TIM', `<h1>🛡️ Bloqueio TIM</h1><p class="muted">Somente pedidos pendentes / em processo do serviço Bloqueio TIM.</p>${msg}<div class="grid">${cards||'<div class="card">Nenhum Bloqueio TIM pendente.</div>'}</div>`,req.operadorBloqueio));
+  const tabs=`<div class="card" style="padding:10px"><a class="btn ${aba==='principal'?'green':'gray'}" href="/bloqueio-tim?aba=principal">📋 PRINCIPAL (${Number(contPrincipal?.qtd||0)})</a><a class="btn ${aba==='aguardando'?'orange':'gray'}" href="/bloqueio-tim?aba=aguardando">⏳ AGUARDANDO BLOQUEIO (${Number(contAguardando?.qtd||0)})</a></div>`;
+  const vazio=aba==='aguardando'?'Nenhum IMEI aguardando bloqueio.':'Nenhum Bloqueio TIM pendente.';
+  res.send(operadorPage('Bloqueio TIM', `<h1>🛡️ Bloqueio TIM</h1><p class="muted">Fila operacional do serviço Bloqueio TIM.</p>${tabs}${msg}<div class="grid">${cards||`<div class="card">${vazio}</div>`}</div>`,req.operadorBloqueio));
 });
 
 async function pedidoBloqueioTim(id){return get(`SELECT p.*,s.nome AS nome_catalogo FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[id]);}
-function redirectBloqueioTim(res,msg=''){res.redirect('/bloqueio-tim'+(msg?'?msg='+encodeURIComponent(msg):''));}
+function redirectBloqueioTim(res,msg='',aba=''){const a=aba==='aguardando'?'aguardando':'principal';res.redirect('/bloqueio-tim?aba='+a+(msg?'&msg='+encodeURIComponent(msg):''));}
 app.post('/bloqueio-tim/pedido/:id/realizando', operadorBloqueioAuth, async (req,res)=>{
   const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
   if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
-  const r=await run(`UPDATE pedidos SET bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_estado='REALIZANDO',bloqueio_assumido_em=CURRENT_TIMESTAMP,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND (bloqueio_operador_id IS NULL OR bloqueio_operador_id=?)`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id,req.operadorBloqueio.id]);
+  const r=await run(`UPDATE pedidos SET bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_estado=CASE WHEN UPPER(COALESCE(status,''))='EM PROCESSO' THEN 'AGUARDANDO' ELSE 'REALIZANDO' END,bloqueio_assumido_em=CURRENT_TIMESTAMP,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND (bloqueio_operador_id IS NULL OR bloqueio_operador_id=?)`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id,req.operadorBloqueio.id]);
   if(Number(r?.changes||0)===0){const a=await pedidoBloqueioTim(p.id);return redirectBloqueioTim(res,`Este IMEI já está sendo realizado por ${a?.bloqueio_operador_nome||'outro operador'}.`);}
-  redirectBloqueioTim(res,'IMEI reservado para você.');
+  redirectBloqueioTim(res,'IMEI reservado para você.',String(req.body.aba||''));
 });
 app.post('/bloqueio-tim/pedido/:id/desfazer-realizando', operadorBloqueioAuth, async (req,res)=>{
   const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
   if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
   if(Number(p.bloqueio_operador_id||0)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,'Você não está realizando este IMEI.');
-  await run(`UPDATE pedidos SET bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_estado='',bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND bloqueio_operador_id=?`,[p.id,req.operadorBloqueio.id]);
-  redirectBloqueioTim(res,'Realizando bloqueio desfeito. O IMEI foi liberado.');
+  await run(`UPDATE pedidos SET bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_estado=CASE WHEN UPPER(COALESCE(status,''))='EM PROCESSO' THEN 'AGUARDANDO' ELSE '' END,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND bloqueio_operador_id=?`,[p.id,req.operadorBloqueio.id]);
+  redirectBloqueioTim(res,'Realizando bloqueio desfeito. O IMEI foi liberado.',String(req.body.aba||''));
 });
 app.post('/bloqueio-tim/pedido/:id/aguardando', operadorBloqueioAuth, async (req,res)=>{
   const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
@@ -7978,15 +7987,24 @@ app.post('/bloqueio-tim/pedido/:id/aguardando', operadorBloqueioAuth, async (req
   if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
   await run(`UPDATE pedidos SET status='EM PROCESSO',bloqueio_estado='AGUARDANDO',bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id]);
   const a=await get('SELECT * FROM pedidos WHERE id=?',[p.id]); await notificarPedido(a,'processo');
-  redirectBloqueioTim(res,'IMEI colocado em processo / aguardando bloqueio.');
+  redirectBloqueioTim(res,'IMEI movido para Aguardando Bloqueio.','aguardando');
 });
+
+app.post('/bloqueio-tim/pedido/:id/desfazer-aguardando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.','aguardando');
+  if(String(p.status||'').toUpperCase()!=='EM PROCESSO' || String(p.bloqueio_estado||'').toUpperCase()!=='AGUARDANDO') return redirectBloqueioTim(res,'Este IMEI não está na fila Aguardando Bloqueio.','aguardando');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`,'aguardando');
+  await run(`UPDATE pedidos SET status='PENDENTE',bloqueio_estado='',bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id]);
+  redirectBloqueioTim(res,'Aguardando desfeito. O IMEI voltou para a aba Principal.','principal');
+});
+
 app.post('/bloqueio-tim/pedido/:id/realizado', operadorBloqueioAuth, async (req,res)=>{
   const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
   if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
   if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
   await finalizarPedido(p);
   await run(`UPDATE pedidos SET bloqueio_estado='REALIZADO',bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_finalizado_por=?,bloqueio_atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,req.operadorBloqueio.nome,p.id]);
-  redirectBloqueioTim(res,'Bloqueio marcado como realizado e pedido finalizado.');
+  redirectBloqueioTim(res,'Bloqueio marcado como realizado e pedido finalizado.',String(req.body.aba||''));
 });
 
 app.post('/bloqueio-tim/pedido/:id/cancelar', operadorBloqueioAuth, async (req,res)=>{
@@ -7998,7 +8016,7 @@ app.post('/bloqueio-tim/pedido/:id/cancelar', operadorBloqueioAuth, async (req,r
   const r=await cancelarPedidoComEstorno(p.id,motivo);
   if(!r?.ok) return redirectBloqueioTim(res,r?.erro||'Não foi possível cancelar o pedido.');
   await run(`UPDATE pedidos SET bloqueio_estado='CANCELADO',bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id]);
-  redirectBloqueioTim(res,'Pedido cancelado. Motivo registrado.');
+  redirectBloqueioTim(res,'Pedido cancelado. Motivo registrado.',String(req.body.aba||''));
 });
 
 app.get('/admin/servicos/cancelamento', async (req, res) => {
