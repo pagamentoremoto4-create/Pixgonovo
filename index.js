@@ -1197,6 +1197,26 @@ async function initDB() {
       UPDATE pedidos SET enviado_em=COALESCE(NEW.criado_em, CURRENT_TIMESTAMP) WHERE id=NEW.id;
     END`);
 
+  // V132: controles internos para Desbloqueio TIM e painel separado de Bloqueio TIM.
+  await addColumnIfMissing('pedidos', 'nota_enviada', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('pedidos', 'nota_enviada_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_operador_id', 'INTEGER');
+  await addColumnIfMissing('pedidos', 'bloqueio_operador_nome', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_estado', "TEXT DEFAULT ''");
+  await addColumnIfMissing('pedidos', 'bloqueio_assumido_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_atualizado_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_finalizado_por', 'TEXT');
+
+  await run(`CREATE TABLE IF NOT EXISTS operadores_bloqueio_tim (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    senha_hash TEXT NOT NULL,
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS pagamentos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     revenda_id INTEGER,
@@ -1524,6 +1544,64 @@ function basicAuth(req, res, next) {
   }
   res.set('WWW-Authenticate', 'Basic realm="CentralUnlocker Admin"');
   return res.status(401).send('Login necessário');
+}
+
+
+// V132 — autenticação independente da área operacional de Bloqueio TIM.
+function hashSenhaOperador(senha, saltExistente='') {
+  const salt = saltExistente || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(senha || ''), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function validarSenhaOperador(senha, salvo) {
+  try {
+    const [salt, hashHex] = String(salvo || '').split(':');
+    if (!salt || !hashHex) return false;
+    const atual = crypto.scryptSync(String(senha || ''), salt, 64);
+    const esperado = Buffer.from(hashHex, 'hex');
+    return esperado.length === atual.length && crypto.timingSafeEqual(esperado, atual);
+  } catch (_) { return false; }
+}
+function cookieValor(req, nome) {
+  const raw = String(req.headers.cookie || '');
+  const item = raw.split(';').map(x=>x.trim()).find(x=>x.startsWith(nome+'='));
+  return item ? decodeURIComponent(item.slice(nome.length+1)) : '';
+}
+function segredoOperador() {
+  return crypto.createHash('sha256').update(String(ADMIN_PANEL_PASS || 'centralunlocker') + '|bloqueio-tim-v132').digest();
+}
+function assinarSessaoOperador(id, exp) {
+  const payload = `${Number(id)}.${Number(exp)}`;
+  const sig = crypto.createHmac('sha256', segredoOperador()).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+function lerSessaoOperador(req) {
+  const token = cookieValor(req, 'bt_session');
+  const p = token.split('.');
+  if (p.length !== 3) return null;
+  const [id, exp, sig] = p;
+  if (!/^\d+$/.test(id) || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return null;
+  const payload = `${id}.${exp}`;
+  const esperado = crypto.createHmac('sha256', segredoOperador()).update(payload).digest('hex');
+  const a = Buffer.from(sig); const b = Buffer.from(esperado);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a,b)) return null;
+  return { id:Number(id), exp:Number(exp) };
+}
+async function operadorBloqueioAuth(req, res, next) {
+  const sess = lerSessaoOperador(req);
+  if (!sess) return res.redirect('/bloqueio-tim/login');
+  const op = await get('SELECT id,nome,usuario,ativo FROM operadores_bloqueio_tim WHERE id=? AND ativo=1', [sess.id]);
+  if (!op) return res.redirect('/bloqueio-tim/logout');
+  req.operadorBloqueio = op;
+  next();
+}
+function normalizarNomeServico(v) {
+  return String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+function operadorPage(title, body, operador=null) {
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#030807;color:#e8f5ec;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.head{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 0 20px;border-bottom:1px solid #123220}.brand{font-weight:900;color:#39ff14;letter-spacing:.5px}.card{background:#07110b;border:1px solid #173c23;border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 8px 30px rgba(0,0,0,.35)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.pedido{background:#050b07;border:1px solid #15311e;border-radius:12px;padding:15px}.pedido h3{margin:0 0 8px}.muted{color:#91a79a}.pill{display:inline-block;padding:6px 9px;border:1px solid #285a37;border-radius:999px;background:#0b1a10;font-weight:800}.btn{display:inline-block;border:0;border-radius:10px;padding:10px 12px;font-weight:900;cursor:pointer;text-decoration:none;margin:3px;background:#183522;color:#fff}.btn.green{background:#39ff14;color:#031006}.btn.orange{background:#f59e0b;color:#1b1200}.btn.blue{background:#2563eb;color:#fff}.btn.red{background:#7f1d1d}.btn.gray{background:#1f2937}.btn:disabled{opacity:.4;cursor:not-allowed}form.inline{display:inline}input{width:100%;padding:12px;border-radius:10px;border:1px solid #244c30;background:#020604;color:#fff;margin:6px 0 12px}label{font-weight:800}.msg{padding:12px;border-radius:10px;background:#0b1a10;border:1px solid #285a37;margin:12px 0}.warn{border-color:#7c5b12;background:#171206}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}@media(max-width:680px){.head{align-items:flex-start;flex-direction:column}.btn{width:100%;text-align:center}form.inline{display:block;width:100%}.actions{display:block}.actions form{margin:6px 0}}
+  </style></head><body><div class="wrap"><div class="head"><div><div class="brand">CENTRALUNLOCKER</div><small class="muted">Painel exclusivo — Bloqueio TIM</small></div>${operador?`<div><b>👤 ${safeHtml(operador.nome)}</b> &nbsp; <a class="btn gray" href="/bloqueio-tim/logout">Sair</a></div>`:''}</div>${body}</div></body></html>`;
 }
 
 
@@ -6872,9 +6950,12 @@ function pedidoActions(o, back = '/admin/pedidos') {
     <button class="btn red">🗑️ Apagar</button>
   </form>`;
 }
-function pedidoTable(rows, showServico = true, selectable = false) {
-  let html = `<table><tr>${selectable ? '<th><input type="checkbox" id="selectAllPedidos" title="Selecionar todos"></th>' : ''}<th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Enviado em</th><th>Ações</th></tr>`;
-  for (const o of rows) html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td><td>${pedidoActions(o)}</td></tr>`;
+function pedidoTable(rows, showServico = true, selectable = false, controleNota = false) {
+  let html = `<table><tr>${selectable ? '<th><input type="checkbox" id="selectAllPedidos" title="Selecionar todos"></th>' : ''}<th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Enviado em</th>${controleNota ? '<th>Nota</th>' : ''}<th>Ações</th></tr>`;
+  for (const o of rows) {
+    const nota = controleNota ? `<td>${Number(o.nota_enviada||0) ? `<span class="pill">✅ Enviada</span><br><small class="muted">${safeHtml(dateBR(o.nota_enviada_em))}</small><form class="forms-inline" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="btn gray" style="margin-top:6px">↩️ Desmarcar</button></form>` : `<span class="pill">❌ Não enviada</span><form class="forms-inline" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="btn green" style="margin-top:6px">✅ NOTA ENVIADA</button></form>`}</td>` : '';
+    html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td>${nota}<td>${pedidoActions(o)}</td></tr>`;
+  }
   html += '</table>';
   return html;
 }
@@ -7806,11 +7887,102 @@ ${textoSituacaoSaldo(novo)}
   res.redirect(`/admin/revenda/${req.params.id}/conta`);
 });
 
+
+// =========================
+// V132 — OPERADORES / BLOQUEIO TIM
+// =========================
+app.get('/admin/bloqueio-tim-operadores', async (req, res) => {
+  const rows = await all('SELECT id,nome,usuario,ativo,criado_em,atualizado_em FROM operadores_bloqueio_tim ORDER BY ativo DESC,nome COLLATE NOCASE ASC,id DESC');
+  const aviso = req.query.ok ? `<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>` : req.query.erro ? `<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>` : '';
+  let tabela = '<table><tr><th>Nome</th><th>Usuário</th><th>Status</th><th>Ações</th></tr>';
+  for (const o of rows) tabela += `<tr><td><b>${safeHtml(o.nome)}</b></td><td>${safeHtml(o.usuario)}</td><td><span class="pill">${o.ativo ? '✅ ATIVO' : '⛔ DESATIVADO'}</span></td><td><div class="actions"><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/toggle"><button class="btn orange">${o.ativo?'Desativar':'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/senha"><input name="senha" type="password" minlength="4" required placeholder="Nova senha" style="width:150px;display:inline-block"><button class="btn">🔑 Trocar senha</button></form><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/excluir" data-confirm="Excluir o operador ${safeHtml(o.nome)}?"><button class="btn red">🗑️ Excluir</button></form></div></td></tr>`;
+  tabela += '</table>';
+  res.send(page('Operadores Bloqueio TIM', `<div class="topbar"><div><h1>👷 Operadores — Bloqueio TIM</h1><p class="muted">Crie o login da pessoa que terá acesso somente ao link separado de Bloqueio TIM.</p></div><div><a class="btn" href="/admin/servicos">⬅️ Serviços</a><a class="btn green" href="/bloqueio-tim" target="_blank">🔗 Abrir painel Bloqueio TIM</a></div></div>${aviso}<div class="card"><h2>➕ Novo operador</h2><form method="post" action="/admin/bloqueio-tim-operadores"><div class="form-grid"><div><label>Nome</label><input name="nome" required maxlength="80" placeholder="Ex.: Carlos"></div><div><label>Usuário</label><input name="usuario" required maxlength="40" placeholder="Ex.: carlos"></div><div><label>Senha</label><input name="senha" type="password" minlength="4" required placeholder="Senha de acesso"></div></div><button class="btn green">💾 Criar operador</button></form></div><div class="card"><h2>Operadores cadastrados</h2>${rows.length?tabela:'<p class="muted">Nenhum operador cadastrado.</p>'}</div>`));
+});
+app.post('/admin/bloqueio-tim-operadores', async (req, res) => {
+  const nome=String(req.body.nome||'').trim(), usuario=String(req.body.usuario||'').trim(), senha=String(req.body.senha||'');
+  if (!nome || !usuario || senha.length < 4) return res.redirect('/admin/bloqueio-tim-operadores?erro='+encodeURIComponent('Preencha nome, usuário e senha com pelo menos 4 caracteres.'));
+  try {
+    await run('INSERT INTO operadores_bloqueio_tim (nome,usuario,senha_hash,ativo) VALUES (?,?,?,1)', [nome,usuario,hashSenhaOperador(senha)]);
+    res.redirect('/admin/bloqueio-tim-operadores?ok='+encodeURIComponent('Operador criado com sucesso.'));
+  } catch(e) {
+    res.redirect('/admin/bloqueio-tim-operadores?erro='+encodeURIComponent(String(e.message||'').includes('UNIQUE')?'Este usuário já existe.':e.message));
+  }
+});
+app.post('/admin/bloqueio-tim-operadores/:id/toggle', async (req,res)=>{const o=await get('SELECT ativo FROM operadores_bloqueio_tim WHERE id=?',[req.params.id]);if(o)await run('UPDATE operadores_bloqueio_tim SET ativo=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[o.ativo?0:1,req.params.id]);res.redirect('/admin/bloqueio-tim-operadores');});
+app.post('/admin/bloqueio-tim-operadores/:id/senha', async (req,res)=>{const senha=String(req.body.senha||'');if(senha.length>=4)await run('UPDATE operadores_bloqueio_tim SET senha_hash=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[hashSenhaOperador(senha),req.params.id]);res.redirect('/admin/bloqueio-tim-operadores?ok='+encodeURIComponent('Senha atualizada.'));});
+app.post('/admin/bloqueio-tim-operadores/:id/excluir', async (req,res)=>{await run('UPDATE pedidos SET bloqueio_operador_id=NULL WHERE bloqueio_operador_id=?',[req.params.id]);await run('DELETE FROM operadores_bloqueio_tim WHERE id=?',[req.params.id]);res.redirect('/admin/bloqueio-tim-operadores');});
+
+app.get('/bloqueio-tim/login', (req,res)=>{
+  if (lerSessaoOperador(req)) return res.redirect('/bloqueio-tim');
+  const erro=req.query.erro?`<div class="msg warn">❌ ${safeHtml(req.query.erro)}</div>`:'';
+  res.send(operadorPage('Login Bloqueio TIM', `<div style="max-width:430px;margin:55px auto"><div class="card"><h1>🔐 Bloqueio TIM</h1><p class="muted">Acesso exclusivo do operador.</p>${erro}<form method="post" action="/bloqueio-tim/login"><label>Usuário</label><input name="usuario" autocomplete="username" required><label>Senha</label><input name="senha" type="password" autocomplete="current-password" required><button class="btn green" style="width:100%">ENTRAR</button></form></div></div>`));
+});
+app.post('/bloqueio-tim/login', async (req,res)=>{
+  const usuario=String(req.body.usuario||'').trim(), senha=String(req.body.senha||'');
+  const op=await get('SELECT * FROM operadores_bloqueio_tim WHERE lower(usuario)=lower(?) AND ativo=1',[usuario]);
+  if(!op || !validarSenhaOperador(senha,op.senha_hash)) return res.redirect('/bloqueio-tim/login?erro='+encodeURIComponent('Usuário ou senha inválidos.'));
+  const exp=Date.now()+1000*60*60*24*14;
+  const secure = String(req.headers['x-forwarded-proto']||'').toLowerCase()==='https' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `bt_session=${encodeURIComponent(assinarSessaoOperador(op.id,exp))}; Path=/bloqueio-tim; HttpOnly; SameSite=Lax; Max-Age=${60*60*24*14}${secure}`);
+  res.redirect('/bloqueio-tim');
+});
+app.get('/bloqueio-tim/logout',(req,res)=>{res.setHeader('Set-Cookie','bt_session=; Path=/bloqueio-tim; HttpOnly; SameSite=Lax; Max-Age=0');res.redirect('/bloqueio-tim/login');});
+
+app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
+  const serv=await get(`SELECT id,nome FROM servicos_catalogo WHERE lower(trim(nome))='bloqueio tim' ORDER BY id ASC LIMIT 1`);
+  if(!serv) return res.send(operadorPage('Bloqueio TIM','<div class="card"><h2>❌ Serviço Bloqueio TIM não encontrado.</h2></div>',req.operadorBloqueio));
+  const rows=await all(`SELECT * FROM pedidos WHERE servico_id=? AND status<>'CANCELADO' ORDER BY CASE WHEN status='FINALIZADO' THEN 1 ELSE 0 END, id DESC LIMIT 500`,[serv.id]);
+  let cards='';
+  for(const p of rows){
+    const dono=Number(p.bloqueio_operador_id||0), eu=Number(req.operadorBloqueio.id), outro=dono && dono!==eu;
+    const finalizado=String(p.status||'').toUpperCase()==='FINALIZADO';
+    const estado=finalizado?'✅ BLOQUEIO REALIZADO':dono?`▶️ REALIZANDO BLOQUEIO — ${safeHtml(p.bloqueio_operador_nome||'Operador')}`:String(p.status||'').toUpperCase()==='EM PROCESSO'?'⏳ AGUARDANDO BLOQUEIO':'🟡 AGUARDANDO AÇÃO';
+    const lock=outro?`<div class="msg warn">🔒 Este IMEI já está sendo realizado por <b>${safeHtml(p.bloqueio_operador_nome||'outro operador')}</b>.</div>`:'';
+    let botoes='';
+    if(!finalizado){
+      if(outro){
+        botoes='<button class="btn blue" disabled>▶️ REALIZANDO BLOQUEIO</button><button class="btn orange" disabled>⏳ AGUARDANDO BLOQUEIO</button><button class="btn green" disabled>✅ BLOQUEIO REALIZADO</button>';
+      } else {
+        botoes=`<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizando"><button class="btn blue" ${dono===eu?'disabled':''}>${dono===eu?'▶️ VOCÊ ESTÁ REALIZANDO':'▶️ REALIZANDO BLOQUEIO'}</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/aguardando"><button class="btn orange">⏳ AGUARDANDO BLOQUEIO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizado"><button class="btn green">✅ BLOQUEIO REALIZADO</button></form>`;
+      }
+    }
+    cards+=`<div class="pedido"><h3>📱 ${safeHtml(p.entrada_valor||p.imei||'-')}</h3><div><span class="pill">${estado}</span></div><p class="muted">Pedido #${p.id} · Cliente: ${safeHtml(p.revenda_nome||p.cliente_nome||'-')} · ${safeHtml(dateBR(p.enviado_em||p.criado_em))}</p>${dono?`<p class="muted">Operador: <b>${safeHtml(p.bloqueio_operador_nome||'-')}</b>${p.bloqueio_assumido_em?' · desde '+safeHtml(dateBR(p.bloqueio_assumido_em)):''}</p>`:''}${lock}<div class="actions">${botoes}</div></div>`;
+  }
+  const msg=req.query.msg?`<div class="msg">${safeHtml(req.query.msg)}</div>`:'';
+  res.send(operadorPage('Bloqueio TIM', `<h1>🛡️ Bloqueio TIM</h1><p class="muted">Somente pedidos do serviço Bloqueio TIM.</p>${msg}<div class="grid">${cards||'<div class="card">Nenhum pedido de Bloqueio TIM.</div>'}</div>`,req.operadorBloqueio));
+});
+
+async function pedidoBloqueioTim(id){return get(`SELECT p.*,s.nome AS nome_catalogo FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[id]);}
+function redirectBloqueioTim(res,msg=''){res.redirect('/bloqueio-tim'+(msg?'?msg='+encodeURIComponent(msg):''));}
+app.post('/bloqueio-tim/pedido/:id/realizando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(String(p.status||'').toUpperCase()==='FINALIZADO') return redirectBloqueioTim(res,'Este IMEI já está finalizado.');
+  const r=await run(`UPDATE pedidos SET bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_estado='REALIZANDO',bloqueio_assumido_em=CURRENT_TIMESTAMP,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND (bloqueio_operador_id IS NULL OR bloqueio_operador_id=?)`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id,req.operadorBloqueio.id]);
+  if(Number(r?.changes||0)===0){const a=await pedidoBloqueioTim(p.id);return redirectBloqueioTim(res,`Este IMEI já está sendo realizado por ${a?.bloqueio_operador_nome||'outro operador'}.`);}
+  redirectBloqueioTim(res,'IMEI reservado para você.');
+});
+app.post('/bloqueio-tim/pedido/:id/aguardando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
+  if(String(p.status||'').toUpperCase()==='FINALIZADO') return redirectBloqueioTim(res,'Este IMEI já está finalizado.');
+  await run(`UPDATE pedidos SET status='EM PROCESSO',bloqueio_estado='AGUARDANDO',bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id]);
+  const a=await get('SELECT * FROM pedidos WHERE id=?',[p.id]); await notificarPedido(a,'processo');
+  redirectBloqueioTim(res,'IMEI colocado em processo / aguardando bloqueio.');
+});
+app.post('/bloqueio-tim/pedido/:id/realizado', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
+  if(String(p.status||'').toUpperCase()!=='FINALIZADO') await finalizarPedido(p);
+  await run(`UPDATE pedidos SET bloqueio_estado='REALIZADO',bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_finalizado_por=?,bloqueio_atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,req.operadorBloqueio.nome,p.id]);
+  redirectBloqueioTim(res,'Bloqueio marcado como realizado e pedido finalizado.');
+});
+
 app.get('/admin/servicos/cancelamento', async (req, res) => {
   const rows = await all('SELECT id, nome, ativo, cancelamento_permitido FROM servicos_catalogo ORDER BY id ASC');
   const solicitacoes = await all(`SELECT sc.*, r.nome revenda_nome FROM solicitacoes_cancelamento sc LEFT JOIN revendas r ON r.id=sc.revenda_id ORDER BY sc.id DESC LIMIT 100`);
   let html = `<div class="hero"><h1>❌ Cancelamento de Serviços</h1><p>Escolha quais serviços podem receber solicitação de cancelamento pelos clientes.</p></div>
-  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a></div></div>
   <div class="card"><h2>Permissões</h2>`;
   if (!rows.length) html += `<div class="empty">Nenhum serviço cadastrado.</div>`;
   for (const item of rows) {
@@ -7833,7 +8005,7 @@ app.post('/admin/servicos/cancelamento/:id/toggle', async (req, res) => {
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
   let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O Telegram solicita a entrada conforme o tipo escolhido.</p></div>
-  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a></div></div>
   <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Blacklist SSP" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 200"></div><div><label>Categoria</label><input name="categoria" placeholder="Ex: SSP, Desbloqueios"></div><div><label>Prazo</label><input name="prazo" placeholder="Ex: 7 a 15 dias úteis"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div><div style="grid-column:span 2"><label>Descrição</label><textarea name="descricao" rows="3" placeholder="Explique o serviço para a IA e para o cliente"></textarea></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
   html += `<div class="topbar"><h1>Serviços cadastrados</h1><span class="muted">${rows.length} serviço(s)</span></div>`;
   if (!rows.length) html += `<div class="card empty">Nenhum serviço cadastrado ainda.</div>`;
@@ -7909,7 +8081,16 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     update();
   })();</script>`;
 
-  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${tabs}${download}${rows.length ? pedidoTable(rows, false, true) : '<div class="card empty">Nenhum pedido neste status.</div>'}${js}`));
+  const controleNota = normalizarNomeServico(s.nome) === 'desbloqueio tim';
+  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste status.</div>'}${js}`));
+});
+
+app.post('/admin/pedido/:id/nota-toggle', async (req, res) => {
+  const p = await get(`SELECT p.id,p.nota_enviada,s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [req.params.id]);
+  if (!p || normalizarNomeServico(p.servico_nome) !== 'desbloqueio tim') return res.redirect(req.get('referer') || '/admin/servicos');
+  const novo = Number(p.nota_enviada || 0) ? 0 : 1;
+  await run(`UPDATE pedidos SET nota_enviada=?, nota_enviada_em=${novo ? 'CURRENT_TIMESTAMP' : 'NULL'}, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [novo, p.id]);
+  res.redirect(req.get('referer') || '/admin/servicos');
 });
 
 app.post('/admin/servico/:id/baixar-imeis', async (req, res) => {
