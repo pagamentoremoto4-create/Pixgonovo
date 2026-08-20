@@ -6064,6 +6064,17 @@ async function atualizarNumeroSessaoMulti(sessao, numero) {
   if (n) await run('UPDATE whatsapp_sessoes SET numero=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [n, sessao.id]);
 }
 
+async function confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessionDir, label='WhatsApp') {
+  try { await saveCreds(); } catch (e) { console.log(`⚠️ ${label}: falha ao salvar credenciais:`, e.message); }
+  for (let i = 0; i < 10; i++) {
+    try {
+      if (state?.creds?.registered || sessaoWhatsAppRegistrada(sessionDir)) return true;
+    } catch (_) {}
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  try { return !!(state?.creds?.registered || sessaoWhatsAppRegistrada(sessionDir)); } catch (_) { return !!state?.creds?.registered; }
+}
+
 function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   if (!sessao) return false;
   try {
@@ -6119,7 +6130,12 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
       connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000, retryRequestDelayMs: 500
     });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async () => {
+      try {
+        await saveCreds();
+        if (state?.creds?.registered) console.log(`🔐 V150 ${sessao.nome}: credenciais registradas e salvas.`);
+      } catch (e) { console.log(`⚠️ V150 SAVE CREDS ${sessao.nome}:`, e.message); }
+    });
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
       try {
@@ -6153,10 +6169,20 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
           const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
           const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
-          if (restartRequired || podeReiniciarQr) {
-            sessao.qrReinicios += 1; sessao.status = 'REGERANDO_QR'; sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
+          if (restartRequired) {
+            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V150 ${sessao.nome}`);
+            console.log(`🔄 V150 515 ${sessao.nome}: registered=${registradaAgora} mode=${sessao.connectionMode}`);
+            if (registradaAgora) {
+              sessao.qrReinicios = 0; sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = '';
+              emitirStatusSessaoMulti(sessao);
+              setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V150 RESTAURAR APÓS 515:', e.message)), 1800);
+              return;
+            }
+          }
+          if (podeReiniciarQr) {
+            sessao.qrReinicios += 1; sessao.status = 'REGERANDO_QR'; sessao.erro = motivo;
             emitirStatusSessaoMulti(sessao);
-            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ V87 NOVO QR:', e.message)), 1500);
+            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'qr' }).catch(e => console.log('❌ V150 NOVO QR:', e.message)), 1800);
             return;
           }
           sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
@@ -6367,7 +6393,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async () => { try { await saveCreds(); } catch (e) { console.log(`⚠️ V150 SAVE CREDS ${sessao.label}:`, e.message); } });
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
       if (qr) {
@@ -6387,12 +6413,17 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
         const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
         sessao.qr = null;
-        if (restartRequired || podeReiniciarQr) {
-          sessao.qrReinicios += 1;
-          sessao.status = 'REGERANDO_QR';
-          sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
-          emitirStatusExtra(sessao);
-          setTimeout(() => iniciarWhatsAppExtra(key, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ NOVO QR ${key}:`, e.message)), 1500);
+        if (restartRequired) {
+          const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V150 ${sessao.label}`);
+          if (registradaAgora) {
+            sessao.qrReinicios = 0; sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = ''; emitirStatusExtra(sessao);
+            setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ V150 RESTAURAR ${key}:`, e.message)), 1800);
+            return;
+          }
+        }
+        if (podeReiniciarQr) {
+          sessao.qrReinicios += 1; sessao.status = 'REGERANDO_QR'; sessao.erro = motivo; emitirStatusExtra(sessao);
+          setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'qr' }).catch(e => console.log(`❌ V150 NOVO QR ${key}:`, e.message)), 1800);
           return;
         }
         sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
@@ -6634,7 +6665,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     whatsappSocket = socketAtual;
     console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async () => { try { await saveCreds(); if (state?.creds?.registered) console.log('🔐 V150 Bot de Serviços: credenciais registradas e salvas.'); } catch (e) { console.log('⚠️ V150 SAVE CREDS BOT:', e.message); } });
     socketAtual.ev.on('connection.update', async update => {
       try {
         const { connection, lastDisconnect, qr } = update || {};
@@ -6675,12 +6706,20 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           const podeReiniciarQr = whatsappConnectionMode === 'qr' && !loggedOut && whatsappQrReinicios < WHATSAPP_QR_MAX_REINICIOS;
           qrCodeBase64 = null;
           console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
-          if (restartRequired || podeReiniciarQr) {
-            whatsappQrReinicios += 1;
-            whatsappStatus = 'REGERANDO_QR';
-            whatsappUltimoErro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
+          if (restartRequired) {
+            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, WHATSAPP_SESSION_DIR, 'V150 Bot de Serviços');
+            console.log(`🔄 V150 515 Bot de Serviços: registered=${registradaAgora} mode=${whatsappConnectionMode}`);
+            if (registradaAgora) {
+              whatsappQrReinicios = 0; whatsappStatus = 'FINALIZANDO_PAREAMENTO'; whatsappUltimoErro = '';
+              io.emit('whatsapp-status', { status: whatsappStatus });
+              setTimeout(() => iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ V150 RESTAURAR APÓS 515:', e.message)), 1800);
+              return;
+            }
+          }
+          if (podeReiniciarQr) {
+            whatsappQrReinicios += 1; whatsappStatus = 'REGERANDO_QR'; whatsappUltimoErro = motivo;
             io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-            setTimeout(() => iniciarWhatsAppQrCode({ modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ NOVO QR WHATSAPP:', e.message)), 1500);
+            setTimeout(() => iniciarWhatsAppQrCode({ modo: 'qr' }).catch(e => console.log('❌ V150 NOVO QR WHATSAPP:', e.message)), 1800);
             return;
           }
           whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : (whatsappConnectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
