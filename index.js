@@ -96,7 +96,7 @@ let whatsappSocket = null;
 let qrCodeBase64 = null;
 let whatsappPairingCode = '';
 let whatsappPairingNumero = '';
-let whatsappConnectionMode = 'qr';
+let whatsappConnectionMode = 'codigo';
 const whatsappJidPorNumero = new Map();
 // Mantém cada conversa vinculada à sessão que recebeu a última mensagem, para
 // responder pelo mesmo número quando houver mais de um Bot de Serviços ativo.
@@ -106,8 +106,8 @@ let conectado = false;
 
 // Sessões independentes: suporte com IA, bot de serviços e anúncios em grupos.
 const whatsappExtra = {
-  support: { key: 'support', label: 'Suporte + IA', enabled: WHATSAPP_SUPPORT_ENABLED, sessionDir: WHATSAPP_SUPPORT_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'qr', status: WHATSAPP_SUPPORT_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 },
-  ads: { key: 'ads', label: 'Anúncios', enabled: WHATSAPP_ADS_ENABLED, sessionDir: WHATSAPP_ADS_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'qr', status: WHATSAPP_ADS_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 }
+  support: { key: 'support', label: 'Suporte + IA', enabled: WHATSAPP_SUPPORT_ENABLED, sessionDir: WHATSAPP_SUPPORT_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'codigo', status: WHATSAPP_SUPPORT_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 },
+  ads: { key: 'ads', label: 'Anúncios', enabled: WHATSAPP_ADS_ENABLED, sessionDir: WHATSAPP_ADS_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'codigo', status: WHATSAPP_ADS_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 }
 };
 let campanhaAdsEmAndamento = false;
 let cancelarCampanhaAds = false;
@@ -1018,10 +1018,17 @@ async function enviarSuporteTelegram(chatId) {
   });
 }
 
+function emitirAtualizacaoBloqueioTim(motivo='alteracao', pedidoId=null) {
+  io.emit('bloqueio-tim-update', { motivo, pedidoId: pedidoId ? Number(pedidoId) : null, at: Date.now() });
+}
 function notificarPainel(tipo, titulo, mensagem) {
   const n = { tipo, titulo, mensagem, hora: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) };
   io.emit('notificacao', n);
   io.emit('dashboard-update', { at: Date.now() });
+  // V140: novo pedido Bloqueio TIM atualiza a fila dos operadores em tempo real.
+  if (String(tipo||'').toLowerCase()==='pedido' && /bloqueio\s*tim/i.test(String(mensagem||''))) {
+    emitirAtualizacaoBloqueioTim('novo-pedido');
+  }
   console.log('🔔 PAINEL:', titulo, mensagem || '');
 }
 
@@ -1196,6 +1203,26 @@ async function initDB() {
     BEGIN
       UPDATE pedidos SET enviado_em=COALESCE(NEW.criado_em, CURRENT_TIMESTAMP) WHERE id=NEW.id;
     END`);
+
+  // V132: controles internos para Desbloqueio TIM e painel separado de Bloqueio TIM.
+  await addColumnIfMissing('pedidos', 'nota_enviada', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('pedidos', 'nota_enviada_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_operador_id', 'INTEGER');
+  await addColumnIfMissing('pedidos', 'bloqueio_operador_nome', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_estado', "TEXT DEFAULT ''");
+  await addColumnIfMissing('pedidos', 'bloqueio_assumido_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_atualizado_em', 'TEXT');
+  await addColumnIfMissing('pedidos', 'bloqueio_finalizado_por', 'TEXT');
+
+  await run(`CREATE TABLE IF NOT EXISTS operadores_bloqueio_tim (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    senha_hash TEXT NOT NULL,
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
 
   await run(`CREATE TABLE IF NOT EXISTS pagamentos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1527,6 +1554,64 @@ function basicAuth(req, res, next) {
 }
 
 
+// V132 — autenticação independente da área operacional de Bloqueio TIM.
+function hashSenhaOperador(senha, saltExistente='') {
+  const salt = saltExistente || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(senha || ''), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function validarSenhaOperador(senha, salvo) {
+  try {
+    const [salt, hashHex] = String(salvo || '').split(':');
+    if (!salt || !hashHex) return false;
+    const atual = crypto.scryptSync(String(senha || ''), salt, 64);
+    const esperado = Buffer.from(hashHex, 'hex');
+    return esperado.length === atual.length && crypto.timingSafeEqual(esperado, atual);
+  } catch (_) { return false; }
+}
+function cookieValor(req, nome) {
+  const raw = String(req.headers.cookie || '');
+  const item = raw.split(';').map(x=>x.trim()).find(x=>x.startsWith(nome+'='));
+  return item ? decodeURIComponent(item.slice(nome.length+1)) : '';
+}
+function segredoOperador() {
+  return crypto.createHash('sha256').update(String(ADMIN_PANEL_PASS || 'centralunlocker') + '|bloqueio-tim-v132').digest();
+}
+function assinarSessaoOperador(id, exp) {
+  const payload = `${Number(id)}.${Number(exp)}`;
+  const sig = crypto.createHmac('sha256', segredoOperador()).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+function lerSessaoOperador(req) {
+  const token = cookieValor(req, 'bt_session');
+  const p = token.split('.');
+  if (p.length !== 3) return null;
+  const [id, exp, sig] = p;
+  if (!/^\d+$/.test(id) || !/^\d+$/.test(exp) || Number(exp) < Date.now()) return null;
+  const payload = `${id}.${exp}`;
+  const esperado = crypto.createHmac('sha256', segredoOperador()).update(payload).digest('hex');
+  const a = Buffer.from(sig); const b = Buffer.from(esperado);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a,b)) return null;
+  return { id:Number(id), exp:Number(exp) };
+}
+async function operadorBloqueioAuth(req, res, next) {
+  const sess = lerSessaoOperador(req);
+  if (!sess) return res.redirect('/bloqueio-tim/login');
+  const op = await get('SELECT id,nome,usuario,ativo FROM operadores_bloqueio_tim WHERE id=? AND ativo=1', [sess.id]);
+  if (!op) return res.redirect('/bloqueio-tim/logout');
+  req.operadorBloqueio = op;
+  next();
+}
+function normalizarNomeServico(v) {
+  return String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+function operadorPage(title, body, operador=null) {
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#030807;color:#e8f5ec;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.head{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 0 20px;border-bottom:1px solid #123220}.brand{font-weight:900;color:#39ff14;letter-spacing:.5px}.card{background:#07110b;border:1px solid #173c23;border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 8px 30px rgba(0,0,0,.35)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.pedido{background:#050b07;border:1px solid #15311e;border-radius:12px;padding:15px}.pedido h3{margin:0 0 8px}.muted{color:#91a79a}.pill{display:inline-block;padding:6px 9px;border:1px solid #285a37;border-radius:999px;background:#0b1a10;font-weight:800}.btn{display:inline-block;border:0;border-radius:10px;padding:10px 12px;font-weight:900;cursor:pointer;text-decoration:none;margin:3px;background:#183522;color:#fff}.btn.green{background:#39ff14;color:#031006}.btn.orange{background:#f59e0b;color:#1b1200}.btn.blue{background:#2563eb;color:#fff}.btn.red{background:#7f1d1d}.btn.gray{background:#1f2937}.btn:disabled{opacity:.4;cursor:not-allowed}form.inline{display:inline}input{width:100%;padding:12px;border-radius:10px;border:1px solid #244c30;background:#020604;color:#fff;margin:6px 0 12px}label{font-weight:800}.msg{padding:12px;border-radius:10px;background:#0b1a10;border:1px solid #285a37;margin:12px 0}.warn{border-color:#7c5b12;background:#171206}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}@media(max-width:680px){.head{align-items:flex-start;flex-direction:column}.btn{width:100%;text-align:center}form.inline{display:block;width:100%}.actions{display:block}.actions form{margin:6px 0}}
+  </style>${operador?'<script src="/socket.io/socket.io.js"></script>':''}</head><body><div class="wrap"><div class="head"><div><div class="brand">CENTRALUNLOCKER</div><small class="muted">Painel exclusivo — Bloqueio TIM</small></div>${operador?`<div><b>👤 ${safeHtml(operador.nome)}</b> &nbsp; <a class="btn gray" href="/bloqueio-tim/logout">Sair</a></div>`:''}</div>${body}</div>${operador?`<script>(function(){let enviando=false,timer=null;document.addEventListener('submit',function(){enviando=true;});const socket=io();socket.on('bloqueio-tim-update',function(){if(enviando)return;clearTimeout(timer);timer=setTimeout(function(){location.reload();},250);});})();</script>`:''}</body></html>`;
+}
+
+
 function getClienteToken(req) {
   const cookie = req.headers.cookie || '';
   const m = cookie.match(/(?:^|; )cliente_token=([^;]+)/);
@@ -1607,7 +1692,10 @@ function page(title, body, options={}) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
   :root{--bg:#07111f;--bg2:#0c1426;--card:#101b31;--card2:#0d172a;--soft:#16223a;--line:#24324b;--text:#eaf0f8;--muted:#97a6ba;--blue:#2f80ed;--cyan:#28d7ff;--green:#28c76f;--red:#ff4d4f;--orange:#ff9f43;--purple:#9b5cff;--shadow:0 18px 45px rgba(0,0,0,.32)}
-  *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
+  *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font-family:Inter,Arial,sans-serif;font-size:14px;color:var(--text);background:radial-gradient(circle at 18% 10%,rgba(40,215,255,.14),transparent 28%),radial-gradient(circle at 88% 4%,rgba(155,92,255,.12),transparent 30%),linear-gradient(135deg,var(--bg),var(--bg2));min-height:100vh}a{color:#a9d8ff;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:22px;background:linear-gradient(180deg,rgba(6,12,24,.96),rgba(9,16,31,.94));border-right:1px solid rgba(255,255,255,.08);box-shadow:12px 0 40px rgba(0,0,0,.20);overflow:auto}.brand{display:flex;align-items:center;gap:12px;padding:14px 12px;margin-bottom:18px;border-radius:18px;background:linear-gradient(135deg,rgba(47,128,237,.22),rgba(40,215,255,.09));border:1px solid rgba(40,215,255,.18);font-size:18px;font-weight:900;letter-spacing:.2px}.brand:before{content:'🕶️';font-size:27px}.side .nav-title{font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:18px 12px 8px}.side a{display:flex;align-items:center;gap:9px;padding:10px 12px;border-radius:14px;margin:5px 0;color:#cdd7e6;font-weight:750;border:1px solid transparent}.side a:hover{background:rgba(47,128,237,.16);border-color:rgba(40,215,255,.12);transform:translateX(2px)}.main{padding:26px;max-width:1560px;width:100%;margin:0 auto}.hero{position:relative;overflow:hidden;border:1px solid rgba(40,215,255,.18);border-radius:24px;padding:24px;margin-bottom:18px;background:linear-gradient(135deg,rgba(16,27,49,.96),rgba(13,23,42,.82)),radial-gradient(circle at 92% 20%,rgba(40,215,255,.2),transparent 25%);box-shadow:var(--shadow)}.hero:after{content:'</>';position:absolute;right:28px;top:8px;font-size:92px;font-weight:900;color:rgba(40,215,255,.09);transform:rotate(-8deg)}.hero h1{margin:0 0 8px;font-size:26px}.hero p{margin:0;color:var(--muted);max-width:820px}.topbar{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:16px}.card{background:linear-gradient(180deg,rgba(16,27,49,.94),rgba(13,23,42,.94));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:18px;margin:14px 0;box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.metric{position:relative;overflow:hidden}.metric:before{content:'';position:absolute;right:-34px;top:-34px;width:96px;height:96px;border-radius:50%;background:rgba(40,215,255,.10)}.metric h2{font-size:13px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.8px}.metric h1{font-size:27px;margin:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white!important;padding:8px 11px;border-radius:11px;border:0;cursor:pointer;margin:2px;font-weight:850;box-shadow:0 10px 18px rgba(37,99,235,.18)}.btn.red{background:linear-gradient(135deg,#ef4444,#b91c1c)}.btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:white!important}.btn.gray{background:linear-gradient(135deg,#64748b,#334155)}.btn.orange{background:linear-gradient(135deg,#f97316,#c2410c)}.btn.purple{background:linear-gradient(135deg,#a855f7,#6d28d9);color:white!important}
+/* V137 — visual premium do controle interno de notas do Desbloqueio TIM */
+.nota-tabs{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px;margin:14px 0 18px}.nota-tab{display:flex;align-items:center;gap:10px;min-height:58px;padding:12px 15px;border-radius:14px;border:1px solid rgba(255,255,255,.10);background:linear-gradient(180deg,rgba(15,23,42,.96),rgba(8,17,31,.96));color:#dbe7f5!important;font-weight:900;box-shadow:0 10px 24px rgba(0,0,0,.22);transition:.18s ease}.nota-tab:hover{transform:translateY(-1px);border-color:rgba(40,215,255,.35)}.nota-tab-icon{font-size:20px}.nota-tab b{margin-left:auto;min-width:34px;height:34px;padding:0 8px;border-radius:999px;display:grid;place-items:center;background:#1f2937;border:1px solid rgba(255,255,255,.12);font-size:13px}.nota-tab.active-pending{border-color:#f59e0b;background:linear-gradient(135deg,rgba(245,158,11,.23),rgba(69,38,5,.76));box-shadow:0 0 22px rgba(245,158,11,.13)}.nota-tab.active-pending b{background:#f59e0b;color:#1b1200}.nota-tab.active-sent{border-color:#39ff14;background:linear-gradient(135deg,rgba(57,255,20,.18),rgba(5,49,13,.78));box-shadow:0 0 22px rgba(57,255,20,.12)}.nota-tab.active-sent b{background:#39ff14;color:#031006}.nota-cell{min-width:190px}.nota-status{display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border-radius:999px;font-size:11px;font-weight:950;letter-spacing:.25px;border:1px solid}.nota-status.pendente{color:#ffd27a;background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.42)}.nota-status.enviada{color:#73ff59;background:rgba(57,255,20,.09);border-color:rgba(57,255,20,.35)}.nota-data{display:block;color:var(--muted);margin:6px 0 7px}.nota-form{display:block!important}.nota-action{width:100%;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid;border-radius:10px;padding:10px 12px;font-weight:950;font-size:12px;cursor:pointer;transition:.16s ease}.nota-action:hover{transform:translateY(-1px);filter:brightness(1.06)}.nota-action-send{background:#39ff14;color:#031006;border-color:#73ff59;box-shadow:0 8px 20px rgba(57,255,20,.12)}.nota-action-undo{background:#1f2937;color:#fff;border-color:#475569;box-shadow:0 8px 20px rgba(0,0,0,.22)}
+@media(max-width:700px){.nota-tabs{grid-template-columns:1fr}.nota-tab{width:100%}.nota-cell{min-width:210px}}input,select,textarea{font-size:13px;padding:10px;border-radius:13px;border:1px solid #334155;background:#08111f;color:var(--text);width:100%;min-width:130px;outline:none}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,215,255,.10)}label{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.8px}table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(8,17,31,.84);border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,.08)}td,th{border-bottom:1px solid rgba(255,255,255,.07);padding:10px;text-align:left;vertical-align:middle}th{color:#cbd5e1;background:rgba(16,27,47,.95);font-size:12px;text-transform:uppercase;letter-spacing:.7px}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(47,128,237,.06)}.muted{color:var(--muted)}.pill{padding:5px 10px;border-radius:999px;background:rgba(47,128,237,.14);border:1px solid rgba(47,128,237,.25);display:inline-block;font-weight:800}.forms-inline{display:inline}.actions{white-space:nowrap}.search{display:grid;grid-template-columns:1fr 120px;gap:8px;max-width:560px}.service-card{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:center;background:linear-gradient(135deg,rgba(13,23,42,.96),rgba(16,27,49,.92));border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin:12px 0}.service-title{font-size:16px;font-weight:900}.service-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;background:rgba(148,163,184,.12);color:#dbe7f5;font-weight:800;font-size:12px}.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1.3fr;gap:12px}.mini-help{background:rgba(40,215,255,.08);border:1px dashed rgba(40,215,255,.24);padding:12px;border-radius:14px;color:#cbefff}.empty{padding:28px;text-align:center;color:var(--muted)}.hero-hacker{position:relative;min-height:310px;display:grid;grid-template-columns:1.1fr .9fr;align-items:center;gap:18px;overflow:hidden;border:1px solid rgba(0,255,102,.32);border-radius:26px;padding:30px;margin-bottom:18px;background:linear-gradient(90deg,rgba(0,0,0,.92),rgba(0,20,8,.52)),url('/img/hacker.png') center right/cover no-repeat;box-shadow:0 0 28px rgba(0,255,102,.14),inset 0 0 80px rgba(0,255,102,.06)}.hero-hacker:before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,255,102,.05),transparent),repeating-linear-gradient(0deg,rgba(0,255,102,.045) 0 1px,transparent 1px 34px),repeating-linear-gradient(90deg,rgba(0,255,102,.035) 0 1px,transparent 1px 45px);pointer-events:none}.hero-hacker .hero-content{position:relative;z-index:1;max-width:620px}.hero-hacker .eyebrow{color:#38ff6a;font-weight:900;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px}.hero-hacker h1{font-size:36px;line-height:1.02;margin:0 0 12px;text-transform:uppercase;text-shadow:0 0 18px rgba(0,255,102,.35)}.hero-hacker h1 span{color:#39ff14}.hero-hacker p{font-size:16px;color:#d6ffe0;margin:0 0 18px}.system-card{position:relative;z-index:1;justify-self:end;width:min(360px,100%);background:rgba(0,0,0,.62);border:1px solid rgba(0,255,102,.24);border-radius:18px;padding:16px;backdrop-filter:blur(8px)}.system-row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.08);padding:10px 0;font-weight:800}.system-row:last-child{border-bottom:0}.online{color:#39ff14;text-shadow:0 0 12px rgba(57,255,20,.6)}.clock-box{display:inline-flex;align-items:center;gap:8px;color:#dbffe6;border:1px solid rgba(0,255,102,.2);border-radius:999px;padding:8px 12px;background:rgba(0,0,0,.32)}.card,.service-card{border-color:rgba(0,255,102,.18);box-shadow:0 18px 45px rgba(0,0,0,.35),0 0 18px rgba(0,255,102,.06)}.metric h1{color:#f5fff7}.metric:hover{transform:translateY(-2px);box-shadow:0 18px 45px rgba(0,0,0,.4),0 0 24px rgba(0,255,102,.12)}.side-profile{margin-top:16px;border:1px solid rgba(0,255,102,.18);border-radius:18px;min-height:155px;background:linear-gradient(180deg,rgba(0,0,0,.4),rgba(0,20,8,.35)),url('/img/hacker.png') center/cover no-repeat;padding:14px;display:flex;align-items:end}.side-profile b{background:rgba(0,0,0,.62);padding:6px 10px;border-radius:999px;color:#39ff14}.image-preview{width:100%;max-height:260px;object-fit:cover;border-radius:18px;border:1px solid rgba(0,255,102,.25);box-shadow:0 0 20px rgba(0,255,102,.08)}@media(max-width:900px){body{font-size:13px}.layout{grid-template-columns:1fr}.side{height:auto;position:relative}.brand{margin-bottom:10px}.side .nav-title{display:none}.side a{display:inline-flex;padding:10px 12px}.main{padding:14px}.search,.form-grid{grid-template-columns:1fr}table{font-size:12px;display:block;overflow-x:auto}.actions{white-space:normal}.service-card{grid-template-columns:1fr}.hero h1{font-size:21px}.hero-hacker{grid-template-columns:1fr;min-height:420px;background-position:center}.system-card{justify-self:stretch}.hero-hacker h1{font-size:26px}}
   
   body.theme-hacker-green{--accent:#00ff66;--accent2:#28d7ff}body.theme-hacker-blue{--accent:#28d7ff;--accent2:#2f80ed}body.theme-hacker-red{--accent:#ff3b3b;--accent2:#ff9f43}body.theme-hacker-purple{--accent:#a855f7;--accent2:#28d7ff}body.theme-dark-pro{--accent:#94a3b8;--accent2:#2f80ed}.hero-hacker{background:linear-gradient(90deg,rgba(0,0,0,.84),rgba(0,0,0,.46)),url('/img/hacker.png?v=1'),radial-gradient(circle at 70% 25%,var(--accent),transparent 22%),linear-gradient(135deg,#020617,#0f172a);background-size:cover;background-position:center;border-color:color-mix(in srgb,var(--accent) 55%,transparent);box-shadow:0 0 30px color-mix(in srgb,var(--accent) 24%,transparent)}.hero-content span,.online{color:var(--accent)}.btn.green,.metric:before{background:linear-gradient(135deg,var(--accent),var(--accent2))}.card.metric{border-color:color-mix(in srgb,var(--accent) 26%,transparent);box-shadow:0 12px 34px rgba(0,0,0,.35),0 0 18px color-mix(in srgb,var(--accent) 13%,transparent)}.theme-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.theme-card{border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:14px;background:#08111f}.theme-preview{height:58px;border-radius:12px;margin-bottom:10px}.preview-hacker-green{background:linear-gradient(135deg,#001b0a,#00ff66)}.preview-hacker-blue{background:linear-gradient(135deg,#00152d,#28d7ff)}.preview-hacker-red{background:linear-gradient(135deg,#230707,#ff3b3b)}.preview-hacker-purple{background:linear-gradient(135deg,#18062b,#a855f7)}.preview-dark-pro{background:linear-gradient(135deg,#020617,#64748b)}.toast-wrap{position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;flex-direction:column;gap:10px}.toast{max-width:330px;background:rgba(2,6,23,.96);border:1px solid var(--accent);box-shadow:0 0 22px color-mix(in srgb,var(--accent) 25%,transparent);border-radius:16px;padding:12px;animation:toastIn .25s ease}.toast b{display:block;color:var(--accent);margin-bottom:4px}.notif-bell{position:fixed;right:18px;top:18px;z-index:40;background:#06111f;border:1px solid var(--accent);border-radius:999px;padding:10px 13px;box-shadow:0 0 14px color-mix(in srgb,var(--accent) 22%,transparent);font-weight:900}.notif-bell span{background:#ef4444;border-radius:999px;padding:2px 6px;margin-left:4px;font-size:12px}@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}.image-preview{max-width:100%;border-radius:16px;border:1px solid rgba(255,255,255,.12)}.status-action-form{display:grid;grid-template-columns:minmax(170px,1fr) auto;gap:6px;align-items:start;min-width:240px}.status-action-form input[name=motivo]{grid-column:1/-1}.status-action-form select{min-width:170px}.status-action-form .btn{height:42px}@media(max-width:900px){.status-action-form{grid-template-columns:1fr}.status-action-form .btn{width:100%}}
 /* V89 - painel moderno + temas completos */
@@ -3652,7 +3740,13 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     }
     const todos = String(textoOriginal || '').match(/\b\d{15}\b/g) || [];
     const imeis = Array.from(new Set(todos));
-    if (!imeis.length) { await enviarTexto(from, '❌ Não encontrei nenhum IMEI válido com 15 números. Envie de 1 até 10 IMEIs.'); return; }
+    if (!imeis.length) {
+      // V131: qualquer texto que não contenha IMEI encerra o fluxo.
+      // O cliente precisa digitar "menu" para iniciar novamente.
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '❌ Operação de cancelamento encerrada.\n\nDigite *menu* para começar novamente.');
+      return;
+    }
     if (imeis.length > 10) { await enviarTexto(from, '❌ O limite é de 10 IMEIs por solicitação. Envie no máximo 10.'); return; }
     const resultados = await localizarPedidosCancelaveis(cliente.id, imeis);
     const validos = resultados.filter(r => r.motivo === 'OK');
@@ -3671,7 +3765,12 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
       await enviarTexto(from, '✅ Solicitação de cancelamento não enviada.');
       return;
     }
-    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar ou 2 para voltar.'); return; }
+    if (opcao !== '1') {
+      // V131: mensagem diferente das opções esperadas encerra o cancelamento.
+      await apagarSessaoPedido(from);
+      await enviarTexto(from, '❌ Operação de cancelamento encerrada.\n\nDigite *menu* para começar novamente.');
+      return;
+    }
     const resultadoCancelamento = await cancelarPedidosAutomaticamentePeloCliente(cliente, sess.resultados || []);
     await apagarSessaoPedido(from);
     const qtdCancelados = resultadoCancelamento.cancelados.length;
@@ -5110,6 +5209,7 @@ async function adminMudarStatus(from, id, status) {
   if (!pedido) { await enviarTexto(from, '❌ Pedido não encontrado.'); return; }
   await run('UPDATE pedidos SET status=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [status, pedido.id]);
   const atual = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
+  if (normalizarNomeServico(atual?.servico_nome)==='bloqueio tim') emitirAtualizacaoBloqueioTim('status', atual.id);
   await notificarPedido(atual, 'processo');
   await enviarTexto(from, `✅ Pedido #${id} atualizado para ${status}.`);
 }
@@ -5141,6 +5241,7 @@ async function cancelarPedidoComEstorno(id, motivo = 'Não informado') {
 
   await run('UPDATE pedidos SET status="CANCELADO", motivo_cancelamento=?, estornado=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [motivo, precisaEstornar ? 1 : (pedido.estornado || 0), pedido.id]);
   const atual = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
+  if (normalizarNomeServico(atual?.servico_nome)==='bloqueio tim') emitirAtualizacaoBloqueioTim('cancelado', atual.id);
   await notificarPedido(atual, 'cancelar', motivo);
   if (precisaEstornar && atual.revenda_jid) {
     const rev = await get('SELECT * FROM revendas WHERE id=?', [atual.revenda_id]);
@@ -5462,10 +5563,9 @@ async function entregarEsimPagoDireto(revendaId, jid, contexto) {
   const valor = Number(contexto?.totalPedido || plano.preco_revenda || 0);
   if (!cliente || !nomePlano || valor <= 0) return false;
 
-  const saldoUsado = Math.max(0, Math.min(Number(contexto?.saldoUsado || 0), valor));
-  if (saldoUsado > 0) {
-    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
-  }
+  // V131: o PIX do serviço já foi creditado na carteira. Debita agora o
+  // valor integral do eSIM, fazendo saldo anterior + PIX - pedido.
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, cliente.id]);
 
   const item = await get(`SELECT * FROM esim_estoque
     WHERE status='DISPONIVEL' AND nome_plano=?
@@ -5513,12 +5613,9 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   if (!cliente || !servico) return false;
   const valorUnitario = await precoDaRevenda(cliente.id, servico.id);
   const totalPedido = Number(contexto.totalPedido || (valorUnitario * contexto.entradas.length));
-  // O saldo parcial usado no pedido é congelado quando o PIX é gerado.
-  // Após a confirmação, esse valor é debitado uma única vez da carteira.
-  const saldoUsado = Math.max(0, Math.min(Number(contexto.saldoUsado || 0), totalPedido));
-  if (saldoUsado > 0) {
-    await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [saldoUsado, cliente.id]);
-  }
+  // V131: o PIX do serviço já foi creditado na carteira. Debita agora o
+  // valor integral do pedido. Ex.: -120 + 185 - 65 = 0.
+  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [totalPedido, cliente.id]);
   const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const entradaLabel = labelEntradaServico(servico);
   const loteId = contexto.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
@@ -5576,10 +5673,11 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
-          if (!pagamentoServico) {
-            novo = Number(rev.saldo || 0) + Number(valorPix || 0);
-            await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
-          }
+          // V131: todo PIX confirmado entra primeiro na carteira, inclusive quando
+          // foi gerado por "Pagar este serviço". Depois o valor integral do pedido
+          // é debitado na criação/entrega. Isso quita corretamente saldo negativo.
+          novo = Number(rev.saldo || 0) + Number(valorPix || 0);
+          await run('UPDATE revendas SET saldo=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [novo, revendaId]);
           await run('INSERT INTO pagamentos (revenda_id, revenda_nome, cliente_jid, cliente_numero, valor, origem) VALUES (?, ?, ?, ?, ?, ?)', [revendaId, rev.nome, jid, jidToNumber(jid), valorPix, pagamentoServico ? `${gateway}_servico` : gateway]);
         }
       } else {
@@ -5658,6 +5756,7 @@ async function finalizarPedido(pedido) {
     }
   }
   const atualizado = await get('SELECT * FROM pedidos WHERE id=?', [pedido.id]);
+  if (normalizarNomeServico(atualizado?.servico_nome)==='bloqueio tim') emitirAtualizacaoBloqueioTim('finalizado', atualizado.id);
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
   await enviarAvisoDestinatarios('FINALIZADO', `✅ *Serviço finalizado*\n\n🆔 Pedido: #${atualizado.id}\n👤 Cliente: ${atualizado.revenda_nome || atualizado.cliente_nome || '-'}\n🛠 Serviço: ${atualizado.servico_nome || '-'}\n📱 Entrada: ${atualizado.entrada_valor || atualizado.imei || '-'}\n💰 Valor: ${brl(atualizado.valor)}\n🏢 Centralunlocker`);
   await notificarPedido(atualizado, 'finalizar');
@@ -5773,23 +5872,52 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
+  // V144: mantém a consulta de versão WA Web da V143 e estabiliza o pareamento QR.
+  // Em 2026 essa função chegou a retornar uma versão Web obsoleta, causando
+  // "not logged in, attempting registration" seguido de Connection Failure
+  // antes do evento de QR Code. Prioriza exclusivamente fetchLatestWaWebVersion.
   try {
-    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
+    const override = String(process.env.WHATSAPP_WEB_VERSION || '').trim();
+    if (override) {
+      const partes = override.split('.').map(Number);
+      if (partes.length === 3 && partes.every(Number.isFinite)) {
+        console.log(`✅ ${descricao}: versão Web definida por WHATSAPP_WEB_VERSION ${partes.join('.')}`);
+        return partes;
+      }
+      console.log(`⚠️ ${descricao}: WHATSAPP_WEB_VERSION inválida; ignorando override.`);
+    }
+    const buscar = baileys.fetchLatestWaWebVersion;
     if (typeof buscar !== 'function') {
-      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
+      console.log(`ℹ️ ${descricao}: fetchLatestWaWebVersion indisponível; usando versão interna do Baileys.`);
       return null;
     }
-    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
+    const resultado = await comTimeoutWhatsApp(buscar(), 12000, `consultar versão WA Web ${descricao}`);
     const versao = resultado?.version;
     if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
-      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
+      console.log(`✅ ${descricao}: versão WA Web ${versao.join('.')} (fetchLatestWaWebVersion)`);
       return versao;
     }
-    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
+    console.log(`⚠️ ${descricao}: fetchLatestWaWebVersion retornou versão inválida; usando padrão interno do Baileys.`);
   } catch (e) {
-    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
+    console.log(`⚠️ ${descricao}: não foi possível consultar fetchLatestWaWebVersion:`, e.message);
   }
   return null;
+}
+
+function prepararPastaParaNovoQrV143(sessionDir, descricao = 'WhatsApp') {
+  try {
+    if (!sessionDir) return;
+    const registrada = sessaoWhatsAppRegistrada(sessionDir);
+    if (registrada) return;
+    // Sessões que falharam antes do QR podem deixar creds.json/keys parciais.
+    // Ao pedir um QR novo, remove somente estado NÃO registrado para garantir
+    // um handshake de pareamento realmente limpo, preservando sessões válidas.
+    if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.mkdirSync(sessionDir, { recursive: true });
+    console.log(`🧹 V144: estado não registrado limpo para novo QR (${descricao}).`);
+  } catch (e) {
+    console.log(`⚠️ V144: falha ao preparar novo QR (${descricao}):`, e.message);
+  }
 }
 
 function sessaoWhatsAppRegistrada(sessionDir) {
@@ -5902,7 +6030,9 @@ function criarRuntimeSessaoWhatsApp(row) {
   const base = existente || {
     id: Number(row.id), socket: null, qr: null, status: 'DESCONECTADO', conectado: false,
     numero: row.numero || '', erro: '', iniciando: false, timer: null, qrReinicios: 0,
-    connectionMode: 'restaurar'
+    falhasReconexao: 0, proximaTentativaEm: 0, connectionMode: 'restaurar',
+    pareamentoEmAndamento: false, ultimoQrEm: 0, ultimaAtualizacaoCredsEm: 0,
+    pairingCode: '', pairingNumero: ''
   };
   base.nome = row.nome || `WhatsApp ${row.id}`;
   base.sessionKey = row.session_key;
@@ -5954,7 +6084,7 @@ async function carregarSessoesWhatsApp() {
 function emitirStatusSessaoMulti(sessao) {
   io.emit('whatsapp-multi-status', {
     id: sessao.id, status: sessao.status, numero: sessao.numero || '', erro: sessao.erro || '',
-    conectado: !!sessao.conectado, qr: !!sessao.qr,
+    conectado: !!sessao.conectado, qr: !!sessao.qr, pairingCode: sessao.pairingCode || '', pairingNumero: sessao.pairingNumero || '',
     funcoes: { bot: !!sessao.funcaoBot, grupos: !!sessao.funcaoGrupos, status: !!sessao.funcaoStatus }
   });
 }
@@ -5970,26 +6100,41 @@ function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   try {
     // Algumas sessões antigas possuem creds.json e número salvo, mas o campo
     // registered só volta a true depois que o Baileys inicia a conexão. Esse é
-    // exatamente o caso em que o botão "Gerar QR Code" conecta sem escanear QR.
+    // mantém apenas restauração automática de sessões já registradas.
     const temArquivo = fs.existsSync(path.join(sessao.sessionDir || '', 'creds.json'));
     return sessaoWhatsAppRegistrada(sessao.sessionDir) || temArquivo || !!normalizarNumeroWhatsApp(sessao.numero || '');
   } catch (_) { return !!normalizarNumeroWhatsApp(sessao?.numero || ''); }
 }
 
-function agendarReconexaoSessaoMulti(sessao) {
-  if (!sessao || sessao.timer || !sessao.ativo) return;
+// V141: uma única fila de reconexão por sessão, com backoff progressivo.
+// Evita o loop agressivo em que connection.update e watchdog tentavam iniciar
+// a mesma sessão repetidamente a cada poucos segundos.
+const WHATSAPP_RECONNECT_BACKOFF_MS = [5000, 15000, 30000, 60000, 120000, 300000];
+function agendarReconexaoSessaoMulti(sessao, motivo = '') {
+  if (!sessao || sessao.timer || !sessao.ativo || sessao.conectado || sessao.iniciando) return;
+  const falhas = Math.max(0, Number(sessao.falhasReconexao || 0));
+  const indice = Math.min(falhas, WHATSAPP_RECONNECT_BACKOFF_MS.length - 1);
+  const atraso = WHATSAPP_RECONNECT_BACKOFF_MS[indice];
+  sessao.falhasReconexao = falhas + 1;
+  sessao.proximaTentativaEm = Date.now() + atraso;
+  console.log(`⏳ V141: ${sessao.nome} nova tentativa em ${Math.round(atraso/1000)}s${motivo ? ` — ${motivo}` : ''}.`);
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
-    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
-      sessao.status = 'SESSAO_EXPIRADA';
-      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere um novo QR Code.';
+    sessao.proximaTentativaEm = 0;
+    if (sessao.conectado || sessao.iniciando || !sessao.ativo) return;
+    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+    if (!registrada) {
+      sessao.status = 'AGUARDANDO_CODIGO';
+      sessao.erro = 'Sessão não conectada. Gere um código de conexão pelo número.';
       emitirStatusSessaoMulti(sessao);
       return;
     }
-    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    console.log(`🔄 V95: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
-    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ V95 RECONEXÃO #${sessao.id}:`, e.message));
-  }, 5000);
+    console.log(`🔄 V146: reconectando automaticamente ${sessao.nome} pela sessão salva.`);
+    iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => {
+      console.log(`❌ V141 RECONEXÃO #${sessao.id}:`, e.message);
+      agendarReconexaoSessaoMulti(sessao, e.message);
+    });
+  }, atraso);
 }
 
 async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
@@ -6000,12 +6145,14 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   if (sessao.iniciando) return;
 
   sessao.iniciando = true;
-  sessao.connectionMode = opcoes.modo === 'qr' ? 'qr' : 'restaurar';
+  sessao.connectionMode = opcoes.modo === 'codigo' ? 'codigo' : 'restaurar';
   sessao.status = 'INICIANDO'; sessao.erro = '';
-  if (sessao.connectionMode === 'qr') sessao.qr = null;
+  sessao.qr = null;
+  if (sessao.connectionMode !== 'codigo') { sessao.pairingCode = ''; sessao.pairingNumero = ''; }
   emitirStatusSessaoMulti(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    if (sessao.connectionMode === 'codigo') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.nome);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys sessão #${sessao.id}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger sessão #${sessao.id}`);
     const pino = pinoModule.default || pinoModule;
@@ -6015,28 +6162,45 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     const socketAtual = makeWASocket({
       auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
-      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.nome}`) : [`CentralUnlocker ${sessao.nome}`, 'Chrome', '1.0.0'],
+      // V145: para pareamento por código, use um browser canônico/lógico.
+      // A documentação do Baileys alerta que labels customizados podem fazer o pareamento falhar.
+      browser: sessao.connectionMode === 'codigo'
+        ? (baileys.Browsers?.macOS ? baileys.Browsers.macOS('Google Chrome') : ['Mac OS', 'Google Chrome', '14.4.1'])
+        : (baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Google Chrome') : ['Ubuntu', 'Google Chrome', '22.04.4']),
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false,
       connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000, retryRequestDelayMs: 500
     });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async updateCreds => {
+      try {
+        await saveCreds();
+        sessao.ultimaAtualizacaoCredsEm = Date.now();
+        if (sessao.connectionMode === 'codigo') {
+          sessao.pareamentoEmAndamento = true;
+          console.log(`🔐 V146: credenciais atualizadas durante pareamento por código de ${sessao.nome} (registered=${state.creds.registered === true}).`);
+        }
+      } catch (e) {
+        console.log(`❌ V144 SAVE CREDS #${sessao.id}:`, e.message);
+      }
+    });
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
       try {
         if (qr) {
-          sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
-          sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = '';
-          emitirStatusSessaoMulti(sessao);
+          // V146: QR desativado. O painel usa somente código de pareamento por número.
+          sessao.qr = null;
+          console.log(`🚫 V146: QR ignorado para ${sessao.nome}; conexão somente por código.`);
         }
-        if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
+        if (connection === 'connecting') { sessao.status = sessao.connectionMode === 'codigo' ? 'AGUARDANDO_CODIGO' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
         if (connection === 'open') {
           if (sessao.socket !== socketAtual) return;
           // V94: força a gravação final do creds.json no disco persistente assim
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
           try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
-          sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
+          if (sessao.timer) clearTimeout(sessao.timer);
+          sessao.timer = null; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
+          sessao.qrReinicios = 0; sessao.pareamentoEmAndamento = false; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
           if (sessao.funcaoBot && (!whatsappSocket || !conectado)) {
@@ -6053,16 +6217,35 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           const loggedOut = code === baileys.DisconnectReason?.loggedOut;
           const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
           const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-          const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
-          if (restartRequired || podeReiniciarQr) {
-            sessao.qrReinicios += 1; sessao.status = 'REGERANDO_QR'; sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
+          const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(sessao.sessionDir);
+          console.log(`🔎 V144 CLOSE ${sessao.nome}: code=${code || 'n/a'} registered=${registradoAgora} modo=${sessao.connectionMode} pairing=${!!sessao.pareamentoEmAndamento} erro=${motivo}`);
+
+          // V144: durante QR nunca cria outro socket nem limpa a pasta apenas porque
+          // a conexão fechou. O próprio Baileys renova QR no socket enquanto ele é
+          // válido. Após a leitura, qualquer creds.update é persistido imediatamente.
+          // Só reinicia automaticamente quando o WhatsApp exige restart (515) E as
+          // credenciais já ficaram registradas; nesse caso restaura a mesma sessão.
+          if (restartRequired && !loggedOut && registradoAgora) {
+            sessao.status = 'FINALIZANDO_PAREAMENTO';
+            sessao.erro = 'Código aceito. Finalizando vinculação.';
             emitirStatusSessaoMulti(sessao);
-            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ V87 NOVO QR:', e.message)), 1500);
+            console.log(`🔄 V146: ${sessao.nome} recebeu restartRequired após código; restaurando credenciais salvas.`);
+            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V144 RESTAURAR PÓS-QR:', e.message)), 2500);
             return;
           }
-          sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
-          sessao.erro = motivo; emitirStatusSessaoMulti(sessao);
-          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao);
+
+          if (sessao.connectionMode === 'codigo' && !registradoAgora && !loggedOut) {
+            sessao.status = 'FALHA_CODIGO';
+            sessao.erro = `${motivo}. Gere um novo código e tente novamente.`;
+            sessao.pareamentoEmAndamento = false;
+            sessao.pairingCode = '';
+            emitirStatusSessaoMulti(sessao);
+            return;
+          }
+
+          sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
+          sessao.erro = motivo; sessao.pareamentoEmAndamento = false; emitirStatusSessaoMulti(sessao);
+          if (!loggedOut && registradoAgora) agendarReconexaoSessaoMulti(sessao, motivo);
         }
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
@@ -6100,11 +6283,242 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         } catch (e) { console.log(`❌ V87 MENSAGEM SESSÃO #${sessao.id}:`, e.message); }
       }
     });
+
+    // V145: conexão alternativa por código de pareamento (sem QR Code).
+    if (sessao.connectionMode === 'codigo') {
+      const numeroCodigo = normalizarNumeroWhatsApp(opcoes.numero || '');
+      if (!/^\d{10,15}$/.test(numeroCodigo)) throw new Error('Número inválido. Informe DDI + DDD + número, somente dígitos. Ex.: 5575981635708');
+      sessao.pairingNumero = numeroCodigo;
+      sessao.pairingCode = '';
+      sessao.status = 'GERANDO_CODIGO';
+      sessao.pareamentoEmAndamento = true;
+      emitirStatusSessaoMulti(sessao);
+      console.log(`🔢 V145: solicitando código de pareamento para ${sessao.nome} / ${numeroCodigo}`);
+      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, numeroCodigo, `V145 código ${sessao.nome}`);
+      sessao.pairingCode = String(codigo || '').trim();
+      sessao.status = 'AGUARDANDO_CODIGO';
+      sessao.erro = '';
+      emitirStatusSessaoMulti(sessao);
+      console.log(`🔢 V145: código de pareamento gerado para ${sessao.nome}: ${sessao.pairingCode}`);
+    }
   } catch (e) {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V87 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao);
+    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao, e.message || 'falha ao iniciar');
   } finally { sessao.iniciando = false; }
+}
+
+
+// ========================= V147: TESTE MÍNIMO DE PAREAMENTO POR CÓDIGO =========================
+// Socket isolado: sem QR, sem watchdog, sem retry, sem handlers do bot durante o pareamento.
+// Se conectar com sucesso, salva as credenciais e entrega a sessão ao fluxo normal de restauração.
+async function iniciarPareamentoCodigoMinimoV147(id, numeroInformado) {
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=? AND ativo=1', [Number(id)]);
+  if (!row) throw new Error('Sessão de WhatsApp não encontrada.');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  const numero = normalizarNumeroWhatsApp(numeroInformado || '');
+  if (!/^\d{10,15}$/.test(numero)) throw new Error('Número inválido. Informe DDI + DDD + número, somente dígitos.');
+  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) throw new Error('Esta sessão já está registrada. Desconecte/apague a sessão antes de testar um novo pareamento.');
+
+  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+  if (sessao.socket?.end) { try { sessao.socket.end(new Error('V147: iniciando teste mínimo')); } catch (_) {} }
+  sessao.socket = null;
+  sessao.conectado = false;
+  sessao.qr = null;
+  sessao.pairingCode = '';
+  sessao.pairingNumero = numero;
+  sessao.erro = '';
+  sessao.status = 'TESTE_MINIMO_INICIANDO';
+  sessao.connectionMode = 'codigo-minimo';
+  sessao.testeMinimoAtivo = true;
+  const tokenTeste = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  sessao.tokenTesteMinimo = tokenTeste;
+  emitirStatusSessaoMulti(sessao);
+
+  // Estado totalmente limpo, mas somente porque ainda não existe sessão registrada.
+  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
+  fs.mkdirSync(sessao.sessionDir, { recursive: true });
+  console.log(`🧪 V147 MINIMO: iniciando ${sessao.nome} / ${numero} em ${sessao.sessionDir}`);
+
+  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'V147 carregar Baileys');
+  const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'V147 carregar pino');
+  const pino = pinoModule.default || pinoModule;
+  const makeWASocket = baileys.default || baileys.makeWASocket;
+  const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, 'V147 auth state');
+
+  let version = null;
+  if (typeof baileys.fetchLatestWaWebVersion === 'function') {
+    try {
+      const result = await comTimeoutWhatsApp(baileys.fetchLatestWaWebVersion(), 12000, 'V147 fetchLatestWaWebVersion');
+      if (Array.isArray(result?.version) && result.version.length === 3) version = result.version;
+    } catch (e) { console.log('⚠️ V147 MINIMO: falha ao buscar versão WA Web:', e.message); }
+  }
+  console.log(`🧪 V147 MINIMO: versão WA Web=${version ? version.join('.') : 'padrão interno'}`);
+
+  const browser = baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu','Chrome','22.04.4'];
+  console.log(`🧪 V147 MINIMO: browser=${JSON.stringify(browser)}`);
+
+  const socketAtual = makeWASocket({
+    auth: state,
+    logger: pino({ level: process.env.WHATSAPP_TEST_LOG_LEVEL || 'warn' }),
+    printQRInTerminal: false,
+    ...(version ? { version } : {}),
+    browser,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 45000,
+    defaultQueryTimeoutMs: 45000,
+    keepAliveIntervalMs: 20000,
+    retryRequestDelayMs: 1000
+  });
+  sessao.socket = socketAtual;
+
+  socketAtual.ev.on('creds.update', async () => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    try {
+      await saveCreds();
+      console.log(`🔐 V147 MINIMO CREDS: ${sessao.nome} registered=${state.creds.registered === true}`);
+    } catch (e) { console.log(`❌ V147 MINIMO SAVE CREDS:`, e.message); }
+  });
+
+  socketAtual.ev.on('connection.update', async update => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    const { connection, lastDisconnect, qr } = update || {};
+    const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || '';
+    if (qr) console.log(`🚫 V147 MINIMO: QR recebido e ignorado para ${sessao.nome}.`);
+    if (connection) console.log(`🔎 V147 MINIMO UPDATE: ${sessao.nome} connection=${connection} code=${code || 'n/a'} registered=${state.creds.registered === true}`);
+
+    if (connection === 'connecting') {
+      sessao.status = 'TESTE_MINIMO_CONECTANDO';
+      emitirStatusSessaoMulti(sessao);
+    }
+
+    if (connection === 'open') {
+      try { await saveCreds(); } catch (_) {}
+      console.log(`✅ V147 MINIMO: PAREAMENTO ACEITO para ${sessao.nome}; credenciais registradas=${state.creds.registered === true}`);
+      sessao.status = 'FINALIZANDO_PAREAMENTO';
+      sessao.erro = 'Código aceito. Transferindo para a conexão normal.';
+      sessao.pairingCode = '';
+      sessao.testeMinimoAtivo = false;
+      sessao.tokenTesteMinimo = '';
+      emitirStatusSessaoMulti(sessao);
+      setTimeout(async () => {
+        try { if (socketAtual?.end) socketAtual.end(new Error('V147 handoff para fluxo normal')); } catch (_) {}
+        if (sessao.socket === socketAtual) sessao.socket = null;
+        await dormir(800);
+        iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V147 HANDOFF:', e.message));
+      }, 1500);
+    }
+
+    if (connection === 'close' && sessao.testeMinimoAtivo && sessao.tokenTesteMinimo === tokenTeste) {
+      const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
+      console.log(`❌ V147 MINIMO CLOSE: ${sessao.nome} code=${code || 'n/a'} registered=${state.creds.registered === true} erro=${motivo}`);
+      sessao.socket = null;
+      sessao.conectado = false;
+      sessao.testeMinimoAtivo = false;
+      sessao.status = 'FALHA_TESTE_MINIMO';
+      sessao.erro = `Teste mínimo falhou: ${motivo}${code ? ` (código ${code})` : ''}`;
+      sessao.pairingCode = '';
+      emitirStatusSessaoMulti(sessao);
+    }
+  });
+
+  // Uma única solicitação. Sem retry e sem outro socket por trás.
+  await dormir(1800);
+  if (sessao.tokenTesteMinimo !== tokenTeste) throw new Error('Teste mínimo cancelado.');
+  if (state.creds.registered) throw new Error('A sessão já ficou registrada antes de solicitar o código.');
+  sessao.status = 'TESTE_MINIMO_GERANDO_CODIGO';
+  emitirStatusSessaoMulti(sessao);
+  console.log(`🔢 V147 MINIMO: requestPairingCode(${numero}) - tentativa única`);
+  const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(numero), 30000, 'V147 requestPairingCode');
+  sessao.pairingCode = String(codigo || '').trim();
+  sessao.status = 'AGUARDANDO_CODIGO';
+  sessao.erro = 'TESTE MÍNIMO ativo: digite este código no WhatsApp. Não existe QR nem reconexão automática neste teste.';
+  emitirStatusSessaoMulti(sessao);
+  console.log(`🔢 V147 MINIMO: código gerado para ${sessao.nome}: ${sessao.pairingCode}`);
+  return sessao.pairingCode;
+}
+
+
+// ========================= V148: TESTE MÍNIMO DE PAREAMENTO POR QR =========================
+// Um único socket, sem watchdog, sem retry e sem handoff até o WhatsApp aceitar o QR.
+async function iniciarPareamentoQrMinimoV148(id) {
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=? AND ativo=1', [Number(id)]);
+  if (!row) throw new Error('Sessão de WhatsApp não encontrada.');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) throw new Error('Esta sessão já está registrada. Desconecte/apague a sessão antes do teste QR.');
+
+  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+  if (sessao.socket?.end) { try { sessao.socket.end(new Error('V148: iniciando teste QR mínimo')); } catch (_) {} }
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = '';
+  sessao.erro = ''; sessao.status = 'TESTE_QR_MINIMO_INICIANDO'; sessao.connectionMode = 'qr-minimo'; sessao.testeMinimoAtivo = true;
+  const tokenTeste = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  sessao.tokenTesteMinimo = tokenTeste;
+  emitirStatusSessaoMulti(sessao);
+
+  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
+  fs.mkdirSync(sessao.sessionDir, { recursive: true });
+  console.log(`🧪 V148 QR MINIMO: iniciando ${sessao.nome} em ${sessao.sessionDir}`);
+
+  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'V148 carregar Baileys');
+  const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'V148 carregar pino');
+  const pino = pinoModule.default || pinoModule;
+  const makeWASocket = baileys.default || baileys.makeWASocket;
+  const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, 'V148 auth state');
+
+  let version = null;
+  if (typeof baileys.fetchLatestWaWebVersion === 'function') {
+    try {
+      const result = await comTimeoutWhatsApp(baileys.fetchLatestWaWebVersion(), 12000, 'V148 fetchLatestWaWebVersion');
+      if (Array.isArray(result?.version) && result.version.length === 3) version = result.version;
+    } catch (e) { console.log('⚠️ V148 QR MINIMO: falha ao buscar versão WA Web:', e.message); }
+  }
+  const browser = baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu','Chrome','22.04.4'];
+  console.log(`🧪 V148 QR MINIMO: versão WA Web=${version ? version.join('.') : 'padrão interno'} browser=${JSON.stringify(browser)}`);
+
+  const socketAtual = makeWASocket({
+    auth: state, logger: pino({ level: process.env.WHATSAPP_TEST_LOG_LEVEL || 'warn' }), printQRInTerminal: false,
+    ...(version ? { version } : {}), browser, markOnlineOnConnect: false, syncFullHistory: false,
+    generateHighQualityLinkPreview: false, connectTimeoutMs: 45000, defaultQueryTimeoutMs: 45000,
+    keepAliveIntervalMs: 20000, retryRequestDelayMs: 1000
+  });
+  sessao.socket = socketAtual;
+
+  socketAtual.ev.on('creds.update', async () => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    try { await saveCreds(); console.log(`🔐 V148 QR MINIMO CREDS: ${sessao.nome} registered=${state.creds.registered === true}`); }
+    catch (e) { console.log('❌ V148 QR MINIMO SAVE CREDS:', e.message); }
+  });
+
+  socketAtual.ev.on('connection.update', async update => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    const { connection, lastDisconnect, qr } = update || {};
+    const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || '';
+    if (qr) {
+      try {
+        sessao.qr = await QRCode.toDataURL(qr, { margin: 2, width: 360 });
+        sessao.status = 'AGUARDANDO_QR_MINIMO';
+        sessao.erro = 'TESTE QR MÍNIMO ativo: leia este QR uma vez. Não há watchdog nem reconexão automática.';
+        emitirStatusSessaoMulti(sessao);
+        console.log(`📷 V148 QR MINIMO: QR gerado para ${sessao.nome}`);
+      } catch (e) { console.log('❌ V148 QR MINIMO DATAURL:', e.message); }
+    }
+    if (connection) console.log(`🔎 V148 QR MINIMO UPDATE: ${sessao.nome} connection=${connection} code=${code || 'n/a'} registered=${state.creds.registered === true}`);
+    if (connection === 'open') {
+      try { await saveCreds(); } catch (_) {}
+      console.log(`✅ V148 QR MINIMO: PAREAMENTO ACEITO para ${sessao.nome}; registered=${state.creds.registered === true}`);
+      sessao.status='CONECTADO'; sessao.conectado=true; sessao.qr=null; sessao.erro=''; sessao.numero=jidToNumber(socketAtual?.user?.id || '');
+      sessao.testeMinimoAtivo=false; sessao.tokenTesteMinimo=''; emitirStatusSessaoMulti(sessao);
+    }
+    if (connection === 'close' && sessao.testeMinimoAtivo && sessao.tokenTesteMinimo === tokenTeste) {
+      const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
+      console.log(`❌ V148 QR MINIMO CLOSE: ${sessao.nome} code=${code || 'n/a'} registered=${state.creds.registered === true} erro=${motivo}`);
+      sessao.socket=null; sessao.conectado=false; sessao.testeMinimoAtivo=false; sessao.status='FALHA_TESTE_QR_MINIMO';
+      sessao.erro=`Teste QR mínimo falhou: ${motivo}${code ? ` (código ${code})` : ''}`; sessao.qr=null; emitirStatusSessaoMulti(sessao);
+    }
+  });
+  return true;
 }
 
 function descricaoFuncoesSessao(sessao) {
@@ -6136,9 +6550,112 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   const socketAtual = sessao.socket;
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
   if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); }
   emitirStatusSessaoMulti(sessao);
+}
+
+// V142: limpeza ÚNICA das credenciais/conexões antigas do WhatsApp.
+// O marcador fica em /data para que o reset aconteça somente no primeiro boot
+// desta versão. As configurações das sessões (nome e funções) são preservadas;
+// apenas autenticação, número e arquivos de sessão são zerados para gerar QR novo.
+const WHATSAPP_RESET_V142_MARKER = path.join(DATA_DIR, '.whatsapp-reset-v142-concluido');
+
+async function limparTodasConexoesWhatsAppV142() {
+  if (fs.existsSync(WHATSAPP_RESET_V142_MARKER)) return false;
+
+  console.log('🧹 V142: iniciando limpeza total das conexões antigas do WhatsApp...');
+
+  // Fecha qualquer runtime eventualmente criado antes da limpeza.
+  for (const sessao of whatsappSessoes.values()) {
+    try { if (sessao.timer) clearTimeout(sessao.timer); } catch (_) {}
+    sessao.timer = null;
+    try { if (sessao.socket?.end) sessao.socket.end(new Error('reset V142')); } catch (_) {}
+    sessao.socket = null;
+    sessao.conectado = false;
+    sessao.qr = null;
+    sessao.status = 'DESCONECTADO';
+    sessao.erro = '';
+    sessao.qrReinicios = 0;
+    sessao.falhasReconexao = 0;
+    sessao.proximaTentativaEm = 0;
+  }
+  whatsappSocket = null;
+  conectado = false;
+  whatsappNumeroConectado = '';
+  whatsappStatus = 'DESCONECTADO';
+  qrCodeBase64 = null;
+
+  const pastas = new Set([
+    WHATSAPP_SESSION_DIR,
+    path.join(DATA_DIR, 'whatsapp-session'),
+    path.join(DATA_DIR, 'whatsapp-services-session'),
+    WHATSAPP_SUPPORT_SESSION_DIR,
+    WHATSAPP_ADS_SESSION_DIR,
+    WHATSAPP_MULTI_DIR
+  ].filter(Boolean).map(x => path.resolve(x)));
+
+  // Também remove diretórios legados de WhatsApp que possam ter sobrado em /data.
+  try {
+    for (const nome of fs.readdirSync(DATA_DIR)) {
+      if (/^whatsapp-(?:session|sessions|services-session|support-session|ads-session)(?:$|-)/i.test(nome)) {
+        pastas.add(path.resolve(path.join(DATA_DIR, nome)));
+      }
+    }
+  } catch (_) {}
+
+  for (const dir of pastas) {
+    try {
+      if (dir === path.resolve(DATA_DIR)) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log('🗑️ V142: sessão removida:', dir);
+    } catch (e) {
+      console.log('⚠️ V142: não foi possível remover', dir, e.message);
+    }
+  }
+
+  fs.mkdirSync(WHATSAPP_MULTI_DIR, { recursive: true });
+  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+
+  // Preserva os cadastros/funções das sessões, mas remove vínculo com números antigos.
+  await run(`UPDATE whatsapp_sessoes SET numero=NULL, atualizado_em=CURRENT_TIMESTAMP`);
+
+  // Recria as pastas canônicas vazias para cada sessão cadastrada.
+  const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
+  for (const row of rows) {
+    const canonica = pastaCanonicaSessaoWhatsApp(row.session_key);
+    fs.mkdirSync(canonica, { recursive: true });
+    if (String(row.session_dir || '') !== canonica) {
+      await run('UPDATE whatsapp_sessoes SET session_dir=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [canonica, row.id]);
+    }
+    const runtime = criarRuntimeSessaoWhatsApp({ ...row, session_dir: canonica, numero: '' });
+    runtime.numero = '';
+    runtime.status = 'DESCONECTADO';
+    runtime.erro = '';
+    runtime.qr = null;
+    runtime.conectado = false;
+    runtime.qrReinicios = 0;
+    runtime.falhasReconexao = 0;
+    runtime.proximaTentativaEm = 0;
+  }
+
+  // Grava por último: se o processo cair no meio, o próximo boot tenta limpar de novo.
+  fs.writeFileSync(WHATSAPP_RESET_V142_MARKER, new Date().toISOString(), 'utf8');
+  console.log('✅ V142: limpeza total concluída. Configurações preservadas; credenciais antigas removidas.');
+  return true;
+}
+
+async function gerarQrNovoAposResetV142() {
+  // V146: QR desativado. Após uma limpeza, as sessões aguardam código por número.
+  await carregarSessoesWhatsApp();
+  const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
+  for (const sessao of sessoes) {
+    sessao.qr = null;
+    sessao.status = 'AGUARDANDO_CODIGO';
+    sessao.erro = 'Sessão limpa. Gere um código de conexão pelo número.';
+    emitirStatusSessaoMulti(sessao);
+  }
+  console.log(`🔢 V146: ${sessoes.length} sessão(ões) aguardando conexão por código.`);
 }
 
 async function iniciarTodasSessoesWhatsAppSalvas() {
@@ -6150,20 +6667,17 @@ async function iniciarTodasSessoesWhatsAppSalvas() {
     const rowAtual = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [sessao.id]);
     if (rowAtual) criarRuntimeSessaoWhatsApp(rowAtual);
     const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
-      sessao.status = 'DESCONECTADO';
-      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere QR Code para esta sessão.';
+    if (!registrada) {
+      sessao.status = 'AGUARDANDO_CODIGO';
+      sessao.erro = 'Sessão não registrada. Gere um código de conexão pelo número.';
+      sessao.qr = null;
       emitirStatusSessaoMulti(sessao);
-      console.log(`⚠️ V95: ${sessao.nome} sem dados suficientes para tentativa automática em ${sessao.sessionDir}`);
+      console.log(`🔢 V146: ${sessao.nome} aguardando código; QR automático desativado.`);
       continue;
     }
     try {
-      // V95: se o número já esteve conectado, executa automaticamente no boot
-      // o MESMO fluxo que o botão Gerar QR Code usaria quando registered=false.
-      // Isso resolve o caso observado no Render: clicar no botão conecta sozinho,
-      // portanto o usuário não deve precisar clicar após cada restart.
-      console.log(`🔐 V95: iniciando automaticamente ${sessao.nome} (${registrada ? 'restauração' : 'recuperação automática'}) — ${sessao.sessionDir}`);
-      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' });
+      console.log(`🔐 V146: restaurando automaticamente ${sessao.nome} — ${sessao.sessionDir}`);
+      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' });
     } catch (e) {
       console.log(`❌ V93 START #${sessao.id}:`, e.message);
       agendarReconexaoSessaoMulti(sessao);
@@ -6181,12 +6695,11 @@ async function watchdogSessoesWhatsApp() {
     await carregarSessoesWhatsApp();
     for (const sessao of whatsappSessoes.values()) {
       if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
-      if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) continue;
-      const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-      console.log(`🩺 V95 WATCHDOG: ${sessao.nome} está offline; tentando ${registrada ? 'restaurar' : 'recuperar'} automaticamente.`);
-      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }); }
-      catch (e) { console.log(`❌ V95 WATCHDOG #${sessao.id}:`, e.message); }
-      await new Promise(r => setTimeout(r, 1000));
+      if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) continue;
+      // V141: o watchdog não abre mais a conexão diretamente. Ele apenas
+      // garante que exista uma tentativa agendada, respeitando o backoff.
+      console.log(`🩺 V141 WATCHDOG: ${sessao.nome} está offline; garantindo reconexão agendada.`);
+      agendarReconexaoSessaoMulti(sessao, 'watchdog');
     }
   } catch (e) {
     console.log('❌ V93 WATCHDOG:', e.message);
@@ -6236,7 +6749,7 @@ function agendarReconexaoExtra(key) {
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
     const possuiSessao = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    iniciarWhatsAppExtra(key, { modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message));
+    if (possuiSessao) iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message)); else { sessao.status='AGUARDANDO_CODIGO'; sessao.qr=null; emitirStatusExtra(sessao); }
   }, 5000);
 }
 async function processarMensagemSuporte({ numero, nome, texto, jid }) {
@@ -6250,13 +6763,14 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   const sessao = whatsappExtra[key];
   if (!sessao || !sessao.enabled || sessao.iniciando) return;
   sessao.iniciando = true; sessao.status = 'INICIANDO'; sessao.erro = '';
-  sessao.connectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
+  sessao.connectionMode = 'restaurar';
   sessao.pairingNumero = '';
   sessao.pairingCode = '';
-  if (sessao.connectionMode === 'qr') sessao.qr = null;
+  sessao.qr = null;
   emitirStatusExtra(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
     const pino = pinoModule.default || pinoModule;
@@ -6268,15 +6782,14 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async () => {
+      try { await saveCreds(); sessao.pareamentoEmAndamento = false; }
+      catch (e) { console.log(`❌ V144 SAVE CREDS ${key}:`, e.message); }
+    });
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
-      if (qr) {
-        sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
-        sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = ''; emitirStatusExtra(sessao);
-        console.log(`📷 QR Code gerado para ${sessao.label}`);
-      }
-      if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusExtra(sessao); }
+      if (qr) { sessao.qr = null; console.log(`🚫 V146: QR extra ignorado para ${sessao.label}.`); }
+      if (connection === 'connecting') { sessao.status = 'CONECTANDO'; emitirStatusExtra(sessao); }
       if (connection === 'open') { if (sessao.socket !== socketAtual) return; sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = ''; sessao.numero = jidToNumber(socketAtual?.user?.id || ''); emitirStatusExtra(sessao); notificarPainel('whatsapp', `✅ ${sessao.label} conectado`, sessao.numero || 'Sessão ativa'); }
       if (connection === 'close') {
         if (sessao.socket !== socketAtual) return;
@@ -6286,20 +6799,18 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         const loggedOut = code === baileys.DisconnectReason?.loggedOut;
         const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
         const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-        const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
+        const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(sessao.sessionDir);
         sessao.qr = null;
-        if (restartRequired || podeReiniciarQr) {
-          sessao.qrReinicios += 1;
-          sessao.status = 'REGERANDO_QR';
-          sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
-          emitirStatusExtra(sessao);
-          setTimeout(() => iniciarWhatsAppExtra(key, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ NOVO QR ${key}:`, e.message)), 1500);
+        console.log(`🔎 V144 CLOSE ${sessao.label}: code=${code || 'n/a'} registered=${registradoAgora} modo=${sessao.connectionMode} erro=${motivo}`);
+        if (restartRequired && !loggedOut && registradoAgora) {
+          sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = 'Código aceito. Finalizando vinculação.'; emitirStatusExtra(sessao);
+          setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ V144 RESTAURAR ${key}:`, e.message)), 2500);
           return;
         }
-        sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
+        sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
         sessao.erro = motivo;
         emitirStatusExtra(sessao);
-        if (!loggedOut && state.creds.registered && sessao.connectionMode === 'restaurar') agendarReconexaoExtra(key);
+        if (!loggedOut && registradoAgora && sessao.connectionMode === 'restaurar') agendarReconexaoExtra(key);
       }
     });
     if (key === 'support') socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -6324,7 +6835,7 @@ async function desconectarWhatsAppExtra(key) {
   const sessao = whatsappExtra[key]; if (!sessao) return;
   try { if (sessao.socket) await sessao.socket.logout(); } catch (_) {}
   if (sessao.timer) clearTimeout(sessao.timer);
-  sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'qr'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
+  sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'codigo'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
   try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); emitirStatusExtra(sessao);
 }
 async function funcoesSessaoServicos() {
@@ -6464,8 +6975,9 @@ function agendarReconexaoWhatsApp() {
   whatsappReconectarTimer = setTimeout(() => {
     whatsappReconectarTimer = null;
     const possuiSessao = sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
-    console.log(possuiSessao ? '🔄 Reconectando automaticamente com a sessão salva.' : '📷 Sessão não registrada; aguardando novo QR Code.');
-    iniciarWhatsAppQrCode({ modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
+    if (!possuiSessao) { whatsappStatus='AGUARDANDO_CODIGO'; whatsappUltimoErro='Sessão não registrada. Use conexão por código no painel.'; return; }
+    console.log('🔄 Reconectando automaticamente com a sessão salva.');
+    iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
   }, 5000);
 }
 
@@ -6481,10 +6993,10 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
   }
 
   whatsappIniciando = true;
-  whatsappConnectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
+  whatsappConnectionMode = 'restaurar';
   whatsappPairingNumero = '';
   whatsappPairingCode = '';
-  if (whatsappConnectionMode === 'qr') qrCodeBase64 = null;
+  qrCodeBase64 = null;
   whatsappInicioEm = Date.now();
   whatsappUltimoErro = '';
   whatsappStatus = 'INICIANDO';
@@ -6496,6 +7008,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
     fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
     console.log('✅ Pasta da sessão acessível para leitura e gravação');
+    
 
     console.log('📦 Carregando Baileys...');
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
@@ -6535,20 +7048,16 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     whatsappSocket = socketAtual;
     console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
-    socketAtual.ev.on('creds.update', saveCreds);
+    socketAtual.ev.on('creds.update', async () => {
+      try { await saveCreds(); console.log(`🔐 V144: credenciais do Bot de Serviços atualizadas (registered=${state.creds.registered === true}).`); }
+      catch (e) { console.log('❌ V144 SAVE CREDS WHATSAPP:', e.message); }
+    });
     socketAtual.ev.on('connection.update', async update => {
       try {
         const { connection, lastDisconnect, qr } = update || {};
-        if (qr) {
-          qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
-          conectado = false;
-          whatsappStatus = 'AGUARDANDO_QR';
-          whatsappUltimoErro = '';
-          console.log('📷 QR Code do WhatsApp gerado');
-          io.emit('whatsapp-status', { status: whatsappStatus });
-        }
+        if (qr) { qrCodeBase64 = null; console.log('🚫 V146: QR legado ignorado; conexão somente por código no painel multi-sessão.'); }
         if (connection === 'connecting') {
-          whatsappStatus = qrCodeBase64 ? 'AGUARDANDO_QR' : 'CONECTANDO';
+          whatsappStatus = 'CONECTANDO';
           io.emit('whatsapp-status', { status: whatsappStatus });
         }
         if (connection === 'open') {
@@ -6573,21 +7082,20 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           const motivo = lastDisconnect?.error?.message || `código ${statusCode || 'desconhecido'}`;
           const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
           const restartRequired = statusCode === baileys.DisconnectReason?.restartRequired || statusCode === 515;
-          const podeReiniciarQr = whatsappConnectionMode === 'qr' && !loggedOut && whatsappQrReinicios < WHATSAPP_QR_MAX_REINICIOS;
+          const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
           qrCodeBase64 = null;
-          console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
-          if (restartRequired || podeReiniciarQr) {
-            whatsappQrReinicios += 1;
-            whatsappStatus = 'REGERANDO_QR';
-            whatsappUltimoErro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
+          console.log(`🔎 V144 CLOSE Bot de Serviços: code=${statusCode || 'n/a'} registered=${registradoAgora} modo=${whatsappConnectionMode} erro=${motivo}`);
+          if (restartRequired && !loggedOut && registradoAgora) {
+            whatsappStatus = 'FINALIZANDO_PAREAMENTO';
+            whatsappUltimoErro = 'QR lido. Finalizando vinculação sem gerar outro QR Code.';
             io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-            setTimeout(() => iniciarWhatsAppQrCode({ modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ NOVO QR WHATSAPP:', e.message)), 1500);
+            setTimeout(() => iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ V144 RESTAURAR PÓS-QR:', e.message)), 2500);
             return;
           }
-          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : (whatsappConnectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
+          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
           whatsappUltimoErro = motivo;
           io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-          if (!loggedOut && state.creds.registered && whatsappConnectionMode === 'restaurar') agendarReconexaoWhatsApp();
+          if (!loggedOut && registradoAgora && whatsappConnectionMode === 'restaurar') agendarReconexaoWhatsApp();
         }
       } catch (eventError) {
         whatsappUltimoErro = eventError.message;
@@ -6646,7 +7154,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     console.log('❌ INICIAR WHATSAPP QR CODE:', e.stack || e.message);
     io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
     // Se há credenciais persistidas, uma falha transitória do Render/Baileys não
-    // deve obrigar o usuário a clicar em Gerar QR Code. Tenta restaurar sozinho.
+    // deve usar o código pelo painel. Sessões registradas são restauradas automaticamente.
     if (whatsappConnectionMode === 'restaurar' && sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) agendarReconexaoWhatsApp();
   } finally {
     whatsappIniciando = false;
@@ -6661,7 +7169,7 @@ async function desconectarWhatsApp() {
   qrCodeBase64 = null;
   whatsappPairingCode = '';
   whatsappPairingNumero = '';
-  whatsappConnectionMode = 'qr';
+  whatsappConnectionMode = 'codigo';
   whatsappNumeroConectado = '';
   whatsappStatus = 'DESCONECTADO';
   whatsappUltimoErro = '';
@@ -6864,9 +7372,12 @@ function pedidoActions(o, back = '/admin/pedidos') {
     <button class="btn red">🗑️ Apagar</button>
   </form>`;
 }
-function pedidoTable(rows, showServico = true, selectable = false) {
-  let html = `<table><tr>${selectable ? '<th><input type="checkbox" id="selectAllPedidos" title="Selecionar todos"></th>' : ''}<th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Enviado em</th><th>Ações</th></tr>`;
-  for (const o of rows) html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td><td>${pedidoActions(o)}</td></tr>`;
+function pedidoTable(rows, showServico = true, selectable = false, controleNota = false) {
+  let html = `<table><tr>${selectable ? '<th><input type="checkbox" id="selectAllPedidos" title="Selecionar todos"></th>' : ''}<th>ID</th><th>Entrada</th>${showServico ? '<th>Serviço</th>' : ''}<th>Cliente/Revenda</th><th>Telegram/Contato</th><th>Valor</th><th>Status</th><th>Enviado em</th>${controleNota ? '<th>Nota</th>' : ''}<th>Ações</th></tr>`;
+  for (const o of rows) {
+    const nota = controleNota ? `<td class="nota-cell">${Number(o.nota_enviada||0) ? `<span class="nota-status enviada">✅ NOTA ENVIADA</span><small class="nota-data">${safeHtml(dateBR(o.nota_enviada_em))}</small><form class="forms-inline nota-form" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="nota-action nota-action-undo">↩️ DESMARCAR NOTA</button></form>` : `<span class="nota-status pendente">🧾 NOTA NÃO ENVIADA</span><form class="forms-inline nota-form" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="nota-action nota-action-send">✅ NOTA ENVIADA</button></form>`}</td>` : '';
+    html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td>${nota}<td>${pedidoActions(o)}</td></tr>`;
+  }
   html += '</table>';
   return html;
 }
@@ -7798,11 +8309,147 @@ ${textoSituacaoSaldo(novo)}
   res.redirect(`/admin/revenda/${req.params.id}/conta`);
 });
 
+
+// =========================
+// V132 — OPERADORES / BLOQUEIO TIM
+// =========================
+app.get('/admin/bloqueio-tim-operadores', async (req, res) => {
+  const rows = await all('SELECT id,nome,usuario,ativo,criado_em,atualizado_em FROM operadores_bloqueio_tim ORDER BY ativo DESC,nome COLLATE NOCASE ASC,id DESC');
+  const aviso = req.query.ok ? `<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>` : req.query.erro ? `<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>` : '';
+  let tabela = '<table><tr><th>Nome</th><th>Usuário</th><th>Status</th><th>Ações</th></tr>';
+  for (const o of rows) tabela += `<tr><td><b>${safeHtml(o.nome)}</b></td><td>${safeHtml(o.usuario)}</td><td><span class="pill">${o.ativo ? '✅ ATIVO' : '⛔ DESATIVADO'}</span></td><td><div class="actions"><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/toggle"><button class="btn orange">${o.ativo?'Desativar':'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/senha"><input name="senha" type="password" minlength="4" required placeholder="Nova senha" style="width:150px;display:inline-block"><button class="btn">🔑 Trocar senha</button></form><form class="forms-inline" method="post" action="/admin/bloqueio-tim-operadores/${o.id}/excluir" data-confirm="Excluir o operador ${safeHtml(o.nome)}?"><button class="btn red">🗑️ Excluir</button></form></div></td></tr>`;
+  tabela += '</table>';
+  res.send(page('Operadores Bloqueio TIM', `<div class="topbar"><div><h1>👷 Operadores — Bloqueio TIM</h1><p class="muted">Crie o login da pessoa que terá acesso somente ao link separado de Bloqueio TIM.</p></div><div><a class="btn" href="/admin/servicos">⬅️ Serviços</a><a class="btn green" href="/bloqueio-tim" target="_blank">🔗 Abrir painel Bloqueio TIM</a></div></div>${aviso}<div class="card"><h2>➕ Novo operador</h2><form method="post" action="/admin/bloqueio-tim-operadores"><div class="form-grid"><div><label>Nome</label><input name="nome" required maxlength="80" placeholder="Ex.: Carlos"></div><div><label>Usuário</label><input name="usuario" required maxlength="40" placeholder="Ex.: carlos"></div><div><label>Senha</label><input name="senha" type="password" minlength="4" required placeholder="Senha de acesso"></div></div><button class="btn green">💾 Criar operador</button></form></div><div class="card"><h2>Operadores cadastrados</h2>${rows.length?tabela:'<p class="muted">Nenhum operador cadastrado.</p>'}</div>`));
+});
+app.post('/admin/bloqueio-tim-operadores', async (req, res) => {
+  const nome=String(req.body.nome||'').trim(), usuario=String(req.body.usuario||'').trim(), senha=String(req.body.senha||'');
+  if (!nome || !usuario || senha.length < 4) return res.redirect('/admin/bloqueio-tim-operadores?erro='+encodeURIComponent('Preencha nome, usuário e senha com pelo menos 4 caracteres.'));
+  try {
+    await run('INSERT INTO operadores_bloqueio_tim (nome,usuario,senha_hash,ativo) VALUES (?,?,?,1)', [nome,usuario,hashSenhaOperador(senha)]);
+    res.redirect('/admin/bloqueio-tim-operadores?ok='+encodeURIComponent('Operador criado com sucesso.'));
+  } catch(e) {
+    res.redirect('/admin/bloqueio-tim-operadores?erro='+encodeURIComponent(String(e.message||'').includes('UNIQUE')?'Este usuário já existe.':e.message));
+  }
+});
+app.post('/admin/bloqueio-tim-operadores/:id/toggle', async (req,res)=>{const o=await get('SELECT ativo FROM operadores_bloqueio_tim WHERE id=?',[req.params.id]);if(o)await run('UPDATE operadores_bloqueio_tim SET ativo=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[o.ativo?0:1,req.params.id]);res.redirect('/admin/bloqueio-tim-operadores');});
+app.post('/admin/bloqueio-tim-operadores/:id/senha', async (req,res)=>{const senha=String(req.body.senha||'');if(senha.length>=4)await run('UPDATE operadores_bloqueio_tim SET senha_hash=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[hashSenhaOperador(senha),req.params.id]);res.redirect('/admin/bloqueio-tim-operadores?ok='+encodeURIComponent('Senha atualizada.'));});
+app.post('/admin/bloqueio-tim-operadores/:id/excluir', async (req,res)=>{await run('UPDATE pedidos SET bloqueio_operador_id=NULL WHERE bloqueio_operador_id=?',[req.params.id]);await run('DELETE FROM operadores_bloqueio_tim WHERE id=?',[req.params.id]);res.redirect('/admin/bloqueio-tim-operadores');});
+
+app.get('/bloqueio-tim/login', (req,res)=>{
+  if (lerSessaoOperador(req)) return res.redirect('/bloqueio-tim');
+  const erro=req.query.erro?`<div class="msg warn">❌ ${safeHtml(req.query.erro)}</div>`:'';
+  res.send(operadorPage('Login Bloqueio TIM', `<div style="max-width:430px;margin:55px auto"><div class="card"><h1>🔐 Bloqueio TIM</h1><p class="muted">Acesso exclusivo do operador.</p>${erro}<form method="post" action="/bloqueio-tim/login"><label>Usuário</label><input name="usuario" autocomplete="username" required><label>Senha</label><input name="senha" type="password" autocomplete="current-password" required><button class="btn green" style="width:100%">ENTRAR</button></form></div></div>`));
+});
+app.post('/bloqueio-tim/login', async (req,res)=>{
+  const usuario=String(req.body.usuario||'').trim(), senha=String(req.body.senha||'');
+  const op=await get('SELECT * FROM operadores_bloqueio_tim WHERE lower(usuario)=lower(?) AND ativo=1',[usuario]);
+  if(!op || !validarSenhaOperador(senha,op.senha_hash)) return res.redirect('/bloqueio-tim/login?erro='+encodeURIComponent('Usuário ou senha inválidos.'));
+  const exp=Date.now()+1000*60*60*24*14;
+  const secure = String(req.headers['x-forwarded-proto']||'').toLowerCase()==='https' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `bt_session=${encodeURIComponent(assinarSessaoOperador(op.id,exp))}; Path=/bloqueio-tim; HttpOnly; SameSite=Lax; Max-Age=${60*60*24*14}${secure}`);
+  res.redirect('/bloqueio-tim');
+});
+app.get('/bloqueio-tim/logout',(req,res)=>{res.setHeader('Set-Cookie','bt_session=; Path=/bloqueio-tim; HttpOnly; SameSite=Lax; Max-Age=0');res.redirect('/bloqueio-tim/login');});
+
+app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
+  const serv=await get(`SELECT id,nome FROM servicos_catalogo WHERE lower(trim(nome))='bloqueio tim' ORDER BY id ASC LIMIT 1`);
+  if(!serv) return res.send(operadorPage('Bloqueio TIM','<div class="card"><h2>❌ Serviço Bloqueio TIM não encontrado.</h2></div>',req.operadorBloqueio));
+  // V134: duas filas. Principal = pendentes; Aguardando = pedidos enviados para EM PROCESSO pelo botão AGUARDANDO.
+  const aba=String(req.query.aba||'principal').toLowerCase()==='aguardando'?'aguardando':'principal';
+  const contPrincipal=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE'`,[serv.id]);
+  const contAguardando=await get(`SELECT COUNT(*) qtd FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO'`,[serv.id]);
+  const rows=aba==='aguardando'
+    ? await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='EM PROCESSO' AND UPPER(COALESCE(bloqueio_estado,''))='AGUARDANDO' ORDER BY datetime(COALESCE(criado_em, enviado_em)) ASC, id ASC LIMIT 500`,[serv.id])
+    : await all(`SELECT * FROM pedidos WHERE servico_id=? AND UPPER(COALESCE(status,''))='PENDENTE' ORDER BY datetime(COALESCE(criado_em, enviado_em)) ASC, id ASC LIMIT 500`,[serv.id]);
+  let cards='';
+  for(const p of rows){
+    const dono=Number(p.bloqueio_operador_id||0), eu=Number(req.operadorBloqueio.id), outro=dono && dono!==eu;
+    const realizando=dono!==0;
+    const estado=realizando?`▶️ REALIZANDO BLOQUEIO — ${safeHtml(p.bloqueio_operador_nome||'Operador')}`:aba==='aguardando'?'⏳ AGUARDANDO BLOQUEIO':'🟡 PENDENTE';
+    const lock=outro?`<div class="msg warn">🔒 Este IMEI já está sendo realizado por <b>${safeHtml(p.bloqueio_operador_nome||'outro operador')}</b>.</div>`:'';
+    let botoes='';
+    if(outro){
+      botoes='<button class="btn blue" disabled>▶️ REALIZANDO BLOQUEIO</button>'+(aba==='aguardando'?'<button class="btn gray" disabled>↩️ DESFAZER AGUARDANDO</button>':'<button class="btn orange" disabled>⏳ AGUARDANDO BLOQUEIO</button>')+'<button class="btn green" disabled>✅ BLOQUEIO REALIZADO</button><button class="btn red" disabled>❌ CANCELAR</button>';
+    } else {
+      const botaoRealizando=dono===eu
+        ? `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/desfazer-realizando"><input type="hidden" name="aba" value="${aba}"><button class="btn gray">↩️ DESFAZER REALIZANDO BLOQUEIO</button></form>`
+        : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizando"><input type="hidden" name="aba" value="${aba}"><button class="btn blue">▶️ REALIZANDO BLOQUEIO</button></form>`;
+      const botaoFila=aba==='aguardando'
+        ? `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/desfazer-aguardando"><button class="btn gray" onclick="return confirm('Desfazer aguardando e devolver este IMEI para a aba Principal?')">↩️ DESFAZER AGUARDANDO</button></form>`
+        : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/aguardando"><button class="btn orange">⏳ AGUARDANDO BLOQUEIO</button></form>`;
+      botoes=`${botaoRealizando}${botaoFila}<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizado"><input type="hidden" name="aba" value="${aba}"><button class="btn green" onclick="return confirm('Confirma que este bloqueio foi realizado?')">✅ BLOQUEIO REALIZADO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/cancelar" onsubmit="var m=prompt('Qual o motivo do cancelamento deste IMEI?');if(m===null)return false;m=m.trim();if(!m){alert('Digite o motivo do cancelamento.');return false;}this.elements.motivo.value=m;return confirm('Confirma o cancelamento deste pedido?');"><input type="hidden" name="motivo" value=""><input type="hidden" name="aba" value="${aba}"><button class="btn red">❌ CANCELAR</button></form>`;
+    }
+    cards+=`<div class="pedido"><h3>📱 ${safeHtml(p.entrada_valor||p.imei||'-')}</h3><div><span class="pill">${estado}</span></div><p style="font-size:18px;font-weight:700;margin:10px 0">💰 Valor: ${safeHtml(brl(Number(p.valor||0)))}</p><p class="muted">Pedido #${p.id} · Cliente: ${safeHtml(p.revenda_nome||p.cliente_nome||'-')} · ${safeHtml(dateBR(p.enviado_em||p.criado_em))}</p>${dono?`<p class="muted">Operador: <b>${safeHtml(p.bloqueio_operador_nome||'-')}</b>${p.bloqueio_assumido_em?' · desde '+safeHtml(dateBR(p.bloqueio_assumido_em)):''}</p>`:''}${lock}<div class="actions">${botoes}</div></div>`;
+  }
+  const msg=req.query.msg?`<div class="msg">${safeHtml(req.query.msg)}</div>`:'';
+  const tabs=`<div class="card" style="padding:10px"><a class="btn ${aba==='principal'?'green':'gray'}" href="/bloqueio-tim?aba=principal">📋 PRINCIPAL (${Number(contPrincipal?.qtd||0)})</a><a class="btn ${aba==='aguardando'?'orange':'gray'}" href="/bloqueio-tim?aba=aguardando">⏳ AGUARDANDO BLOQUEIO (${Number(contAguardando?.qtd||0)})</a></div>`;
+  const vazio=aba==='aguardando'?'Nenhum IMEI aguardando bloqueio.':'Nenhum Bloqueio TIM pendente.';
+  res.send(operadorPage('Bloqueio TIM', `<h1>🛡️ Bloqueio TIM</h1><p class="muted">Fila operacional do serviço Bloqueio TIM.</p>${tabs}${msg}<div class="grid">${cards||`<div class="card">${vazio}</div>`}</div>`,req.operadorBloqueio));
+});
+
+async function pedidoBloqueioTim(id){return get(`SELECT p.*,s.nome AS nome_catalogo FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[id]);}
+function redirectBloqueioTim(res,msg='',aba=''){const a=aba==='aguardando'?'aguardando':'principal';res.redirect('/bloqueio-tim?aba='+a+(msg?'&msg='+encodeURIComponent(msg):''));}
+app.post('/bloqueio-tim/pedido/:id/realizando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
+  const r=await run(`UPDATE pedidos SET bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_estado=CASE WHEN UPPER(COALESCE(status,''))='EM PROCESSO' THEN 'AGUARDANDO' ELSE 'REALIZANDO' END,bloqueio_assumido_em=CURRENT_TIMESTAMP,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND (bloqueio_operador_id IS NULL OR bloqueio_operador_id=?)`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id,req.operadorBloqueio.id]);
+  if(Number(r?.changes||0)===0){const a=await pedidoBloqueioTim(p.id);return redirectBloqueioTim(res,`Este IMEI já está sendo realizado por ${a?.bloqueio_operador_nome||'outro operador'}.`);}
+  emitirAtualizacaoBloqueioTim('realizando', p.id);
+  redirectBloqueioTim(res,'IMEI reservado para você.',String(req.body.aba||''));
+});
+app.post('/bloqueio-tim/pedido/:id/desfazer-realizando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
+  if(Number(p.bloqueio_operador_id||0)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,'Você não está realizando este IMEI.');
+  await run(`UPDATE pedidos SET bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_estado=CASE WHEN UPPER(COALESCE(status,''))='EM PROCESSO' THEN 'AGUARDANDO' ELSE '' END,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND bloqueio_operador_id=?`,[p.id,req.operadorBloqueio.id]);
+  emitirAtualizacaoBloqueioTim('desfazer-realizando', p.id);
+  redirectBloqueioTim(res,'Realizando bloqueio desfeito. O IMEI foi liberado.',String(req.body.aba||''));
+});
+app.post('/bloqueio-tim/pedido/:id/aguardando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
+  if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
+  await run(`UPDATE pedidos SET status='EM PROCESSO',bloqueio_estado='AGUARDANDO',bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id]);
+  const a=await get('SELECT * FROM pedidos WHERE id=?',[p.id]); await notificarPedido(a,'processo');
+  emitirAtualizacaoBloqueioTim('aguardando', p.id);
+  redirectBloqueioTim(res,'IMEI movido para Aguardando Bloqueio.','aguardando');
+});
+
+app.post('/bloqueio-tim/pedido/:id/desfazer-aguardando', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.','aguardando');
+  if(String(p.status||'').toUpperCase()!=='EM PROCESSO' || String(p.bloqueio_estado||'').toUpperCase()!=='AGUARDANDO') return redirectBloqueioTim(res,'Este IMEI não está na fila Aguardando Bloqueio.','aguardando');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`,'aguardando');
+  await run(`UPDATE pedidos SET status='PENDENTE',bloqueio_estado='',bloqueio_operador_id=NULL,bloqueio_operador_nome=NULL,bloqueio_assumido_em=NULL,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id]);
+  emitirAtualizacaoBloqueioTim('desfazer-aguardando', p.id);
+  redirectBloqueioTim(res,'Aguardando desfeito. O IMEI voltou para a aba Principal.','principal');
+});
+
+app.post('/bloqueio-tim/pedido/:id/realizado', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
+  if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
+  await finalizarPedido(p);
+  await run(`UPDATE pedidos SET bloqueio_estado='REALIZADO',bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_finalizado_por=?,bloqueio_atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,req.operadorBloqueio.nome,p.id]);
+  redirectBloqueioTim(res,'Bloqueio marcado como realizado e pedido finalizado.',String(req.body.aba||''));
+});
+
+app.post('/bloqueio-tim/pedido/:id/cancelar', operadorBloqueioAuth, async (req,res)=>{
+  const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
+  if(!['PENDENTE','EM PROCESSO'].includes(String(p.status||'').toUpperCase())) return redirectBloqueioTim(res,'Este pedido não está mais pendente.');
+  if(Number(p.bloqueio_operador_id||0) && Number(p.bloqueio_operador_id)!==Number(req.operadorBloqueio.id)) return redirectBloqueioTim(res,`Este IMEI está sendo realizado por ${p.bloqueio_operador_nome||'outro operador'}.`);
+  const motivo=String(req.body.motivo||'').trim();
+  if(!motivo) return redirectBloqueioTim(res,'Informe o motivo do cancelamento.');
+  const r=await cancelarPedidoComEstorno(p.id,motivo);
+  if(!r?.ok) return redirectBloqueioTim(res,r?.erro||'Não foi possível cancelar o pedido.');
+  await run(`UPDATE pedidos SET bloqueio_estado='CANCELADO',bloqueio_operador_id=?,bloqueio_operador_nome=?,bloqueio_atualizado_em=CURRENT_TIMESTAMP,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[req.operadorBloqueio.id,req.operadorBloqueio.nome,p.id]);
+  redirectBloqueioTim(res,'Pedido cancelado. Motivo registrado.',String(req.body.aba||''));
+});
+
 app.get('/admin/servicos/cancelamento', async (req, res) => {
   const rows = await all('SELECT id, nome, ativo, cancelamento_permitido FROM servicos_catalogo ORDER BY id ASC');
   const solicitacoes = await all(`SELECT sc.*, r.nome revenda_nome FROM solicitacoes_cancelamento sc LEFT JOIN revendas r ON r.id=sc.revenda_id ORDER BY sc.id DESC LIMIT 100`);
   let html = `<div class="hero"><h1>❌ Cancelamento de Serviços</h1><p>Escolha quais serviços podem receber solicitação de cancelamento pelos clientes.</p></div>
-  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a></div></div>
   <div class="card"><h2>Permissões</h2>`;
   if (!rows.length) html += `<div class="empty">Nenhum serviço cadastrado.</div>`;
   for (const item of rows) {
@@ -7825,7 +8472,7 @@ app.post('/admin/servicos/cancelamento/:id/toggle', async (req, res) => {
 app.get('/admin/servicos', async (req, res) => {
   const rows = await all('SELECT s.*, (SELECT COUNT(*) FROM pedidos p WHERE p.servico_id=s.id) total FROM servicos_catalogo s ORDER BY s.id ASC');
   let html = `<div class="hero"><h1>🛠 Catálogo de Serviços</h1><p>Cadastre serviços como IMEI, Lock Code ou Outro. O Telegram solicita a entrada conforme o tipo escolhido.</p></div>
-  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a></div></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a></div></div>
   <div class="card"><h2>➕ Novo serviço</h2><form method="post"><div class="form-grid"><div><label>Nome do serviço</label><input name="nome" placeholder="Ex: Blacklist SSP" required></div><div><label>Preço padrão</label><input name="preco" placeholder="Ex: 200"></div><div><label>Categoria</label><input name="categoria" placeholder="Ex: SSP, Desbloqueios"></div><div><label>Prazo</label><input name="prazo" placeholder="Ex: 7 a 15 dias úteis"></div><div><label>Tipo</label><select name="tipo_entrada"><option value="IMEI">📱 IMEI</option><option value="LOCK_CODE">🔑 Lock Code</option><option value="OUTRO">✍️ Outro</option></select></div><div><label>Nome da entrada</label><input name="entrada_label" placeholder="IMEI, Lock Code, Serial, CPF..."></div><div style="grid-column:span 2"><label>Descrição</label><textarea name="descricao" rows="3" placeholder="Explique o serviço para a IA e para o cliente"></textarea></div></div><p class="mini-help">📱 IMEI aceita envio em lote, um por linha. 🔑 Lock Code e ✍️ Outro criam apenas um pedido por vez.</p><button class="btn green">✅ Adicionar Serviço</button></form></div>`;
   html += `<div class="topbar"><h1>Serviços cadastrados</h1><span class="muted">${rows.length} serviço(s)</span></div>`;
   if (!rows.length) html += `<div class="card empty">Nenhum serviço cadastrado ainda.</div>`;
@@ -7870,14 +8517,25 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     SUM(CASE WHEN status='FINALIZADO' THEN 1 ELSE 0 END) finalizados
     FROM pedidos WHERE servico_id=?`, [servicoId]);
 
+  const controleNota = normalizarNomeServico(s.nome) === 'desbloqueio tim';
+  const notaFiltro = controleNota && ['nao_enviadas', 'enviadas'].includes(String(req.query.notas || '')) ? String(req.query.notas) : '';
+  const contagensNotas = controleNota ? await get(`SELECT
+    SUM(CASE WHEN COALESCE(nota_enviada,0)=0 AND status IN ('PENDENTE','EM PROCESSO') THEN 1 ELSE 0 END) nao_enviadas,
+    SUM(CASE WHEN COALESCE(nota_enviada,0)=1 THEN 1 ELSE 0 END) enviadas
+    FROM pedidos WHERE servico_id=?`, [servicoId]) : null;
+
   const params = [servicoId];
   let sql = 'SELECT * FROM pedidos WHERE servico_id=?';
   if (status) { sql += ' AND status=?'; params.push(status); }
-  sql += ' ORDER BY id DESC LIMIT 1000';
+  if (notaFiltro === 'nao_enviadas') sql += " AND COALESCE(nota_enviada,0)=0 AND status IN ('PENDENTE','EM PROCESSO')";
+  if (notaFiltro === 'enviadas') sql += ' AND COALESCE(nota_enviada,0)=1';
+  sql += controleNota ? ' ORDER BY id ASC LIMIT 1000' : ' ORDER BY id DESC LIMIT 1000';
   const rows = await all(sql, params);
 
   const base = `/admin/servico/${servicoId}/imeis`;
-  const tabs = `<div class="topbar"><div><a class="btn gray" href="${base}">Todos</a><a class="btn" href="${base}?status=PENDENTE">🟡 Pendente (${Number(contagens?.pendentes||0)})</a><a class="btn orange" href="${base}?status=${encodeURIComponent('EM PROCESSO')}">🔄 Em processo (${Number(contagens?.processo||0)})</a><a class="btn green" href="${base}?status=FINALIZADO">✅ Finalizado (${Number(contagens?.finalizados||0)})</a></div></div>`;
+  const notaQS = notaFiltro ? `&notas=${encodeURIComponent(notaFiltro)}` : '';
+  const tabs = `<div class="topbar"><div><a class="btn gray" href="${base}${notaFiltro ? `?notas=${encodeURIComponent(notaFiltro)}` : ''}">Todos</a><a class="btn" href="${base}?status=PENDENTE${notaQS}">🟡 Pendente (${Number(contagens?.pendentes||0)})</a><a class="btn orange" href="${base}?status=${encodeURIComponent('EM PROCESSO')}${notaQS}">🔄 Em processo (${Number(contagens?.processo||0)})</a><a class="btn green" href="${base}?status=FINALIZADO${notaQS}">✅ Finalizado (${Number(contagens?.finalizados||0)})</a></div></div>`;
+  const notaTabs = controleNota ? `<div class="nota-tabs"><a class="nota-tab ${notaFiltro==='nao_enviadas'?'active-pending':''}" href="${base}?notas=nao_enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">📋</span><span>NOTAS NÃO ENVIADAS</span><b>${Number(contagensNotas?.nao_enviadas||0)}</b></a><a class="nota-tab ${notaFiltro==='enviadas'?'active-sent':''}" href="${base}?notas=enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">✅</span><span>NOTAS ENVIADAS</span><b>${Number(contagensNotas?.enviadas||0)}</b></a></div>` : '';
 
   const download = `<form id="downloadSelecionadosForm" method="post" action="/admin/servico/${servicoId}/baixar-imeis" class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <input type="hidden" name="status" value="${safeHtml(status)}">
@@ -7901,7 +8559,15 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     update();
   })();</script>`;
 
-  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${tabs}${download}${rows.length ? pedidoTable(rows, false, true) : '<div class="card empty">Nenhum pedido neste status.</div>'}${js}`));
+  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${controleNota ? notaTabs : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste filtro.</div>'}${js}`));
+});
+
+app.post('/admin/pedido/:id/nota-toggle', async (req, res) => {
+  const p = await get(`SELECT p.id,p.nota_enviada,s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [req.params.id]);
+  if (!p || normalizarNomeServico(p.servico_nome) !== 'desbloqueio tim') return res.redirect(req.get('referer') || '/admin/servicos');
+  const novo = Number(p.nota_enviada || 0) ? 0 : 1;
+  await run(`UPDATE pedidos SET nota_enviada=?, nota_enviada_em=${novo ? 'CURRENT_TIMESTAMP' : 'NULL'}, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [novo, p.id]);
+  res.redirect(req.get('referer') || '/admin/servicos');
 });
 
 app.post('/admin/servico/:id/baixar-imeis', async (req, res) => {
@@ -8095,22 +8761,22 @@ app.get('/admin/whatsapp', async (req, res) => {
   const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
   const cards = rows.map(row => {
     const sessao = criarRuntimeSessaoWhatsApp(row);
-    const status = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : sessao.status === 'REGERANDO_QR' ? '🟠 GERANDO NOVO QR CODE' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
+    const status = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_CODIGO' ? '🟡 AGUARDANDO CÓDIGO' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
     const funcoes = [
       sessao.funcaoBot ? '<span class="pill">🤖 Bot de Serviços</span>' : '',
       sessao.funcaoGrupos ? '<span class="pill">📢 Anúncios em Grupos</span>' : '',
       sessao.funcaoStatus ? '<span class="pill">🟢 Anúncios no Status</span>' : ''
     ].filter(Boolean).join(' ');
-    return `<div class="card"><h2>📱 ${safeHtml(row.nome)}</h2><h3>${status}</h3><p><b>Número:</b> ${sessao.numero ? '+' + safeHtml(sessao.numero) : 'Ainda não conectado'}</p><p>${funcoes || '<span class="muted">Nenhuma função marcada</span>'}</p>${sessao.erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>` : ''}<div class="actions"><a class="btn green" href="/admin/whatsapp/${row.id}/editar">⚙️ Editar / Conectar</a><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar o QR desta sessão?')">🔌 Desconectar</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/excluir"><button class="btn red" onclick="return confirm('Excluir esta sessão definitivamente?')">🗑️ Excluir</button></form></div></div>`;
+    return `<div class="card"><h2>📱 ${safeHtml(row.nome)}</h2><h3>${status}</h3><p><b>Número:</b> ${sessao.numero ? '+' + safeHtml(sessao.numero) : 'Ainda não conectado'}</p><p>${funcoes || '<span class="muted">Nenhuma função marcada</span>'}</p>${sessao.erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>` : ''}<div class="actions"><a class="btn green" href="/admin/whatsapp/${row.id}/editar">⚙️ Editar / Conectar</a><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar as credenciais desta sessão?')">🔌 Desconectar</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/excluir"><button class="btn red" onclick="return confirm('Excluir esta sessão definitivamente?')">🗑️ Excluir</button></form></div></div>`;
   }).join('') || '<div class="card"><p class="muted">Nenhum WhatsApp cadastrado. Clique em Adicionar WhatsApp.</p></div>';
 
-  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(x.status || '')));
+  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO','TESTE_MINIMO_INICIANDO','TESTE_MINIMO_CONECTANDO','TESTE_MINIMO_GERANDO_CODIGO'].includes(String(x.status || '')));
   const autoRefresh = emConexao ? `<script>setTimeout(()=>{if(!document.hidden)location.reload()},8000)</script>` : '';
   res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Um mesmo número pode ter uma, duas ou as três funções. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
 });
 
 app.get('/admin/whatsapp/adicionar', async (req, res) => {
-  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Você pode marcar uma, duas ou as três opções. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
+  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Você pode marcar uma, duas ou as três opções. Depois de criar, informe o número e gere o código de conexão.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
 });
 
 app.post('/admin/whatsapp/adicionar', async (req, res) => {
@@ -8152,9 +8818,11 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
   const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
   if (!row) return res.status(404).send(page('Não encontrado', '<h1>❌ Sessão não encontrada</h1><a class="btn" href="/admin/whatsapp">Voltar</a>'));
   const sessao = criarRuntimeSessaoWhatsApp(row);
-  const label = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
-  const qrHtml = sessao.qr ? `<div style="text-align:center"><img src="${sessao.qr}" style="width:min(330px,100%);background:#fff;padding:10px;border-radius:16px"><p>WhatsApp → Aparelhos conectados → Conectar aparelho.</p></div>` : '';
-  const refresh = ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(sessao.status || '')) ? `<script>setTimeout(()=>{if(!document.hidden&&!document.querySelector('input:focus,textarea:focus'))location.reload()},7000)</script>` : '';
+  const label = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_CODIGO' ? '🟡 AGUARDANDO CÓDIGO' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
+  const qrHtml = ''; // V146: QR removido do painel
+  const codigoHtml = sessao.pairingCode ? `<div style="text-align:center;margin:14px 0;padding:18px;border:1px solid rgba(34,197,94,.35);border-radius:16px"><div class="muted">Código para +${safeHtml(sessao.pairingNumero || '')}</div><div style="font-size:34px;font-weight:900;letter-spacing:6px;margin:10px 0;color:#22c55e">${safeHtml(String(sessao.pairingCode).replace(/(.{4})/g,'$1 ').trim())}</div><p class="mini-help">No celular: WhatsApp → Aparelhos conectados → Conectar um aparelho → Conectar com número de telefone.</p></div>` : '';
+  const qrMinimoHtml = sessao.qr ? `<div style="text-align:center;margin:14px 0;padding:18px;border:1px solid rgba(34,197,94,.35);border-radius:16px"><div class="muted">Teste mínimo por QR Code</div><img src="${safeHtml(sessao.qr)}" alt="QR Code WhatsApp" style="max-width:360px;width:100%;background:#fff;padding:10px;border-radius:12px;margin-top:10px"><p class="mini-help">Leia este QR uma única vez no WhatsApp. O teste não usa watchdog nem reconexão automática.</p></div>` : '';
+  const refresh = ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO'].includes(String(sessao.status || '')) ? `<script>setTimeout(()=>{if(!document.hidden&&!document.querySelector('input:focus,textarea:focus'))location.reload()},7000)</script>` : '';
 
   let gruposHtml = '';
   if (sessao.funcaoBot) {
@@ -8164,7 +8832,7 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppRegistrada(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${codigoHtml}${qrMinimoHtml}${sessaoWhatsAppRegistrada(sessao.sessionDir)?`<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">🔄 Reconectar sessão</button></form>`:`<form method="post" action="/admin/whatsapp/${id}/conectar-codigo" style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.15)"><label>Conectar por número</label><input name="numero" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="5575981635708" value="${safeHtml(sessao.pairingNumero || '')}" required><p class="mini-help">Informe DDI + DDD + número, somente números. O QR Code está desativado.</p><button class="btn green">🔢 Gerar código de conexão</button></form><form method="post" action="/admin/whatsapp/${id}/teste-codigo-minimo" style="margin-top:10px"><input type="hidden" name="numero" value="${safeHtml(sessao.pairingNumero || '')}"><button class="btn" style="border:1px solid #f59e0b;color:#fbbf24" onclick="const n=prompt('Número com DDI + DDD + número (somente números):', '${safeHtml(sessao.pairingNumero || '')}'); if(!n) return false; this.form.numero.value=n.replace(/\D/g,'');">🧪 TESTE MÍNIMO POR CÓDIGO</button><p class="mini-help">Teste isolado por código: um único socket, sem QR, sem watchdog e sem tentativa automática.</p></form><form method="post" action="/admin/whatsapp/${id}/teste-qr-minimo" style="margin-top:10px"><button class="btn" style="border:1px solid #38bdf8;color:#7dd3fc">📷 TESTE MÍNIMO POR QR CODE</button><p class="mini-help">V148: um único socket, sem watchdog e sem reconexão automática.</p></form>`}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar gerar outro código.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
@@ -8190,8 +8858,75 @@ app.post('/admin/whatsapp/:id/conectar', async (req, res) => {
   if (sessao.socket?.end) { try { sessao.socket.end(new Error('reinício manual')); } catch (_) {} }
   sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.erro = ''; sessao.status = 'INICIANDO';
   const possui = sessaoWhatsAppRegistrada(sessao.sessionDir);
+  if (!possui) {
+    sessao.status = 'AGUARDANDO_CODIGO';
+    sessao.erro = 'QR Code desativado. Informe o número e gere o código de conexão.';
+    emitirStatusSessaoMulti(sessao);
+    return res.redirect(`/admin/whatsapp/${id}/editar`);
+  }
   await dormir(400);
-  await iniciarSessaoWhatsAppMulti(id, { modo: possui ? 'restaurar' : 'qr' });
+  await iniciarSessaoWhatsAppMulti(id, { modo: 'restaurar' });
+  res.redirect(`/admin/whatsapp/${id}/editar`);
+});
+
+app.post('/admin/whatsapp/:id/conectar-codigo', async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
+  if (!row) return res.redirect('/admin/whatsapp');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  const numero = normalizarNumeroWhatsApp(req.body.numero || '');
+  if (!/^\d{10,15}$/.test(numero)) {
+    sessao.erro = 'Número inválido. Digite DDI + DDD + número, somente números.';
+    sessao.status = 'ERRO_NUMERO';
+    return res.redirect(`/admin/whatsapp/${id}/editar`);
+  }
+  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+    sessao.erro = 'Esta sessão já possui credenciais. Desconecte/apague a sessão antes de gerar um novo código.';
+    return res.redirect(`/admin/whatsapp/${id}/editar`);
+  }
+  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+  if (sessao.socket?.end) { try { sessao.socket.end(new Error('novo pareamento por código')); } catch (_) {} }
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = numero; sessao.erro = ''; sessao.status = 'INICIANDO';
+  await dormir(400);
+  iniciarSessaoWhatsAppMulti(id, { modo: 'codigo', numero }).catch(e => {
+    sessao.status = 'ERRO'; sessao.erro = e.message || String(e); emitirStatusSessaoMulti(sessao);
+    console.log(`❌ V145 CÓDIGO #${id}:`, e.stack || e.message);
+  });
+  res.redirect(`/admin/whatsapp/${id}/editar`);
+});
+
+
+app.post('/admin/whatsapp/:id/teste-codigo-minimo', async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
+  if (!row) return res.redirect('/admin/whatsapp');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  const numero = normalizarNumeroWhatsApp(req.body.numero || '');
+  if (!/^\d{10,15}$/.test(numero)) {
+    sessao.erro = 'Número inválido. Digite DDI + DDD + número, somente números.';
+    sessao.status = 'ERRO_NUMERO';
+    return res.redirect(`/admin/whatsapp/${id}/editar`);
+  }
+  iniciarPareamentoCodigoMinimoV147(id, numero).catch(e => {
+    sessao.status = 'FALHA_TESTE_MINIMO';
+    sessao.erro = `Teste mínimo: ${e.message || e}`;
+    sessao.pairingCode = '';
+    sessao.testeMinimoAtivo = false;
+    emitirStatusSessaoMulti(sessao);
+    console.log(`❌ V147 MINIMO ROUTE #${id}:`, e.stack || e.message);
+  });
+  res.redirect(`/admin/whatsapp/${id}/editar`);
+});
+
+app.post('/admin/whatsapp/:id/teste-qr-minimo', async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
+  if (!row) return res.redirect('/admin/whatsapp');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  iniciarPareamentoQrMinimoV148(id).catch(e => {
+    sessao.status='FALHA_TESTE_QR_MINIMO'; sessao.erro=`Teste QR mínimo: ${e.message || e}`; sessao.qr=null; sessao.testeMinimoAtivo=false;
+    emitirStatusSessaoMulti(sessao); console.log(`❌ V148 QR MINIMO ROUTE #${id}:`, e.stack || e.message);
+  });
   res.redirect(`/admin/whatsapp/${id}/editar`);
 });
 
@@ -8374,12 +9109,15 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
   .then(async () => {
-    // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
+    // Aguarda o servidor/banco estabilizarem. Na V142, o primeiro boot faz uma
+    // limpeza única de TODAS as credenciais antigas e pede um QR realmente novo.
     await new Promise(r => setTimeout(r, 2500));
-    await iniciarTodasSessoesWhatsAppSalvas();
+    const resetExecutado = await limparTodasConexoesWhatsAppV142();
+    if (resetExecutado) await gerarQrNovoAposResetV142();
+    else await iniciarTodasSessoesWhatsAppSalvas();
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
-  .catch(e => console.log('❌ V93 START:', e.message));
+  .catch(e => console.log('❌ V142 START:', e.message));
 
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
