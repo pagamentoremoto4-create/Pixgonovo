@@ -6273,15 +6273,22 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           console.log(`🔎 V151 CLOSE ${sessao.nome}: socket=#${socketGeneration} code=${code ?? 'sem-codigo'} registered=${registradaAgora} mode=${sessao.connectionMode} msg=${motivo}`);
 
           if (restartRequired) {
-            registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V151 ${sessao.nome}`);
-            console.log(`🔄 V151 515 ${sessao.nome}: registered=${registradaAgora}; finalização controlada.`);
-            if (registradaAgora) {
+            // V154: o 515 imediatamente após o pareamento é o sinal do WhatsApp
+            // para reiniciar o socket. Nesse instante state.creds.registered pode
+            // ainda estar false, mesmo após "pairing configured successfully".
+            // Salva tudo o que o Baileys entregou e faz UMA única restauração
+            // controlada com a mesma pasta de autenticação.
+            try { await saveCreds(); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.nome}:`, e.message); }
+            registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V154 ${sessao.nome}`);
+            const podeFinalizar515 = sessao.connectionMode === 'qr' && !opcoes.apos515;
+            console.log(`🔄 V154 515 ${sessao.nome}: registered=${registradaAgora} podeFinalizar=${podeFinalizar515}; reinício controlado.`);
+            if (registradaAgora || podeFinalizar515) {
               sessao.qrReinicios = 0; sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = '';
               emitirStatusSessaoMulti(sessao);
               setTimeout(() => {
                 if (sessao.socket || sessao.iniciando || sessao.conectado) return;
-                iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar', apos515: true }).catch(e => console.log('❌ V151 RESTAURAR APÓS 515:', e.message));
-              }, 1800);
+                iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar', apos515: true }).catch(e => console.log('❌ V154 RESTAURAR APÓS 515:', e.message));
+              }, 2200);
               return;
             }
           }
@@ -6521,10 +6528,13 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
         sessao.qr = null;
         if (restartRequired) {
-          const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V150 ${sessao.label}`);
-          if (registradaAgora) {
+          try { await saveCreds(); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.label}:`, e.message); }
+          const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V154 ${sessao.label}`);
+          const podeFinalizar515 = sessao.connectionMode === 'qr' && !opcoes.apos515;
+          console.log(`🔄 V154 515 ${sessao.label}: registered=${registradaAgora} podeFinalizar=${podeFinalizar515}`);
+          if (registradaAgora || podeFinalizar515) {
             sessao.qrReinicios = 0; sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = ''; emitirStatusExtra(sessao);
-            setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ V150 RESTAURAR ${key}:`, e.message)), 1800);
+            setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'restaurar', apos515: true }).catch(e => console.log(`❌ V154 RESTAURAR ${key}:`, e.message)), 2200);
             return;
           }
         }
@@ -6814,12 +6824,14 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           qrCodeBase64 = null;
           console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
           if (restartRequired) {
-            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, WHATSAPP_SESSION_DIR, 'V150 Bot de Serviços');
-            console.log(`🔄 V150 515 Bot de Serviços: registered=${registradaAgora} mode=${whatsappConnectionMode}`);
-            if (registradaAgora) {
+            try { await saveCreds(); } catch (e) { console.log('⚠️ V154 SAVE 515 Bot de Serviços:', e.message); }
+            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, WHATSAPP_SESSION_DIR, 'V154 Bot de Serviços');
+            const podeFinalizar515 = whatsappConnectionMode === 'qr' && !opcoes.apos515;
+            console.log(`🔄 V154 515 Bot de Serviços: registered=${registradaAgora} podeFinalizar=${podeFinalizar515} mode=${whatsappConnectionMode}`);
+            if (registradaAgora || podeFinalizar515) {
               whatsappQrReinicios = 0; whatsappStatus = 'FINALIZANDO_PAREAMENTO'; whatsappUltimoErro = '';
               io.emit('whatsapp-status', { status: whatsappStatus });
-              setTimeout(() => iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ V150 RESTAURAR APÓS 515:', e.message)), 1800);
+              setTimeout(() => iniciarWhatsAppQrCode({ modo: 'restaurar', apos515: true }).catch(e => console.log('❌ V154 RESTAURAR APÓS 515:', e.message)), 2200);
               return;
             }
           }
