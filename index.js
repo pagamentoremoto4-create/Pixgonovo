@@ -5872,23 +5872,52 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
+  // V143: para novas vinculações NÃO usa fetchLatestBaileysVersion().
+  // Em 2026 essa função chegou a retornar uma versão Web obsoleta, causando
+  // "not logged in, attempting registration" seguido de Connection Failure
+  // antes do evento de QR Code. Prioriza exclusivamente fetchLatestWaWebVersion.
   try {
-    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
+    const override = String(process.env.WHATSAPP_WEB_VERSION || '').trim();
+    if (override) {
+      const partes = override.split('.').map(Number);
+      if (partes.length === 3 && partes.every(Number.isFinite)) {
+        console.log(`✅ ${descricao}: versão Web definida por WHATSAPP_WEB_VERSION ${partes.join('.')}`);
+        return partes;
+      }
+      console.log(`⚠️ ${descricao}: WHATSAPP_WEB_VERSION inválida; ignorando override.`);
+    }
+    const buscar = baileys.fetchLatestWaWebVersion;
     if (typeof buscar !== 'function') {
-      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
+      console.log(`ℹ️ ${descricao}: fetchLatestWaWebVersion indisponível; usando versão interna do Baileys.`);
       return null;
     }
-    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
+    const resultado = await comTimeoutWhatsApp(buscar(), 12000, `consultar versão WA Web ${descricao}`);
     const versao = resultado?.version;
     if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
-      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
+      console.log(`✅ ${descricao}: versão WA Web ${versao.join('.')} (fetchLatestWaWebVersion)`);
       return versao;
     }
-    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
+    console.log(`⚠️ ${descricao}: fetchLatestWaWebVersion retornou versão inválida; usando padrão interno do Baileys.`);
   } catch (e) {
-    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
+    console.log(`⚠️ ${descricao}: não foi possível consultar fetchLatestWaWebVersion:`, e.message);
   }
   return null;
+}
+
+function prepararPastaParaNovoQrV143(sessionDir, descricao = 'WhatsApp') {
+  try {
+    if (!sessionDir) return;
+    const registrada = sessaoWhatsAppRegistrada(sessionDir);
+    if (registrada) return;
+    // Sessões que falharam antes do QR podem deixar creds.json/keys parciais.
+    // Ao pedir um QR novo, remove somente estado NÃO registrado para garantir
+    // um handshake de pareamento realmente limpo, preservando sessões válidas.
+    if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.mkdirSync(sessionDir, { recursive: true });
+    console.log(`🧹 V143: estado não registrado limpo para novo QR (${descricao}).`);
+  } catch (e) {
+    console.log(`⚠️ V143: falha ao preparar novo QR (${descricao}):`, e.message);
+  }
 }
 
 function sessaoWhatsAppRegistrada(sessionDir) {
@@ -6120,6 +6149,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   emitirStatusSessaoMulti(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    if (sessao.connectionMode === 'qr') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.nome);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys sessão #${sessao.id}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger sessão #${sessao.id}`);
     const pino = pinoModule.default || pinoModule;
@@ -6142,6 +6172,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
           sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = '';
           emitirStatusSessaoMulti(sessao);
+          console.log(`📷 V143: QR Code gerado para ${sessao.nome}`);
         }
         if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
         if (connection === 'open') {
@@ -6484,6 +6515,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   emitirStatusExtra(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    if (sessao.connectionMode === 'qr') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.label);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
     const pino = pinoModule.default || pinoModule;
@@ -6723,6 +6755,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
     fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
     console.log('✅ Pasta da sessão acessível para leitura e gravação');
+    if (whatsappConnectionMode === 'qr') prepararPastaParaNovoQrV143(WHATSAPP_SESSION_DIR, 'Bot de Serviços');
 
     console.log('📦 Carregando Baileys...');
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
