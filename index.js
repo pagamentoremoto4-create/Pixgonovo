@@ -6001,7 +6001,7 @@ function criarRuntimeSessaoWhatsApp(row) {
   const base = existente || {
     id: Number(row.id), socket: null, qr: null, status: 'DESCONECTADO', conectado: false,
     numero: row.numero || '', erro: '', iniciando: false, timer: null, qrReinicios: 0,
-    connectionMode: 'restaurar'
+    falhasReconexao: 0, proximaTentativaEm: 0, connectionMode: 'restaurar'
   };
   base.nome = row.nome || `WhatsApp ${row.id}`;
   base.sessionKey = row.session_key;
@@ -6075,10 +6075,22 @@ function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   } catch (_) { return !!normalizarNumeroWhatsApp(sessao?.numero || ''); }
 }
 
-function agendarReconexaoSessaoMulti(sessao) {
-  if (!sessao || sessao.timer || !sessao.ativo) return;
+// V141: uma única fila de reconexão por sessão, com backoff progressivo.
+// Evita o loop agressivo em que connection.update e watchdog tentavam iniciar
+// a mesma sessão repetidamente a cada poucos segundos.
+const WHATSAPP_RECONNECT_BACKOFF_MS = [5000, 15000, 30000, 60000, 120000, 300000];
+function agendarReconexaoSessaoMulti(sessao, motivo = '') {
+  if (!sessao || sessao.timer || !sessao.ativo || sessao.conectado || sessao.iniciando) return;
+  const falhas = Math.max(0, Number(sessao.falhasReconexao || 0));
+  const indice = Math.min(falhas, WHATSAPP_RECONNECT_BACKOFF_MS.length - 1);
+  const atraso = WHATSAPP_RECONNECT_BACKOFF_MS[indice];
+  sessao.falhasReconexao = falhas + 1;
+  sessao.proximaTentativaEm = Date.now() + atraso;
+  console.log(`⏳ V141: ${sessao.nome} nova tentativa em ${Math.round(atraso/1000)}s${motivo ? ` — ${motivo}` : ''}.`);
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
+    sessao.proximaTentativaEm = 0;
+    if (sessao.conectado || sessao.iniciando || !sessao.ativo) return;
     if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
       sessao.status = 'SESSAO_EXPIRADA';
       sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere um novo QR Code.';
@@ -6086,9 +6098,12 @@ function agendarReconexaoSessaoMulti(sessao) {
       return;
     }
     const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    console.log(`🔄 V95: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
-    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ V95 RECONEXÃO #${sessao.id}:`, e.message));
-  }, 5000);
+    console.log(`🔄 V141: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
+    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => {
+      console.log(`❌ V141 RECONEXÃO #${sessao.id}:`, e.message);
+      agendarReconexaoSessaoMulti(sessao, e.message);
+    });
+  }, atraso);
 }
 
 async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
@@ -6135,6 +6150,8 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
           try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
+          if (sessao.timer) clearTimeout(sessao.timer);
+          sessao.timer = null; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
           sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
@@ -6161,7 +6178,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           }
           sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
           sessao.erro = motivo; emitirStatusSessaoMulti(sessao);
-          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao);
+          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao, motivo);
         }
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
@@ -6202,7 +6219,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   } catch (e) {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V87 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao);
+    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao, e.message || 'falha ao iniciar');
   } finally { sessao.iniciando = false; }
 }
 
@@ -6235,7 +6252,7 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   const socketAtual = sessao.socket;
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
   if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); }
   emitirStatusSessaoMulti(sessao);
 }
@@ -6281,11 +6298,10 @@ async function watchdogSessoesWhatsApp() {
     for (const sessao of whatsappSessoes.values()) {
       if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
       if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) continue;
-      const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-      console.log(`🩺 V95 WATCHDOG: ${sessao.nome} está offline; tentando ${registrada ? 'restaurar' : 'recuperar'} automaticamente.`);
-      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }); }
-      catch (e) { console.log(`❌ V95 WATCHDOG #${sessao.id}:`, e.message); }
-      await new Promise(r => setTimeout(r, 1000));
+      // V141: o watchdog não abre mais a conexão diretamente. Ele apenas
+      // garante que exista uma tentativa agendada, respeitando o backoff.
+      console.log(`🩺 V141 WATCHDOG: ${sessao.nome} está offline; garantindo reconexão agendada.`);
+      agendarReconexaoSessaoMulti(sessao, 'watchdog');
     }
   } catch (e) {
     console.log('❌ V93 WATCHDOG:', e.message);
