@@ -5872,52 +5872,23 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
-  // V143: para novas vinculações NÃO usa fetchLatestBaileysVersion().
-  // Em 2026 essa função chegou a retornar uma versão Web obsoleta, causando
-  // "not logged in, attempting registration" seguido de Connection Failure
-  // antes do evento de QR Code. Prioriza exclusivamente fetchLatestWaWebVersion.
   try {
-    const override = String(process.env.WHATSAPP_WEB_VERSION || '').trim();
-    if (override) {
-      const partes = override.split('.').map(Number);
-      if (partes.length === 3 && partes.every(Number.isFinite)) {
-        console.log(`✅ ${descricao}: versão Web definida por WHATSAPP_WEB_VERSION ${partes.join('.')}`);
-        return partes;
-      }
-      console.log(`⚠️ ${descricao}: WHATSAPP_WEB_VERSION inválida; ignorando override.`);
-    }
-    const buscar = baileys.fetchLatestWaWebVersion;
+    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
     if (typeof buscar !== 'function') {
-      console.log(`ℹ️ ${descricao}: fetchLatestWaWebVersion indisponível; usando versão interna do Baileys.`);
+      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
       return null;
     }
-    const resultado = await comTimeoutWhatsApp(buscar(), 12000, `consultar versão WA Web ${descricao}`);
+    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
     const versao = resultado?.version;
     if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
-      console.log(`✅ ${descricao}: versão WA Web ${versao.join('.')} (fetchLatestWaWebVersion)`);
+      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
       return versao;
     }
-    console.log(`⚠️ ${descricao}: fetchLatestWaWebVersion retornou versão inválida; usando padrão interno do Baileys.`);
+    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
   } catch (e) {
-    console.log(`⚠️ ${descricao}: não foi possível consultar fetchLatestWaWebVersion:`, e.message);
+    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
   }
   return null;
-}
-
-function prepararPastaParaNovoQrV143(sessionDir, descricao = 'WhatsApp') {
-  try {
-    if (!sessionDir) return;
-    const registrada = sessaoWhatsAppRegistrada(sessionDir);
-    if (registrada) return;
-    // Sessões que falharam antes do QR podem deixar creds.json/keys parciais.
-    // Ao pedir um QR novo, remove somente estado NÃO registrado para garantir
-    // um handshake de pareamento realmente limpo, preservando sessões válidas.
-    if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.mkdirSync(sessionDir, { recursive: true });
-    console.log(`🧹 V143: estado não registrado limpo para novo QR (${descricao}).`);
-  } catch (e) {
-    console.log(`⚠️ V143: falha ao preparar novo QR (${descricao}):`, e.message);
-  }
 }
 
 function sessaoWhatsAppRegistrada(sessionDir) {
@@ -6030,7 +6001,7 @@ function criarRuntimeSessaoWhatsApp(row) {
   const base = existente || {
     id: Number(row.id), socket: null, qr: null, status: 'DESCONECTADO', conectado: false,
     numero: row.numero || '', erro: '', iniciando: false, timer: null, qrReinicios: 0,
-    falhasReconexao: 0, proximaTentativaEm: 0, connectionMode: 'restaurar'
+    connectionMode: 'restaurar'
   };
   base.nome = row.nome || `WhatsApp ${row.id}`;
   base.sessionKey = row.session_key;
@@ -6104,22 +6075,10 @@ function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   } catch (_) { return !!normalizarNumeroWhatsApp(sessao?.numero || ''); }
 }
 
-// V141: uma única fila de reconexão por sessão, com backoff progressivo.
-// Evita o loop agressivo em que connection.update e watchdog tentavam iniciar
-// a mesma sessão repetidamente a cada poucos segundos.
-const WHATSAPP_RECONNECT_BACKOFF_MS = [5000, 15000, 30000, 60000, 120000, 300000];
-function agendarReconexaoSessaoMulti(sessao, motivo = '') {
-  if (!sessao || sessao.timer || !sessao.ativo || sessao.conectado || sessao.iniciando) return;
-  const falhas = Math.max(0, Number(sessao.falhasReconexao || 0));
-  const indice = Math.min(falhas, WHATSAPP_RECONNECT_BACKOFF_MS.length - 1);
-  const atraso = WHATSAPP_RECONNECT_BACKOFF_MS[indice];
-  sessao.falhasReconexao = falhas + 1;
-  sessao.proximaTentativaEm = Date.now() + atraso;
-  console.log(`⏳ V141: ${sessao.nome} nova tentativa em ${Math.round(atraso/1000)}s${motivo ? ` — ${motivo}` : ''}.`);
+function agendarReconexaoSessaoMulti(sessao) {
+  if (!sessao || sessao.timer || !sessao.ativo) return;
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
-    sessao.proximaTentativaEm = 0;
-    if (sessao.conectado || sessao.iniciando || !sessao.ativo) return;
     if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
       sessao.status = 'SESSAO_EXPIRADA';
       sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere um novo QR Code.';
@@ -6127,12 +6086,9 @@ function agendarReconexaoSessaoMulti(sessao, motivo = '') {
       return;
     }
     const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    console.log(`🔄 V141: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
-    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => {
-      console.log(`❌ V141 RECONEXÃO #${sessao.id}:`, e.message);
-      agendarReconexaoSessaoMulti(sessao, e.message);
-    });
-  }, atraso);
+    console.log(`🔄 V95: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
+    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ V95 RECONEXÃO #${sessao.id}:`, e.message));
+  }, 5000);
 }
 
 async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
@@ -6149,7 +6105,6 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   emitirStatusSessaoMulti(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
-    if (sessao.connectionMode === 'qr') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.nome);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys sessão #${sessao.id}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger sessão #${sessao.id}`);
     const pino = pinoModule.default || pinoModule;
@@ -6172,7 +6127,6 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
           sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = '';
           emitirStatusSessaoMulti(sessao);
-          console.log(`📷 V143: QR Code gerado para ${sessao.nome}`);
         }
         if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
         if (connection === 'open') {
@@ -6181,8 +6135,6 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
           try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
-          if (sessao.timer) clearTimeout(sessao.timer);
-          sessao.timer = null; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
           sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
@@ -6209,7 +6161,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           }
           sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
           sessao.erro = motivo; emitirStatusSessaoMulti(sessao);
-          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao, motivo);
+          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao);
         }
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
@@ -6250,7 +6202,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   } catch (e) {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V87 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao, e.message || 'falha ao iniciar');
+    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao);
   } finally { sessao.iniciando = false; }
 }
 
@@ -6283,121 +6235,9 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   const socketAtual = sessao.socket;
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
   if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); }
   emitirStatusSessaoMulti(sessao);
-}
-
-// V142: limpeza ÚNICA das credenciais/conexões antigas do WhatsApp.
-// O marcador fica em /data para que o reset aconteça somente no primeiro boot
-// desta versão. As configurações das sessões (nome e funções) são preservadas;
-// apenas autenticação, número e arquivos de sessão são zerados para gerar QR novo.
-const WHATSAPP_RESET_V142_MARKER = path.join(DATA_DIR, '.whatsapp-reset-v142-concluido');
-
-async function limparTodasConexoesWhatsAppV142() {
-  if (fs.existsSync(WHATSAPP_RESET_V142_MARKER)) return false;
-
-  console.log('🧹 V142: iniciando limpeza total das conexões antigas do WhatsApp...');
-
-  // Fecha qualquer runtime eventualmente criado antes da limpeza.
-  for (const sessao of whatsappSessoes.values()) {
-    try { if (sessao.timer) clearTimeout(sessao.timer); } catch (_) {}
-    sessao.timer = null;
-    try { if (sessao.socket?.end) sessao.socket.end(new Error('reset V142')); } catch (_) {}
-    sessao.socket = null;
-    sessao.conectado = false;
-    sessao.qr = null;
-    sessao.status = 'DESCONECTADO';
-    sessao.erro = '';
-    sessao.qrReinicios = 0;
-    sessao.falhasReconexao = 0;
-    sessao.proximaTentativaEm = 0;
-  }
-  whatsappSocket = null;
-  conectado = false;
-  whatsappNumeroConectado = '';
-  whatsappStatus = 'DESCONECTADO';
-  qrCodeBase64 = null;
-
-  const pastas = new Set([
-    WHATSAPP_SESSION_DIR,
-    path.join(DATA_DIR, 'whatsapp-session'),
-    path.join(DATA_DIR, 'whatsapp-services-session'),
-    WHATSAPP_SUPPORT_SESSION_DIR,
-    WHATSAPP_ADS_SESSION_DIR,
-    WHATSAPP_MULTI_DIR
-  ].filter(Boolean).map(x => path.resolve(x)));
-
-  // Também remove diretórios legados de WhatsApp que possam ter sobrado em /data.
-  try {
-    for (const nome of fs.readdirSync(DATA_DIR)) {
-      if (/^whatsapp-(?:session|sessions|services-session|support-session|ads-session)(?:$|-)/i.test(nome)) {
-        pastas.add(path.resolve(path.join(DATA_DIR, nome)));
-      }
-    }
-  } catch (_) {}
-
-  for (const dir of pastas) {
-    try {
-      if (dir === path.resolve(DATA_DIR)) continue;
-      fs.rmSync(dir, { recursive: true, force: true });
-      console.log('🗑️ V142: sessão removida:', dir);
-    } catch (e) {
-      console.log('⚠️ V142: não foi possível remover', dir, e.message);
-    }
-  }
-
-  fs.mkdirSync(WHATSAPP_MULTI_DIR, { recursive: true });
-  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
-
-  // Preserva os cadastros/funções das sessões, mas remove vínculo com números antigos.
-  await run(`UPDATE whatsapp_sessoes SET numero=NULL, atualizado_em=CURRENT_TIMESTAMP`);
-
-  // Recria as pastas canônicas vazias para cada sessão cadastrada.
-  const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
-  for (const row of rows) {
-    const canonica = pastaCanonicaSessaoWhatsApp(row.session_key);
-    fs.mkdirSync(canonica, { recursive: true });
-    if (String(row.session_dir || '') !== canonica) {
-      await run('UPDATE whatsapp_sessoes SET session_dir=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [canonica, row.id]);
-    }
-    const runtime = criarRuntimeSessaoWhatsApp({ ...row, session_dir: canonica, numero: '' });
-    runtime.numero = '';
-    runtime.status = 'DESCONECTADO';
-    runtime.erro = '';
-    runtime.qr = null;
-    runtime.conectado = false;
-    runtime.qrReinicios = 0;
-    runtime.falhasReconexao = 0;
-    runtime.proximaTentativaEm = 0;
-  }
-
-  // Grava por último: se o processo cair no meio, o próximo boot tenta limpar de novo.
-  fs.writeFileSync(WHATSAPP_RESET_V142_MARKER, new Date().toISOString(), 'utf8');
-  console.log('✅ V142: limpeza total concluída. Configurações preservadas; credenciais antigas removidas.');
-  return true;
-}
-
-async function gerarQrNovoAposResetV142() {
-  await carregarSessoesWhatsApp();
-  const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
-  if (!sessoes.length) {
-    console.log('ℹ️ V142: nenhuma sessão cadastrada. Crie uma em Conectar WhatsApp para gerar o QR Code.');
-    return;
-  }
-  console.log(`📷 V142: iniciando QR novo para ${sessoes.length} sessão(ões) cadastrada(s).`);
-  for (const sessao of sessoes) {
-    try {
-      if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
-      sessao.qrReinicios = 0;
-      sessao.falhasReconexao = 0;
-      sessao.proximaTentativaEm = 0;
-      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'qr' });
-    } catch (e) {
-      console.log(`❌ V142 QR NOVO #${sessao.id}:`, e.message);
-    }
-    await new Promise(r => setTimeout(r, 1200));
-  }
 }
 
 async function iniciarTodasSessoesWhatsAppSalvas() {
@@ -6441,10 +6281,11 @@ async function watchdogSessoesWhatsApp() {
     for (const sessao of whatsappSessoes.values()) {
       if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
       if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) continue;
-      // V141: o watchdog não abre mais a conexão diretamente. Ele apenas
-      // garante que exista uma tentativa agendada, respeitando o backoff.
-      console.log(`🩺 V141 WATCHDOG: ${sessao.nome} está offline; garantindo reconexão agendada.`);
-      agendarReconexaoSessaoMulti(sessao, 'watchdog');
+      const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+      console.log(`🩺 V95 WATCHDOG: ${sessao.nome} está offline; tentando ${registrada ? 'restaurar' : 'recuperar'} automaticamente.`);
+      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }); }
+      catch (e) { console.log(`❌ V95 WATCHDOG #${sessao.id}:`, e.message); }
+      await new Promise(r => setTimeout(r, 1000));
     }
   } catch (e) {
     console.log('❌ V93 WATCHDOG:', e.message);
@@ -6515,7 +6356,6 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   emitirStatusExtra(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
-    if (sessao.connectionMode === 'qr') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.label);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
     const pino = pinoModule.default || pinoModule;
@@ -6755,7 +6595,6 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
     fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
     console.log('✅ Pasta da sessão acessível para leitura e gravação');
-    if (whatsappConnectionMode === 'qr') prepararPastaParaNovoQrV143(WHATSAPP_SESSION_DIR, 'Bot de Serviços');
 
     console.log('📦 Carregando Baileys...');
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
@@ -8792,15 +8631,12 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
   .then(async () => {
-    // Aguarda o servidor/banco estabilizarem. Na V142, o primeiro boot faz uma
-    // limpeza única de TODAS as credenciais antigas e pede um QR realmente novo.
+    // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
     await new Promise(r => setTimeout(r, 2500));
-    const resetExecutado = await limparTodasConexoesWhatsAppV142();
-    if (resetExecutado) await gerarQrNovoAposResetV142();
-    else await iniciarTodasSessoesWhatsAppSalvas();
+    await iniciarTodasSessoesWhatsAppSalvas();
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
-  .catch(e => console.log('❌ V142 START:', e.message));
+  .catch(e => console.log('❌ V93 START:', e.message));
 
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
