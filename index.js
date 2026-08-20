@@ -6257,6 +6257,118 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   emitirStatusSessaoMulti(sessao);
 }
 
+// V142: limpeza ÚNICA das credenciais/conexões antigas do WhatsApp.
+// O marcador fica em /data para que o reset aconteça somente no primeiro boot
+// desta versão. As configurações das sessões (nome e funções) são preservadas;
+// apenas autenticação, número e arquivos de sessão são zerados para gerar QR novo.
+const WHATSAPP_RESET_V142_MARKER = path.join(DATA_DIR, '.whatsapp-reset-v142-concluido');
+
+async function limparTodasConexoesWhatsAppV142() {
+  if (fs.existsSync(WHATSAPP_RESET_V142_MARKER)) return false;
+
+  console.log('🧹 V142: iniciando limpeza total das conexões antigas do WhatsApp...');
+
+  // Fecha qualquer runtime eventualmente criado antes da limpeza.
+  for (const sessao of whatsappSessoes.values()) {
+    try { if (sessao.timer) clearTimeout(sessao.timer); } catch (_) {}
+    sessao.timer = null;
+    try { if (sessao.socket?.end) sessao.socket.end(new Error('reset V142')); } catch (_) {}
+    sessao.socket = null;
+    sessao.conectado = false;
+    sessao.qr = null;
+    sessao.status = 'DESCONECTADO';
+    sessao.erro = '';
+    sessao.qrReinicios = 0;
+    sessao.falhasReconexao = 0;
+    sessao.proximaTentativaEm = 0;
+  }
+  whatsappSocket = null;
+  conectado = false;
+  whatsappNumeroConectado = '';
+  whatsappStatus = 'DESCONECTADO';
+  qrCodeBase64 = null;
+
+  const pastas = new Set([
+    WHATSAPP_SESSION_DIR,
+    path.join(DATA_DIR, 'whatsapp-session'),
+    path.join(DATA_DIR, 'whatsapp-services-session'),
+    WHATSAPP_SUPPORT_SESSION_DIR,
+    WHATSAPP_ADS_SESSION_DIR,
+    WHATSAPP_MULTI_DIR
+  ].filter(Boolean).map(x => path.resolve(x)));
+
+  // Também remove diretórios legados de WhatsApp que possam ter sobrado em /data.
+  try {
+    for (const nome of fs.readdirSync(DATA_DIR)) {
+      if (/^whatsapp-(?:session|sessions|services-session|support-session|ads-session)(?:$|-)/i.test(nome)) {
+        pastas.add(path.resolve(path.join(DATA_DIR, nome)));
+      }
+    }
+  } catch (_) {}
+
+  for (const dir of pastas) {
+    try {
+      if (dir === path.resolve(DATA_DIR)) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log('🗑️ V142: sessão removida:', dir);
+    } catch (e) {
+      console.log('⚠️ V142: não foi possível remover', dir, e.message);
+    }
+  }
+
+  fs.mkdirSync(WHATSAPP_MULTI_DIR, { recursive: true });
+  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
+
+  // Preserva os cadastros/funções das sessões, mas remove vínculo com números antigos.
+  await run(`UPDATE whatsapp_sessoes SET numero=NULL, atualizado_em=CURRENT_TIMESTAMP`);
+
+  // Recria as pastas canônicas vazias para cada sessão cadastrada.
+  const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
+  for (const row of rows) {
+    const canonica = pastaCanonicaSessaoWhatsApp(row.session_key);
+    fs.mkdirSync(canonica, { recursive: true });
+    if (String(row.session_dir || '') !== canonica) {
+      await run('UPDATE whatsapp_sessoes SET session_dir=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [canonica, row.id]);
+    }
+    const runtime = criarRuntimeSessaoWhatsApp({ ...row, session_dir: canonica, numero: '' });
+    runtime.numero = '';
+    runtime.status = 'DESCONECTADO';
+    runtime.erro = '';
+    runtime.qr = null;
+    runtime.conectado = false;
+    runtime.qrReinicios = 0;
+    runtime.falhasReconexao = 0;
+    runtime.proximaTentativaEm = 0;
+  }
+
+  // Grava por último: se o processo cair no meio, o próximo boot tenta limpar de novo.
+  fs.writeFileSync(WHATSAPP_RESET_V142_MARKER, new Date().toISOString(), 'utf8');
+  console.log('✅ V142: limpeza total concluída. Configurações preservadas; credenciais antigas removidas.');
+  return true;
+}
+
+async function gerarQrNovoAposResetV142() {
+  await carregarSessoesWhatsApp();
+  const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
+  if (!sessoes.length) {
+    console.log('ℹ️ V142: nenhuma sessão cadastrada. Crie uma em Conectar WhatsApp para gerar o QR Code.');
+    return;
+  }
+  console.log(`📷 V142: iniciando QR novo para ${sessoes.length} sessão(ões) cadastrada(s).`);
+  for (const sessao of sessoes) {
+    try {
+      if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+      sessao.qrReinicios = 0;
+      sessao.falhasReconexao = 0;
+      sessao.proximaTentativaEm = 0;
+      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'qr' });
+    } catch (e) {
+      console.log(`❌ V142 QR NOVO #${sessao.id}:`, e.message);
+    }
+    await new Promise(r => setTimeout(r, 1200));
+  }
+}
+
 async function iniciarTodasSessoesWhatsAppSalvas() {
   await carregarSessoesWhatsApp();
   const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
@@ -8647,12 +8759,15 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
   .then(async () => {
-    // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
+    // Aguarda o servidor/banco estabilizarem. Na V142, o primeiro boot faz uma
+    // limpeza única de TODAS as credenciais antigas e pede um QR realmente novo.
     await new Promise(r => setTimeout(r, 2500));
-    await iniciarTodasSessoesWhatsAppSalvas();
+    const resetExecutado = await limparTodasConexoesWhatsAppV142();
+    if (resetExecutado) await gerarQrNovoAposResetV142();
+    else await iniciarTodasSessoesWhatsAppSalvas();
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
-  .catch(e => console.log('❌ V93 START:', e.message));
+  .catch(e => console.log('❌ V142 START:', e.message));
 
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
