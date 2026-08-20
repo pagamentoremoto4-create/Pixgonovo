@@ -6308,6 +6308,138 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   } finally { sessao.iniciando = false; }
 }
 
+
+// ========================= V147: TESTE MÍNIMO DE PAREAMENTO POR CÓDIGO =========================
+// Socket isolado: sem QR, sem watchdog, sem retry, sem handlers do bot durante o pareamento.
+// Se conectar com sucesso, salva as credenciais e entrega a sessão ao fluxo normal de restauração.
+async function iniciarPareamentoCodigoMinimoV147(id, numeroInformado) {
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=? AND ativo=1', [Number(id)]);
+  if (!row) throw new Error('Sessão de WhatsApp não encontrada.');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  const numero = normalizarNumeroWhatsApp(numeroInformado || '');
+  if (!/^\d{10,15}$/.test(numero)) throw new Error('Número inválido. Informe DDI + DDD + número, somente dígitos.');
+  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) throw new Error('Esta sessão já está registrada. Desconecte/apague a sessão antes de testar um novo pareamento.');
+
+  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
+  if (sessao.socket?.end) { try { sessao.socket.end(new Error('V147: iniciando teste mínimo')); } catch (_) {} }
+  sessao.socket = null;
+  sessao.conectado = false;
+  sessao.qr = null;
+  sessao.pairingCode = '';
+  sessao.pairingNumero = numero;
+  sessao.erro = '';
+  sessao.status = 'TESTE_MINIMO_INICIANDO';
+  sessao.connectionMode = 'codigo-minimo';
+  sessao.testeMinimoAtivo = true;
+  const tokenTeste = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  sessao.tokenTesteMinimo = tokenTeste;
+  emitirStatusSessaoMulti(sessao);
+
+  // Estado totalmente limpo, mas somente porque ainda não existe sessão registrada.
+  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
+  fs.mkdirSync(sessao.sessionDir, { recursive: true });
+  console.log(`🧪 V147 MINIMO: iniciando ${sessao.nome} / ${numero} em ${sessao.sessionDir}`);
+
+  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'V147 carregar Baileys');
+  const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'V147 carregar pino');
+  const pino = pinoModule.default || pinoModule;
+  const makeWASocket = baileys.default || baileys.makeWASocket;
+  const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, 'V147 auth state');
+
+  let version = null;
+  if (typeof baileys.fetchLatestWaWebVersion === 'function') {
+    try {
+      const result = await comTimeoutWhatsApp(baileys.fetchLatestWaWebVersion(), 12000, 'V147 fetchLatestWaWebVersion');
+      if (Array.isArray(result?.version) && result.version.length === 3) version = result.version;
+    } catch (e) { console.log('⚠️ V147 MINIMO: falha ao buscar versão WA Web:', e.message); }
+  }
+  console.log(`🧪 V147 MINIMO: versão WA Web=${version ? version.join('.') : 'padrão interno'}`);
+
+  const browser = baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu','Chrome','22.04.4'];
+  console.log(`🧪 V147 MINIMO: browser=${JSON.stringify(browser)}`);
+
+  const socketAtual = makeWASocket({
+    auth: state,
+    logger: pino({ level: process.env.WHATSAPP_TEST_LOG_LEVEL || 'warn' }),
+    printQRInTerminal: false,
+    ...(version ? { version } : {}),
+    browser,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 45000,
+    defaultQueryTimeoutMs: 45000,
+    keepAliveIntervalMs: 20000,
+    retryRequestDelayMs: 1000
+  });
+  sessao.socket = socketAtual;
+
+  socketAtual.ev.on('creds.update', async () => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    try {
+      await saveCreds();
+      console.log(`🔐 V147 MINIMO CREDS: ${sessao.nome} registered=${state.creds.registered === true}`);
+    } catch (e) { console.log(`❌ V147 MINIMO SAVE CREDS:`, e.message); }
+  });
+
+  socketAtual.ev.on('connection.update', async update => {
+    if (sessao.tokenTesteMinimo !== tokenTeste) return;
+    const { connection, lastDisconnect, qr } = update || {};
+    const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || '';
+    if (qr) console.log(`🚫 V147 MINIMO: QR recebido e ignorado para ${sessao.nome}.`);
+    if (connection) console.log(`🔎 V147 MINIMO UPDATE: ${sessao.nome} connection=${connection} code=${code || 'n/a'} registered=${state.creds.registered === true}`);
+
+    if (connection === 'connecting') {
+      sessao.status = 'TESTE_MINIMO_CONECTANDO';
+      emitirStatusSessaoMulti(sessao);
+    }
+
+    if (connection === 'open') {
+      try { await saveCreds(); } catch (_) {}
+      console.log(`✅ V147 MINIMO: PAREAMENTO ACEITO para ${sessao.nome}; credenciais registradas=${state.creds.registered === true}`);
+      sessao.status = 'FINALIZANDO_PAREAMENTO';
+      sessao.erro = 'Código aceito. Transferindo para a conexão normal.';
+      sessao.pairingCode = '';
+      sessao.testeMinimoAtivo = false;
+      sessao.tokenTesteMinimo = '';
+      emitirStatusSessaoMulti(sessao);
+      setTimeout(async () => {
+        try { if (socketAtual?.end) socketAtual.end(new Error('V147 handoff para fluxo normal')); } catch (_) {}
+        if (sessao.socket === socketAtual) sessao.socket = null;
+        await dormir(800);
+        iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V147 HANDOFF:', e.message));
+      }, 1500);
+    }
+
+    if (connection === 'close' && sessao.testeMinimoAtivo && sessao.tokenTesteMinimo === tokenTeste) {
+      const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
+      console.log(`❌ V147 MINIMO CLOSE: ${sessao.nome} code=${code || 'n/a'} registered=${state.creds.registered === true} erro=${motivo}`);
+      sessao.socket = null;
+      sessao.conectado = false;
+      sessao.testeMinimoAtivo = false;
+      sessao.status = 'FALHA_TESTE_MINIMO';
+      sessao.erro = `Teste mínimo falhou: ${motivo}${code ? ` (código ${code})` : ''}`;
+      sessao.pairingCode = '';
+      emitirStatusSessaoMulti(sessao);
+    }
+  });
+
+  // Uma única solicitação. Sem retry e sem outro socket por trás.
+  await dormir(1800);
+  if (sessao.tokenTesteMinimo !== tokenTeste) throw new Error('Teste mínimo cancelado.');
+  if (state.creds.registered) throw new Error('A sessão já ficou registrada antes de solicitar o código.');
+  sessao.status = 'TESTE_MINIMO_GERANDO_CODIGO';
+  emitirStatusSessaoMulti(sessao);
+  console.log(`🔢 V147 MINIMO: requestPairingCode(${numero}) - tentativa única`);
+  const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(numero), 30000, 'V147 requestPairingCode');
+  sessao.pairingCode = String(codigo || '').trim();
+  sessao.status = 'AGUARDANDO_CODIGO';
+  sessao.erro = 'TESTE MÍNIMO ativo: digite este código no WhatsApp. Não existe QR nem reconexão automática neste teste.';
+  emitirStatusSessaoMulti(sessao);
+  console.log(`🔢 V147 MINIMO: código gerado para ${sessao.nome}: ${sessao.pairingCode}`);
+  return sessao.pairingCode;
+}
+
 function descricaoFuncoesSessao(sessao) {
   const f=[];
   if (sessao.funcaoBot) f.push('Bot de Serviços');
@@ -8557,7 +8689,7 @@ app.get('/admin/whatsapp', async (req, res) => {
     return `<div class="card"><h2>📱 ${safeHtml(row.nome)}</h2><h3>${status}</h3><p><b>Número:</b> ${sessao.numero ? '+' + safeHtml(sessao.numero) : 'Ainda não conectado'}</p><p>${funcoes || '<span class="muted">Nenhuma função marcada</span>'}</p>${sessao.erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>` : ''}<div class="actions"><a class="btn green" href="/admin/whatsapp/${row.id}/editar">⚙️ Editar / Conectar</a><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar as credenciais desta sessão?')">🔌 Desconectar</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/excluir"><button class="btn red" onclick="return confirm('Excluir esta sessão definitivamente?')">🗑️ Excluir</button></form></div></div>`;
   }).join('') || '<div class="card"><p class="muted">Nenhum WhatsApp cadastrado. Clique em Adicionar WhatsApp.</p></div>';
 
-  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO'].includes(String(x.status || '')));
+  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO','TESTE_MINIMO_INICIANDO','TESTE_MINIMO_CONECTANDO','TESTE_MINIMO_GERANDO_CODIGO'].includes(String(x.status || '')));
   const autoRefresh = emConexao ? `<script>setTimeout(()=>{if(!document.hidden)location.reload()},8000)</script>` : '';
   res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Um mesmo número pode ter uma, duas ou as três funções. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
 });
@@ -8618,7 +8750,7 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${codigoHtml}${sessaoWhatsAppRegistrada(sessao.sessionDir)?`<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">🔄 Reconectar sessão</button></form>`:`<form method="post" action="/admin/whatsapp/${id}/conectar-codigo" style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.15)"><label>Conectar por número</label><input name="numero" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="5575981635708" value="${safeHtml(sessao.pairingNumero || '')}" required><p class="mini-help">Informe DDI + DDD + número, somente números. O QR Code está desativado.</p><button class="btn green">🔢 Gerar código de conexão</button></form>`}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar gerar outro código.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${codigoHtml}${sessaoWhatsAppRegistrada(sessao.sessionDir)?`<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">🔄 Reconectar sessão</button></form>`:`<form method="post" action="/admin/whatsapp/${id}/conectar-codigo" style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.15)"><label>Conectar por número</label><input name="numero" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="5575981635708" value="${safeHtml(sessao.pairingNumero || '')}" required><p class="mini-help">Informe DDI + DDD + número, somente números. O QR Code está desativado.</p><button class="btn green">🔢 Gerar código de conexão</button></form><form method="post" action="/admin/whatsapp/${id}/teste-codigo-minimo" style="margin-top:10px"><input type="hidden" name="numero" value="${safeHtml(sessao.pairingNumero || '')}"><button class="btn" style="border:1px solid #f59e0b;color:#fbbf24" onclick="const n=prompt('Número com DDI + DDD + número (somente números):', '${safeHtml(sessao.pairingNumero || '')}'); if(!n) return false; this.form.numero.value=n.replace(/\D/g,'');">🧪 TESTE MÍNIMO POR CÓDIGO</button><p class="mini-help">Teste isolado: um único socket, sem QR, sem watchdog e sem tentativa automática.</p></form>`}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar gerar outro código.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
@@ -8677,6 +8809,29 @@ app.post('/admin/whatsapp/:id/conectar-codigo', async (req, res) => {
   iniciarSessaoWhatsAppMulti(id, { modo: 'codigo', numero }).catch(e => {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); emitirStatusSessaoMulti(sessao);
     console.log(`❌ V145 CÓDIGO #${id}:`, e.stack || e.message);
+  });
+  res.redirect(`/admin/whatsapp/${id}/editar`);
+});
+
+
+app.post('/admin/whatsapp/:id/teste-codigo-minimo', async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
+  if (!row) return res.redirect('/admin/whatsapp');
+  const sessao = criarRuntimeSessaoWhatsApp(row);
+  const numero = normalizarNumeroWhatsApp(req.body.numero || '');
+  if (!/^\d{10,15}$/.test(numero)) {
+    sessao.erro = 'Número inválido. Digite DDI + DDD + número, somente números.';
+    sessao.status = 'ERRO_NUMERO';
+    return res.redirect(`/admin/whatsapp/${id}/editar`);
+  }
+  iniciarPareamentoCodigoMinimoV147(id, numero).catch(e => {
+    sessao.status = 'FALHA_TESTE_MINIMO';
+    sessao.erro = `Teste mínimo: ${e.message || e}`;
+    sessao.pairingCode = '';
+    sessao.testeMinimoAtivo = false;
+    emitirStatusSessaoMulti(sessao);
+    console.log(`❌ V147 MINIMO ROUTE #${id}:`, e.stack || e.message);
   });
   res.redirect(`/admin/whatsapp/${id}/editar`);
 });
