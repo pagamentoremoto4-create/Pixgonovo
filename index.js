@@ -5872,61 +5872,118 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
-  // V152: o helper fetchLatestBaileysVersion pode retornar uma revisão Web antiga
-  // (ex.: 2.3000.1035194821), que hoje é rejeitada pelo WhatsApp com code=405.
-  // Primeiro tentamos EXCLUSIVAMENTE fetchLatestWaWebVersion. Se ele falhar ou
-  // devolver a revisão antiga conhecida, consultamos diretamente o sw.js oficial.
+  // V153: resolução robusta da versão WA Web para evitar 405/client_too_old e 429.
+  // Ordem: cache persistente válido -> fetchLatestWaWebVersion com headers anti-bot ->
+  // sw.js oficial com os mesmos headers -> Defaults oficial do Baileys no GitHub ->
+  // versão pinada de emergência. Nunca usamos a revisão antiga 1035194821.
   const versaoAntigaConhecida = [2, 3000, 1035194821];
-  const versaoValida = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
-  const mesmaVersao = (a, b) => versaoValida(a) && versaoValida(b) && a.every((n, i) => n === b[i]);
+  const versaoEmergencia = [2, 3000, 1043857760]; // Defaults oficial do Baileys em 20/08/2026
+  const cachePath = path.join(DATA_DIR || '/data', 'wa-web-version-cache.json');
+  const CACHE_MAX_MS = 24 * 60 * 60 * 1000;
+  const versaoValida = v => Array.isArray(v) && v.length === 3 && v.every(n => Number.isFinite(Number(n)));
+  const normalizar = v => versaoValida(v) ? v.map(Number) : null;
+  const mesmaVersao = (a, b) => {
+    a = normalizar(a); b = normalizar(b);
+    return !!a && !!b && a.every((n, i) => n === b[i]);
+  };
+  const aceitavel = v => {
+    v = normalizar(v);
+    return !!v && !mesmaVersao(v, versaoAntigaConhecida) && v[0] === 2 && v[1] === 3000 && v[2] > versaoAntigaConhecida[2];
+  };
+  const salvarCache = (version, source) => {
+    try {
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.writeFileSync(cachePath, JSON.stringify({ version: normalizar(version), source, savedAt: Date.now() }, null, 2));
+    } catch (e) {
+      console.log(`⚠️ V153 ${descricao}: não foi possível salvar cache de versão: ${e.message}`);
+    }
+  };
+  const lerCache = () => {
+    try {
+      if (!fs.existsSync(cachePath)) return null;
+      const c = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+      if (!aceitavel(c?.version)) return null;
+      return c;
+    } catch { return null; }
+  };
 
+  // 1) Cache recente evita consultar web.whatsapp.com a cada tentativa/deploy.
+  const cache = lerCache();
+  if (cache && (Date.now() - Number(cache.savedAt || 0) < CACHE_MAX_MS)) {
+    console.log(`✅ V153 ${descricao}: usando versão WA Web ${cache.version.join('.')} do cache (${cache.source || 'persistente'}).`);
+    return normalizar(cache.version);
+  }
+
+  const headersWA = {
+    'sec-fetch-site': 'none',
+    'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  };
+
+  // 2) Helper oficial atual com os headers recomendados pelo próprio Baileys.
   try {
     if (typeof baileys.fetchLatestWaWebVersion === 'function') {
       const resultado = await comTimeoutWhatsApp(
-        baileys.fetchLatestWaWebVersion(),
+        baileys.fetchLatestWaWebVersion({ headers: headersWA }),
         12000,
         `fetchLatestWaWebVersion ${descricao}`
       );
-      const versao = resultado?.version;
-      if (versaoValida(versao) && !mesmaVersao(versao, versaoAntigaConhecida)) {
-        console.log(`✅ V152 ${descricao}: versão WA Web ao vivo ${versao.join('.')} via fetchLatestWaWebVersion.`);
+      const versao = normalizar(resultado?.version);
+      if (aceitavel(versao)) {
+        salvarCache(versao, 'fetchLatestWaWebVersion');
+        console.log(`✅ V153 ${descricao}: versão WA Web ${versao.join('.')} via fetchLatestWaWebVersion.`);
         return versao;
       }
-      if (versaoValida(versao)) {
-        console.log(`⚠️ V152 ${descricao}: fetchLatestWaWebVersion retornou revisão antiga ${versao.join('.')}; buscando sw.js diretamente.`);
-      }
+      if (versao) console.log(`⚠️ V153 ${descricao}: helper retornou versão inadequada ${versao.join('.')}; tentando fallback.`);
     }
   } catch (e) {
-    console.log(`⚠️ V152 ${descricao}: fetchLatestWaWebVersion falhou: ${e.message}`);
+    console.log(`⚠️ V153 ${descricao}: fetchLatestWaWebVersion falhou: ${e.message}`);
   }
 
+  // 3) sw.js oficial, uma única chamada, com headers mínimos anti-bot.
   try {
     const resposta = await comTimeoutWhatsApp(fetch('https://web.whatsapp.com/sw.js', {
-      method: 'GET',
-      headers: {
-        'sec-fetch-site': 'none',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache'
-      }
+      method: 'GET', headers: headersWA
     }), 12000, `baixar sw.js ${descricao}`);
     if (!resposta.ok) throw new Error(`HTTP ${resposta.status} ${resposta.statusText}`);
     const texto = await comTimeoutWhatsApp(resposta.text(), 8000, `ler sw.js ${descricao}`);
-    const match = texto.match(/\?"client_revision\?"\s*:\s*(\d+)/) || texto.match(/client_revision[^0-9]*(\d+)/);
-    if (!match?.[1]) throw new Error('client_revision não encontrado no sw.js');
-    const revision = Number(match[1]);
-    const versao = [2, 3000, revision];
-    if (!Number.isFinite(revision)) throw new Error('client_revision inválido');
-    console.log(`✅ V152 ${descricao}: versão WA Web ao vivo ${versao.join('.')} via sw.js oficial.`);
+    const match = texto.match(/\\?"client_revision\\?"\s*:\s*(\d+)/) || texto.match(/client_revision[^0-9]*(\d+)/);
+    const versao = match?.[1] ? [2, 3000, Number(match[1])] : null;
+    if (!aceitavel(versao)) throw new Error('client_revision ausente ou inadequado');
+    salvarCache(versao, 'sw.js oficial');
+    console.log(`✅ V153 ${descricao}: versão WA Web ${versao.join('.')} via sw.js oficial.`);
     return versao;
   } catch (e) {
-    console.log(`⚠️ V152 ${descricao}: consulta direta do sw.js falhou: ${e.message}`);
+    console.log(`⚠️ V153 ${descricao}: sw.js indisponível: ${e.message}`);
   }
 
-  // Não usamos fetchLatestBaileysVersion como fallback para sessão nova, pois ele
-  // pode devolver a revisão que causou o 405. Sem versão atual, é melhor abortar
-  // o pareamento e mostrar o erro do que insistir com um cliente sabidamente antigo.
-  return null;
+  // 4) Fallback confiável: Defaults oficial do Baileys no GitHub, atualizado pelos mantenedores.
+  try {
+    const url = 'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/index.ts';
+    const resposta = await comTimeoutWhatsApp(fetch(url, {
+      method: 'GET', headers: { 'user-agent': headersWA['user-agent'], 'accept': 'text/plain' }
+    }), 12000, `baixar Defaults Baileys ${descricao}`);
+    if (!resposta.ok) throw new Error(`HTTP ${resposta.status} ${resposta.statusText}`);
+    const texto = await comTimeoutWhatsApp(resposta.text(), 8000, `ler Defaults Baileys ${descricao}`);
+    const m = texto.match(/const\s+version\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+    const versao = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    if (!aceitavel(versao)) throw new Error('versão válida não encontrada no Defaults');
+    salvarCache(versao, 'Baileys Defaults GitHub');
+    console.log(`✅ V153 ${descricao}: versão WA Web ${versao.join('.')} via Defaults oficial do Baileys.`);
+    return versao;
+  } catch (e) {
+    console.log(`⚠️ V153 ${descricao}: fallback GitHub falhou: ${e.message}`);
+  }
+
+  // 5) Se havia cache válido, mesmo antigo, é preferível a voltar para 1035194821.
+  if (cache && aceitavel(cache.version)) {
+    console.log(`⚠️ V153 ${descricao}: usando cache antigo ${cache.version.join('.')} porque as fontes online falharam.`);
+    return normalizar(cache.version);
+  }
+
+  // 6) Último recurso pinado e conhecido como superior à revisão que causa 405.
+  salvarCache(versaoEmergencia, 'emergência pinada');
+  console.log(`⚠️ V153 ${descricao}: usando versão de emergência ${versaoEmergencia.join('.')} para permitir o pareamento.`);
+  return versaoEmergencia;
 }
 
 function sessaoWhatsAppRegistrada(sessionDir) {
@@ -6160,7 +6217,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     const makeWASocket = baileys.default || baileys.makeWASocket;
     const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, `carregar sessão #${sessao.id}`);
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.nome);
-    if (!versaoWeb) throw new Error('V152: não foi possível obter uma versão WA Web atual; pareamento abortado para evitar code=405.');
+    if (!versaoWeb) throw new Error('V153: não foi possível resolver uma versão WA Web válida.');
     const socketAtual = makeWASocket({
       auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
