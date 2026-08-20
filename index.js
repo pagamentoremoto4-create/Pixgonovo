@@ -5872,22 +5872,60 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
+  // V152: o helper fetchLatestBaileysVersion pode retornar uma revisão Web antiga
+  // (ex.: 2.3000.1035194821), que hoje é rejeitada pelo WhatsApp com code=405.
+  // Primeiro tentamos EXCLUSIVAMENTE fetchLatestWaWebVersion. Se ele falhar ou
+  // devolver a revisão antiga conhecida, consultamos diretamente o sw.js oficial.
+  const versaoAntigaConhecida = [2, 3000, 1035194821];
+  const versaoValida = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+  const mesmaVersao = (a, b) => versaoValida(a) && versaoValida(b) && a.every((n, i) => n === b[i]);
+
   try {
-    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
-    if (typeof buscar !== 'function') {
-      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
-      return null;
+    if (typeof baileys.fetchLatestWaWebVersion === 'function') {
+      const resultado = await comTimeoutWhatsApp(
+        baileys.fetchLatestWaWebVersion(),
+        12000,
+        `fetchLatestWaWebVersion ${descricao}`
+      );
+      const versao = resultado?.version;
+      if (versaoValida(versao) && !mesmaVersao(versao, versaoAntigaConhecida)) {
+        console.log(`✅ V152 ${descricao}: versão WA Web ao vivo ${versao.join('.')} via fetchLatestWaWebVersion.`);
+        return versao;
+      }
+      if (versaoValida(versao)) {
+        console.log(`⚠️ V152 ${descricao}: fetchLatestWaWebVersion retornou revisão antiga ${versao.join('.')}; buscando sw.js diretamente.`);
+      }
     }
-    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
-    const versao = resultado?.version;
-    if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
-      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
-      return versao;
-    }
-    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
   } catch (e) {
-    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
+    console.log(`⚠️ V152 ${descricao}: fetchLatestWaWebVersion falhou: ${e.message}`);
   }
+
+  try {
+    const resposta = await comTimeoutWhatsApp(fetch('https://web.whatsapp.com/sw.js', {
+      method: 'GET',
+      headers: {
+        'sec-fetch-site': 'none',
+        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache'
+      }
+    }), 12000, `baixar sw.js ${descricao}`);
+    if (!resposta.ok) throw new Error(`HTTP ${resposta.status} ${resposta.statusText}`);
+    const texto = await comTimeoutWhatsApp(resposta.text(), 8000, `ler sw.js ${descricao}`);
+    const match = texto.match(/\?"client_revision\?"\s*:\s*(\d+)/) || texto.match(/client_revision[^0-9]*(\d+)/);
+    if (!match?.[1]) throw new Error('client_revision não encontrado no sw.js');
+    const revision = Number(match[1]);
+    const versao = [2, 3000, revision];
+    if (!Number.isFinite(revision)) throw new Error('client_revision inválido');
+    console.log(`✅ V152 ${descricao}: versão WA Web ao vivo ${versao.join('.')} via sw.js oficial.`);
+    return versao;
+  } catch (e) {
+    console.log(`⚠️ V152 ${descricao}: consulta direta do sw.js falhou: ${e.message}`);
+  }
+
+  // Não usamos fetchLatestBaileysVersion como fallback para sessão nova, pois ele
+  // pode devolver a revisão que causou o 405. Sem versão atual, é melhor abortar
+  // o pareamento e mostrar o erro do que insistir com um cliente sabidamente antigo.
   return null;
 }
 
@@ -6122,10 +6160,11 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     const makeWASocket = baileys.default || baileys.makeWASocket;
     const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, `carregar sessão #${sessao.id}`);
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.nome);
+    if (!versaoWeb) throw new Error('V152: não foi possível obter uma versão WA Web atual; pareamento abortado para evitar code=405.');
     const socketAtual = makeWASocket({
       auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
-      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.nome}`) : [`CentralUnlocker ${sessao.nome}`, 'Chrome', '1.0.0'],
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false,
       connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000, retryRequestDelayMs: 500
     });
@@ -6401,7 +6440,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.label);
     const socketAtual = makeWASocket({ auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
-      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
     socketAtual.ev.on('creds.update', async () => { try { await saveCreds(); } catch (e) { console.log(`⚠️ V150 SAVE CREDS ${sessao.label}:`, e.message); } });
@@ -6664,7 +6703,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       logger,
       printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
-      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('CentralUnlocker') : ['CentralUnlocker', 'Chrome', '1.0.0'],
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect: false,
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
