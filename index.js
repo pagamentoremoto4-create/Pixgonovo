@@ -5998,6 +5998,39 @@ function sessaoWhatsAppRegistrada(sessionDir) {
   }
 }
 
+// V156: algumas versões do Baileys podem persistir creds.json com `registered`
+// desatualizado mesmo depois de a sessão já ter conectado e enviado mensagens.
+// Para restart/redeploy, uma sessão também é restaurável quando já possui
+// identidade própria (creds.me) ou quando houve uma conexão `open` confirmada.
+function arquivoMarcadorSessaoWhatsApp(sessionDir) {
+  return path.join(sessionDir, '.centralunlocker-session-ok');
+}
+function marcarSessaoWhatsAppConectada(sessionDir) {
+  try {
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(arquivoMarcadorSessaoWhatsApp(sessionDir), String(Date.now()), 'utf8');
+  } catch (e) { console.log('⚠️ V156: falha ao gravar marcador da sessão:', e.message); }
+}
+function limparMarcadorSessaoWhatsApp(sessionDir) {
+  try { fs.rmSync(arquivoMarcadorSessaoWhatsApp(sessionDir), { force: true }); } catch (_) {}
+}
+function sessaoWhatsAppTemCredenciaisRestauraveis(sessionDir) {
+  try {
+    if (!sessionDir) return false;
+    if (fs.existsSync(arquivoMarcadorSessaoWhatsApp(sessionDir))) return true;
+    const arquivoCredenciais = path.join(sessionDir, 'creds.json');
+    if (!fs.existsSync(arquivoCredenciais)) return false;
+    const credenciais = JSON.parse(fs.readFileSync(arquivoCredenciais, 'utf8'));
+    if (credenciais?.registered === true) return true;
+    // `me.id`/`me.lid` só aparece após o WhatsApp atribuir identidade à sessão.
+    // Isso permite restaurar sessões válidas cujo flag registered ficou falso.
+    return !!(credenciais?.me?.id || credenciais?.me?.lid);
+  } catch (e) {
+    console.log('⚠️ V156: não foi possível validar credenciais restauráveis:', sessionDir, e.message);
+    return false;
+  }
+}
+
 // V94: mantém todas as credenciais das sessões novas em um caminho canônico
 // dentro do disco persistente (/data/whatsapp-sessions/<session_key>).
 function pastaCanonicaSessaoWhatsApp(sessionKey) {
@@ -6175,7 +6208,7 @@ function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   // V151: reconexão automática só existe para sessão realmente registrada.
   // creds.json parcial/número salvo NÃO autorizam um novo socket de registro.
   // Isso evita dois sockets concorrentes enquanto o QR ainda está aguardando leitura.
-  try { return !!sessaoWhatsAppRegistrada(sessao.sessionDir); } catch (_) { return false; }
+  try { return !!sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir); } catch (_) { return false; }
 }
 
 function agendarReconexaoSessaoMulti(sessao, atrasoForcado = null) {
@@ -6269,6 +6302,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
           try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
+          marcarSessaoWhatsAppConectada(sessao.sessionDir);
           sessao.qrReinicios = 0; sessao.reconexaoTentativas = 0; sessao.ultimaConexaoEm = Date.now(); sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
@@ -6288,7 +6322,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           const restartRequired = code === baileys.DisconnectReason?.restartRequired || Number(code) === 515;
           const motivo = err?.message || err?.output?.payload?.message || `código ${code || 'desconhecido'}`;
           let registradaAgora = false;
-          try { registradaAgora = !!(state?.creds?.registered || sessaoWhatsAppRegistrada(sessao.sessionDir)); } catch (_) { registradaAgora = !!state?.creds?.registered; }
+          try { registradaAgora = !!(state?.creds?.registered || sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)); } catch (_) { registradaAgora = !!state?.creds?.registered; }
           console.log(`🔎 V151 CLOSE ${sessao.nome}: socket=#${socketGeneration} code=${code ?? 'sem-codigo'} registered=${registradaAgora} mode=${sessao.connectionMode} msg=${motivo}`);
 
           if (restartRequired) {
@@ -6369,7 +6403,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   } catch (e) {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V151 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) {
+    if (sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)) {
       setTimeout(() => agendarReconexaoSessaoMulti(sessao), 100);
     }
   } finally { sessao.iniciando = false; }
@@ -6405,7 +6439,7 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
   sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
-  if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); }
+  if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); limparMarcadorSessaoWhatsApp(sessao.sessionDir); }
   emitirStatusSessaoMulti(sessao);
 }
 
@@ -6417,16 +6451,16 @@ async function iniciarTodasSessoesWhatsAppSalvas() {
     // Reconsulta o caminho salvo após a rotina de reparo/migração da V94.
     const rowAtual = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [sessao.id]);
     if (rowAtual) criarRuntimeSessaoWhatsApp(rowAtual);
-    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    if (!registrada) {
+    const restauravel = sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir);
+    if (!restauravel) {
       sessao.status = 'DESCONECTADO';
       sessao.erro = 'Sessão ainda não registrada. Gere QR Code manualmente para conectar.';
       emitirStatusSessaoMulti(sessao);
-      console.log(`⚠️ V151 BOOT: ${sessao.nome} não registrada; conexão automática bloqueada.`);
+      console.log(`⚠️ V156 BOOT: ${sessao.nome} sem credenciais restauráveis; conexão automática bloqueada.`);
       continue;
     }
     try {
-      console.log(`🔐 V151 BOOT: restaurando automaticamente ${sessao.nome} — ${sessao.sessionDir}`);
+      console.log(`🔐 V156 BOOT: restaurando automaticamente ${sessao.nome} — ${sessao.sessionDir}`);
       await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar', automatico: true });
     } catch (e) {
       console.log(`❌ V93 START #${sessao.id}:`, e.message);
@@ -8603,7 +8637,7 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppRegistrada(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
@@ -8628,7 +8662,7 @@ app.post('/admin/whatsapp/:id/conectar', async (req, res) => {
   if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
   if (sessao.socket?.end) { try { sessao.socket.end(new Error('reinício manual')); } catch (_) {} }
   sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.erro = ''; sessao.status = 'INICIANDO';
-  const possui = sessaoWhatsAppRegistrada(sessao.sessionDir);
+  const possui = sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir);
   await dormir(400);
   await iniciarSessaoWhatsAppMulti(id, { modo: possui ? 'restaurar' : 'qr' });
   res.redirect(`/admin/whatsapp/${id}/editar`);
@@ -8804,7 +8838,7 @@ try {
   const arquivoCredenciais = path.join(WHATSAPP_SESSION_DIR, 'creds.json');
   console.log('💾 DATA_DIR:', DATA_DIR);
   console.log('🔐 Credenciais do Bot de Serviços:', fs.existsSync(arquivoCredenciais)
-    ? (sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR) ? 'registradas e válidas' : 'arquivo encontrado, porém não registrado')
+    ? (sessaoWhatsAppTemCredenciaisRestauraveis(WHATSAPP_SESSION_DIR) ? 'encontradas e restauráveis' : 'arquivo encontrado, porém sem identidade restaurável')
     : 'não encontradas');
 } catch (e) { console.log('⚠️ Falha ao verificar a sessão persistente:', e.message); }
 
