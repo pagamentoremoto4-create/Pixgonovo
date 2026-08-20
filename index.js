@@ -96,7 +96,7 @@ let whatsappSocket = null;
 let qrCodeBase64 = null;
 let whatsappPairingCode = '';
 let whatsappPairingNumero = '';
-let whatsappConnectionMode = 'codigo';
+let whatsappConnectionMode = 'qr';
 const whatsappJidPorNumero = new Map();
 // Mantém cada conversa vinculada à sessão que recebeu a última mensagem, para
 // responder pelo mesmo número quando houver mais de um Bot de Serviços ativo.
@@ -106,8 +106,8 @@ let conectado = false;
 
 // Sessões independentes: suporte com IA, bot de serviços e anúncios em grupos.
 const whatsappExtra = {
-  support: { key: 'support', label: 'Suporte + IA', enabled: WHATSAPP_SUPPORT_ENABLED, sessionDir: WHATSAPP_SUPPORT_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'codigo', status: WHATSAPP_SUPPORT_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 },
-  ads: { key: 'ads', label: 'Anúncios', enabled: WHATSAPP_ADS_ENABLED, sessionDir: WHATSAPP_ADS_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'codigo', status: WHATSAPP_ADS_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 }
+  support: { key: 'support', label: 'Suporte + IA', enabled: WHATSAPP_SUPPORT_ENABLED, sessionDir: WHATSAPP_SUPPORT_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'qr', status: WHATSAPP_SUPPORT_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 },
+  ads: { key: 'ads', label: 'Anúncios', enabled: WHATSAPP_ADS_ENABLED, sessionDir: WHATSAPP_ADS_SESSION_DIR, socket: null, qr: null, pairingCode: '', pairingNumero: '', connectionMode: 'qr', status: WHATSAPP_ADS_ENABLED ? 'INICIANDO' : 'DESABILITADO', conectado: false, numero: '', erro: '', iniciando: false, timer: null, qrReinicios: 0 }
 };
 let campanhaAdsEmAndamento = false;
 let cancelarCampanhaAds = false;
@@ -5872,52 +5872,23 @@ function comTimeoutWhatsApp(promise, ms, etapa) {
 }
 
 async function obterVersaoWebWhatsApp(baileys, descricao = 'WhatsApp') {
-  // V144: mantém a consulta de versão WA Web da V143 e estabiliza o pareamento QR.
-  // Em 2026 essa função chegou a retornar uma versão Web obsoleta, causando
-  // "not logged in, attempting registration" seguido de Connection Failure
-  // antes do evento de QR Code. Prioriza exclusivamente fetchLatestWaWebVersion.
   try {
-    const override = String(process.env.WHATSAPP_WEB_VERSION || '').trim();
-    if (override) {
-      const partes = override.split('.').map(Number);
-      if (partes.length === 3 && partes.every(Number.isFinite)) {
-        console.log(`✅ ${descricao}: versão Web definida por WHATSAPP_WEB_VERSION ${partes.join('.')}`);
-        return partes;
-      }
-      console.log(`⚠️ ${descricao}: WHATSAPP_WEB_VERSION inválida; ignorando override.`);
-    }
-    const buscar = baileys.fetchLatestWaWebVersion;
+    const buscar = baileys.fetchLatestWaWebVersion || baileys.fetchLatestBaileysVersion;
     if (typeof buscar !== 'function') {
-      console.log(`ℹ️ ${descricao}: fetchLatestWaWebVersion indisponível; usando versão interna do Baileys.`);
+      console.log(`ℹ️ ${descricao}: Baileys sem função para consultar versão Web; usando padrão interno.`);
       return null;
     }
-    const resultado = await comTimeoutWhatsApp(buscar(), 12000, `consultar versão WA Web ${descricao}`);
+    const resultado = await comTimeoutWhatsApp(buscar(), 10000, `consultar versão Web ${descricao}`);
     const versao = resultado?.version;
     if (Array.isArray(versao) && versao.length === 3 && versao.every(Number.isFinite)) {
-      console.log(`✅ ${descricao}: versão WA Web ${versao.join('.')} (fetchLatestWaWebVersion)`);
+      console.log(`✅ ${descricao}: versão Web ${versao.join('.')}`);
       return versao;
     }
-    console.log(`⚠️ ${descricao}: fetchLatestWaWebVersion retornou versão inválida; usando padrão interno do Baileys.`);
+    console.log(`⚠️ ${descricao}: versão Web inválida; usando padrão interno do Baileys.`);
   } catch (e) {
-    console.log(`⚠️ ${descricao}: não foi possível consultar fetchLatestWaWebVersion:`, e.message);
+    console.log(`⚠️ ${descricao}: não foi possível consultar a versão Web:`, e.message);
   }
   return null;
-}
-
-function prepararPastaParaNovoQrV143(sessionDir, descricao = 'WhatsApp') {
-  try {
-    if (!sessionDir) return;
-    const registrada = sessaoWhatsAppRegistrada(sessionDir);
-    if (registrada) return;
-    // Sessões que falharam antes do QR podem deixar creds.json/keys parciais.
-    // Ao pedir um QR novo, remove somente estado NÃO registrado para garantir
-    // um handshake de pareamento realmente limpo, preservando sessões válidas.
-    if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.mkdirSync(sessionDir, { recursive: true });
-    console.log(`🧹 V144: estado não registrado limpo para novo QR (${descricao}).`);
-  } catch (e) {
-    console.log(`⚠️ V144: falha ao preparar novo QR (${descricao}):`, e.message);
-  }
 }
 
 function sessaoWhatsAppRegistrada(sessionDir) {
@@ -6030,9 +6001,7 @@ function criarRuntimeSessaoWhatsApp(row) {
   const base = existente || {
     id: Number(row.id), socket: null, qr: null, status: 'DESCONECTADO', conectado: false,
     numero: row.numero || '', erro: '', iniciando: false, timer: null, qrReinicios: 0,
-    falhasReconexao: 0, proximaTentativaEm: 0, connectionMode: 'restaurar',
-    pareamentoEmAndamento: false, ultimoQrEm: 0, ultimaAtualizacaoCredsEm: 0,
-    pairingCode: '', pairingNumero: ''
+    connectionMode: 'restaurar'
   };
   base.nome = row.nome || `WhatsApp ${row.id}`;
   base.sessionKey = row.session_key;
@@ -6084,7 +6053,7 @@ async function carregarSessoesWhatsApp() {
 function emitirStatusSessaoMulti(sessao) {
   io.emit('whatsapp-multi-status', {
     id: sessao.id, status: sessao.status, numero: sessao.numero || '', erro: sessao.erro || '',
-    conectado: !!sessao.conectado, qr: !!sessao.qr, pairingCode: sessao.pairingCode || '', pairingNumero: sessao.pairingNumero || '',
+    conectado: !!sessao.conectado, qr: !!sessao.qr,
     funcoes: { bot: !!sessao.funcaoBot, grupos: !!sessao.funcaoGrupos, status: !!sessao.funcaoStatus }
   });
 }
@@ -6100,41 +6069,26 @@ function sessaoWhatsAppPodeTentarAutomatico(sessao) {
   try {
     // Algumas sessões antigas possuem creds.json e número salvo, mas o campo
     // registered só volta a true depois que o Baileys inicia a conexão. Esse é
-    // mantém apenas restauração automática de sessões já registradas.
+    // exatamente o caso em que o botão "Gerar QR Code" conecta sem escanear QR.
     const temArquivo = fs.existsSync(path.join(sessao.sessionDir || '', 'creds.json'));
     return sessaoWhatsAppRegistrada(sessao.sessionDir) || temArquivo || !!normalizarNumeroWhatsApp(sessao.numero || '');
   } catch (_) { return !!normalizarNumeroWhatsApp(sessao?.numero || ''); }
 }
 
-// V141: uma única fila de reconexão por sessão, com backoff progressivo.
-// Evita o loop agressivo em que connection.update e watchdog tentavam iniciar
-// a mesma sessão repetidamente a cada poucos segundos.
-const WHATSAPP_RECONNECT_BACKOFF_MS = [5000, 15000, 30000, 60000, 120000, 300000];
-function agendarReconexaoSessaoMulti(sessao, motivo = '') {
-  if (!sessao || sessao.timer || !sessao.ativo || sessao.conectado || sessao.iniciando) return;
-  const falhas = Math.max(0, Number(sessao.falhasReconexao || 0));
-  const indice = Math.min(falhas, WHATSAPP_RECONNECT_BACKOFF_MS.length - 1);
-  const atraso = WHATSAPP_RECONNECT_BACKOFF_MS[indice];
-  sessao.falhasReconexao = falhas + 1;
-  sessao.proximaTentativaEm = Date.now() + atraso;
-  console.log(`⏳ V141: ${sessao.nome} nova tentativa em ${Math.round(atraso/1000)}s${motivo ? ` — ${motivo}` : ''}.`);
+function agendarReconexaoSessaoMulti(sessao) {
+  if (!sessao || sessao.timer || !sessao.ativo) return;
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
-    sessao.proximaTentativaEm = 0;
-    if (sessao.conectado || sessao.iniciando || !sessao.ativo) return;
-    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    if (!registrada) {
-      sessao.status = 'AGUARDANDO_CODIGO';
-      sessao.erro = 'Sessão não conectada. Gere um código de conexão pelo número.';
+    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
+      sessao.status = 'SESSAO_EXPIRADA';
+      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere um novo QR Code.';
       emitirStatusSessaoMulti(sessao);
       return;
     }
-    console.log(`🔄 V146: reconectando automaticamente ${sessao.nome} pela sessão salva.`);
-    iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => {
-      console.log(`❌ V141 RECONEXÃO #${sessao.id}:`, e.message);
-      agendarReconexaoSessaoMulti(sessao, e.message);
-    });
-  }, atraso);
+    const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+    console.log(`🔄 V95: reconectando automaticamente ${sessao.nome} (${registrada ? 'restaurar' : 'recuperar'}).`);
+    iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ V95 RECONEXÃO #${sessao.id}:`, e.message));
+  }, 5000);
 }
 
 async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
@@ -6145,14 +6099,12 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   if (sessao.iniciando) return;
 
   sessao.iniciando = true;
-  sessao.connectionMode = opcoes.modo === 'codigo' ? 'codigo' : 'restaurar';
+  sessao.connectionMode = opcoes.modo === 'qr' ? 'qr' : 'restaurar';
   sessao.status = 'INICIANDO'; sessao.erro = '';
-  sessao.qr = null;
-  if (sessao.connectionMode !== 'codigo') { sessao.pairingCode = ''; sessao.pairingNumero = ''; }
+  if (sessao.connectionMode === 'qr') sessao.qr = null;
   emitirStatusSessaoMulti(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
-    if (sessao.connectionMode === 'codigo') prepararPastaParaNovoQrV143(sessao.sessionDir, sessao.nome);
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys sessão #${sessao.id}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger sessão #${sessao.id}`);
     const pino = pinoModule.default || pinoModule;
@@ -6162,45 +6114,28 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     const socketAtual = makeWASocket({
       auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
-      // V145: para pareamento por código, use um browser canônico/lógico.
-      // A documentação do Baileys alerta que labels customizados podem fazer o pareamento falhar.
-      browser: sessao.connectionMode === 'codigo'
-        ? (baileys.Browsers?.macOS ? baileys.Browsers.macOS('Google Chrome') : ['Mac OS', 'Google Chrome', '14.4.1'])
-        : (baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Google Chrome') : ['Ubuntu', 'Google Chrome', '22.04.4']),
+      browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.nome}`) : [`CentralUnlocker ${sessao.nome}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false,
       connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000, retryRequestDelayMs: 500
     });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', async updateCreds => {
-      try {
-        await saveCreds();
-        sessao.ultimaAtualizacaoCredsEm = Date.now();
-        if (sessao.connectionMode === 'codigo') {
-          sessao.pareamentoEmAndamento = true;
-          console.log(`🔐 V146: credenciais atualizadas durante pareamento por código de ${sessao.nome} (registered=${state.creds.registered === true}).`);
-        }
-      } catch (e) {
-        console.log(`❌ V144 SAVE CREDS #${sessao.id}:`, e.message);
-      }
-    });
+    socketAtual.ev.on('creds.update', saveCreds);
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
       try {
         if (qr) {
-          // V146: QR desativado. O painel usa somente código de pareamento por número.
-          sessao.qr = null;
-          console.log(`🚫 V146: QR ignorado para ${sessao.nome}; conexão somente por código.`);
+          sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
+          sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = '';
+          emitirStatusSessaoMulti(sessao);
         }
-        if (connection === 'connecting') { sessao.status = sessao.connectionMode === 'codigo' ? 'AGUARDANDO_CODIGO' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
+        if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusSessaoMulti(sessao); }
         if (connection === 'open') {
           if (sessao.socket !== socketAtual) return;
           // V94: força a gravação final do creds.json no disco persistente assim
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
           try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
-          if (sessao.timer) clearTimeout(sessao.timer);
-          sessao.timer = null; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
-          sessao.qrReinicios = 0; sessao.pareamentoEmAndamento = false; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = '';
+          sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
           // Compatibilidade com as rotinas antigas de envio do Bot de Serviços.
           if (sessao.funcaoBot && (!whatsappSocket || !conectado)) {
@@ -6217,35 +6152,16 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           const loggedOut = code === baileys.DisconnectReason?.loggedOut;
           const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
           const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-          const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(sessao.sessionDir);
-          console.log(`🔎 V144 CLOSE ${sessao.nome}: code=${code || 'n/a'} registered=${registradoAgora} modo=${sessao.connectionMode} pairing=${!!sessao.pareamentoEmAndamento} erro=${motivo}`);
-
-          // V144: durante QR nunca cria outro socket nem limpa a pasta apenas porque
-          // a conexão fechou. O próprio Baileys renova QR no socket enquanto ele é
-          // válido. Após a leitura, qualquer creds.update é persistido imediatamente.
-          // Só reinicia automaticamente quando o WhatsApp exige restart (515) E as
-          // credenciais já ficaram registradas; nesse caso restaura a mesma sessão.
-          if (restartRequired && !loggedOut && registradoAgora) {
-            sessao.status = 'FINALIZANDO_PAREAMENTO';
-            sessao.erro = 'Código aceito. Finalizando vinculação.';
+          const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
+          if (restartRequired || podeReiniciarQr) {
+            sessao.qrReinicios += 1; sessao.status = 'REGERANDO_QR'; sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
             emitirStatusSessaoMulti(sessao);
-            console.log(`🔄 V146: ${sessao.nome} recebeu restartRequired após código; restaurando credenciais salvas.`);
-            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V144 RESTAURAR PÓS-QR:', e.message)), 2500);
+            setTimeout(() => iniciarSessaoWhatsAppMulti(sessao.id, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ V87 NOVO QR:', e.message)), 1500);
             return;
           }
-
-          if (sessao.connectionMode === 'codigo' && !registradoAgora && !loggedOut) {
-            sessao.status = 'FALHA_CODIGO';
-            sessao.erro = `${motivo}. Gere um novo código e tente novamente.`;
-            sessao.pareamentoEmAndamento = false;
-            sessao.pairingCode = '';
-            emitirStatusSessaoMulti(sessao);
-            return;
-          }
-
-          sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
-          sessao.erro = motivo; sessao.pareamentoEmAndamento = false; emitirStatusSessaoMulti(sessao);
-          if (!loggedOut && registradoAgora) agendarReconexaoSessaoMulti(sessao, motivo);
+          sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
+          sessao.erro = motivo; emitirStatusSessaoMulti(sessao);
+          if (!loggedOut && state.creds.registered) agendarReconexaoSessaoMulti(sessao);
         }
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
@@ -6283,242 +6199,11 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         } catch (e) { console.log(`❌ V87 MENSAGEM SESSÃO #${sessao.id}:`, e.message); }
       }
     });
-
-    // V145: conexão alternativa por código de pareamento (sem QR Code).
-    if (sessao.connectionMode === 'codigo') {
-      const numeroCodigo = normalizarNumeroWhatsApp(opcoes.numero || '');
-      if (!/^\d{10,15}$/.test(numeroCodigo)) throw new Error('Número inválido. Informe DDI + DDD + número, somente dígitos. Ex.: 5575981635708');
-      sessao.pairingNumero = numeroCodigo;
-      sessao.pairingCode = '';
-      sessao.status = 'GERANDO_CODIGO';
-      sessao.pareamentoEmAndamento = true;
-      emitirStatusSessaoMulti(sessao);
-      console.log(`🔢 V145: solicitando código de pareamento para ${sessao.nome} / ${numeroCodigo}`);
-      const codigo = await solicitarCodigoPareamentoComRetry(socketAtual, numeroCodigo, `V145 código ${sessao.nome}`);
-      sessao.pairingCode = String(codigo || '').trim();
-      sessao.status = 'AGUARDANDO_CODIGO';
-      sessao.erro = '';
-      emitirStatusSessaoMulti(sessao);
-      console.log(`🔢 V145: código de pareamento gerado para ${sessao.nome}: ${sessao.pairingCode}`);
-    }
   } catch (e) {
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V87 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
-    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao, e.message || 'falha ao iniciar');
+    if (sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoSessaoMulti(sessao);
   } finally { sessao.iniciando = false; }
-}
-
-
-// ========================= V147: TESTE MÍNIMO DE PAREAMENTO POR CÓDIGO =========================
-// Socket isolado: sem QR, sem watchdog, sem retry, sem handlers do bot durante o pareamento.
-// Se conectar com sucesso, salva as credenciais e entrega a sessão ao fluxo normal de restauração.
-async function iniciarPareamentoCodigoMinimoV147(id, numeroInformado) {
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=? AND ativo=1', [Number(id)]);
-  if (!row) throw new Error('Sessão de WhatsApp não encontrada.');
-  const sessao = criarRuntimeSessaoWhatsApp(row);
-  const numero = normalizarNumeroWhatsApp(numeroInformado || '');
-  if (!/^\d{10,15}$/.test(numero)) throw new Error('Número inválido. Informe DDI + DDD + número, somente dígitos.');
-  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) throw new Error('Esta sessão já está registrada. Desconecte/apague a sessão antes de testar um novo pareamento.');
-
-  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
-  if (sessao.socket?.end) { try { sessao.socket.end(new Error('V147: iniciando teste mínimo')); } catch (_) {} }
-  sessao.socket = null;
-  sessao.conectado = false;
-  sessao.qr = null;
-  sessao.pairingCode = '';
-  sessao.pairingNumero = numero;
-  sessao.erro = '';
-  sessao.status = 'TESTE_MINIMO_INICIANDO';
-  sessao.connectionMode = 'codigo-minimo';
-  sessao.testeMinimoAtivo = true;
-  const tokenTeste = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  sessao.tokenTesteMinimo = tokenTeste;
-  emitirStatusSessaoMulti(sessao);
-
-  // Estado totalmente limpo, mas somente porque ainda não existe sessão registrada.
-  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
-  fs.mkdirSync(sessao.sessionDir, { recursive: true });
-  console.log(`🧪 V147 MINIMO: iniciando ${sessao.nome} / ${numero} em ${sessao.sessionDir}`);
-
-  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'V147 carregar Baileys');
-  const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'V147 carregar pino');
-  const pino = pinoModule.default || pinoModule;
-  const makeWASocket = baileys.default || baileys.makeWASocket;
-  const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, 'V147 auth state');
-
-  let version = null;
-  if (typeof baileys.fetchLatestWaWebVersion === 'function') {
-    try {
-      const result = await comTimeoutWhatsApp(baileys.fetchLatestWaWebVersion(), 12000, 'V147 fetchLatestWaWebVersion');
-      if (Array.isArray(result?.version) && result.version.length === 3) version = result.version;
-    } catch (e) { console.log('⚠️ V147 MINIMO: falha ao buscar versão WA Web:', e.message); }
-  }
-  console.log(`🧪 V147 MINIMO: versão WA Web=${version ? version.join('.') : 'padrão interno'}`);
-
-  const browser = baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu','Chrome','22.04.4'];
-  console.log(`🧪 V147 MINIMO: browser=${JSON.stringify(browser)}`);
-
-  const socketAtual = makeWASocket({
-    auth: state,
-    logger: pino({ level: process.env.WHATSAPP_TEST_LOG_LEVEL || 'warn' }),
-    printQRInTerminal: false,
-    ...(version ? { version } : {}),
-    browser,
-    markOnlineOnConnect: false,
-    syncFullHistory: false,
-    generateHighQualityLinkPreview: false,
-    connectTimeoutMs: 45000,
-    defaultQueryTimeoutMs: 45000,
-    keepAliveIntervalMs: 20000,
-    retryRequestDelayMs: 1000
-  });
-  sessao.socket = socketAtual;
-
-  socketAtual.ev.on('creds.update', async () => {
-    if (sessao.tokenTesteMinimo !== tokenTeste) return;
-    try {
-      await saveCreds();
-      console.log(`🔐 V147 MINIMO CREDS: ${sessao.nome} registered=${state.creds.registered === true}`);
-    } catch (e) { console.log(`❌ V147 MINIMO SAVE CREDS:`, e.message); }
-  });
-
-  socketAtual.ev.on('connection.update', async update => {
-    if (sessao.tokenTesteMinimo !== tokenTeste) return;
-    const { connection, lastDisconnect, qr } = update || {};
-    const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || '';
-    if (qr) console.log(`🚫 V147 MINIMO: QR recebido e ignorado para ${sessao.nome}.`);
-    if (connection) console.log(`🔎 V147 MINIMO UPDATE: ${sessao.nome} connection=${connection} code=${code || 'n/a'} registered=${state.creds.registered === true}`);
-
-    if (connection === 'connecting') {
-      sessao.status = 'TESTE_MINIMO_CONECTANDO';
-      emitirStatusSessaoMulti(sessao);
-    }
-
-    if (connection === 'open') {
-      try { await saveCreds(); } catch (_) {}
-      console.log(`✅ V147 MINIMO: PAREAMENTO ACEITO para ${sessao.nome}; credenciais registradas=${state.creds.registered === true}`);
-      sessao.status = 'FINALIZANDO_PAREAMENTO';
-      sessao.erro = 'Código aceito. Transferindo para a conexão normal.';
-      sessao.pairingCode = '';
-      sessao.testeMinimoAtivo = false;
-      sessao.tokenTesteMinimo = '';
-      emitirStatusSessaoMulti(sessao);
-      setTimeout(async () => {
-        try { if (socketAtual?.end) socketAtual.end(new Error('V147 handoff para fluxo normal')); } catch (_) {}
-        if (sessao.socket === socketAtual) sessao.socket = null;
-        await dormir(800);
-        iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' }).catch(e => console.log('❌ V147 HANDOFF:', e.message));
-      }, 1500);
-    }
-
-    if (connection === 'close' && sessao.testeMinimoAtivo && sessao.tokenTesteMinimo === tokenTeste) {
-      const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-      console.log(`❌ V147 MINIMO CLOSE: ${sessao.nome} code=${code || 'n/a'} registered=${state.creds.registered === true} erro=${motivo}`);
-      sessao.socket = null;
-      sessao.conectado = false;
-      sessao.testeMinimoAtivo = false;
-      sessao.status = 'FALHA_TESTE_MINIMO';
-      sessao.erro = `Teste mínimo falhou: ${motivo}${code ? ` (código ${code})` : ''}`;
-      sessao.pairingCode = '';
-      emitirStatusSessaoMulti(sessao);
-    }
-  });
-
-  // Uma única solicitação. Sem retry e sem outro socket por trás.
-  await dormir(1800);
-  if (sessao.tokenTesteMinimo !== tokenTeste) throw new Error('Teste mínimo cancelado.');
-  if (state.creds.registered) throw new Error('A sessão já ficou registrada antes de solicitar o código.');
-  sessao.status = 'TESTE_MINIMO_GERANDO_CODIGO';
-  emitirStatusSessaoMulti(sessao);
-  console.log(`🔢 V147 MINIMO: requestPairingCode(${numero}) - tentativa única`);
-  const codigo = await comTimeoutWhatsApp(socketAtual.requestPairingCode(numero), 30000, 'V147 requestPairingCode');
-  sessao.pairingCode = String(codigo || '').trim();
-  sessao.status = 'AGUARDANDO_CODIGO';
-  sessao.erro = 'TESTE MÍNIMO ativo: digite este código no WhatsApp. Não existe QR nem reconexão automática neste teste.';
-  emitirStatusSessaoMulti(sessao);
-  console.log(`🔢 V147 MINIMO: código gerado para ${sessao.nome}: ${sessao.pairingCode}`);
-  return sessao.pairingCode;
-}
-
-
-// ========================= V148: TESTE MÍNIMO DE PAREAMENTO POR QR =========================
-// Um único socket, sem watchdog, sem retry e sem handoff até o WhatsApp aceitar o QR.
-async function iniciarPareamentoQrMinimoV148(id) {
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=? AND ativo=1', [Number(id)]);
-  if (!row) throw new Error('Sessão de WhatsApp não encontrada.');
-  const sessao = criarRuntimeSessaoWhatsApp(row);
-  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) throw new Error('Esta sessão já está registrada. Desconecte/apague a sessão antes do teste QR.');
-
-  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
-  if (sessao.socket?.end) { try { sessao.socket.end(new Error('V148: iniciando teste QR mínimo')); } catch (_) {} }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = '';
-  sessao.erro = ''; sessao.status = 'TESTE_QR_MINIMO_INICIANDO'; sessao.connectionMode = 'qr-minimo'; sessao.testeMinimoAtivo = true;
-  const tokenTeste = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-  sessao.tokenTesteMinimo = tokenTeste;
-  emitirStatusSessaoMulti(sessao);
-
-  try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {}
-  fs.mkdirSync(sessao.sessionDir, { recursive: true });
-  console.log(`🧪 V148 QR MINIMO: iniciando ${sessao.nome} em ${sessao.sessionDir}`);
-
-  const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'V148 carregar Baileys');
-  const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, 'V148 carregar pino');
-  const pino = pinoModule.default || pinoModule;
-  const makeWASocket = baileys.default || baileys.makeWASocket;
-  const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, 'V148 auth state');
-
-  let version = null;
-  if (typeof baileys.fetchLatestWaWebVersion === 'function') {
-    try {
-      const result = await comTimeoutWhatsApp(baileys.fetchLatestWaWebVersion(), 12000, 'V148 fetchLatestWaWebVersion');
-      if (Array.isArray(result?.version) && result.version.length === 3) version = result.version;
-    } catch (e) { console.log('⚠️ V148 QR MINIMO: falha ao buscar versão WA Web:', e.message); }
-  }
-  const browser = baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu','Chrome','22.04.4'];
-  console.log(`🧪 V148 QR MINIMO: versão WA Web=${version ? version.join('.') : 'padrão interno'} browser=${JSON.stringify(browser)}`);
-
-  const socketAtual = makeWASocket({
-    auth: state, logger: pino({ level: process.env.WHATSAPP_TEST_LOG_LEVEL || 'warn' }), printQRInTerminal: false,
-    ...(version ? { version } : {}), browser, markOnlineOnConnect: false, syncFullHistory: false,
-    generateHighQualityLinkPreview: false, connectTimeoutMs: 45000, defaultQueryTimeoutMs: 45000,
-    keepAliveIntervalMs: 20000, retryRequestDelayMs: 1000
-  });
-  sessao.socket = socketAtual;
-
-  socketAtual.ev.on('creds.update', async () => {
-    if (sessao.tokenTesteMinimo !== tokenTeste) return;
-    try { await saveCreds(); console.log(`🔐 V148 QR MINIMO CREDS: ${sessao.nome} registered=${state.creds.registered === true}`); }
-    catch (e) { console.log('❌ V148 QR MINIMO SAVE CREDS:', e.message); }
-  });
-
-  socketAtual.ev.on('connection.update', async update => {
-    if (sessao.tokenTesteMinimo !== tokenTeste) return;
-    const { connection, lastDisconnect, qr } = update || {};
-    const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || '';
-    if (qr) {
-      try {
-        sessao.qr = await QRCode.toDataURL(qr, { margin: 2, width: 360 });
-        sessao.status = 'AGUARDANDO_QR_MINIMO';
-        sessao.erro = 'TESTE QR MÍNIMO ativo: leia este QR uma vez. Não há watchdog nem reconexão automática.';
-        emitirStatusSessaoMulti(sessao);
-        console.log(`📷 V148 QR MINIMO: QR gerado para ${sessao.nome}`);
-      } catch (e) { console.log('❌ V148 QR MINIMO DATAURL:', e.message); }
-    }
-    if (connection) console.log(`🔎 V148 QR MINIMO UPDATE: ${sessao.nome} connection=${connection} code=${code || 'n/a'} registered=${state.creds.registered === true}`);
-    if (connection === 'open') {
-      try { await saveCreds(); } catch (_) {}
-      console.log(`✅ V148 QR MINIMO: PAREAMENTO ACEITO para ${sessao.nome}; registered=${state.creds.registered === true}`);
-      sessao.status='CONECTADO'; sessao.conectado=true; sessao.qr=null; sessao.erro=''; sessao.numero=jidToNumber(socketAtual?.user?.id || '');
-      sessao.testeMinimoAtivo=false; sessao.tokenTesteMinimo=''; emitirStatusSessaoMulti(sessao);
-    }
-    if (connection === 'close' && sessao.testeMinimoAtivo && sessao.tokenTesteMinimo === tokenTeste) {
-      const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-      console.log(`❌ V148 QR MINIMO CLOSE: ${sessao.nome} code=${code || 'n/a'} registered=${state.creds.registered === true} erro=${motivo}`);
-      sessao.socket=null; sessao.conectado=false; sessao.testeMinimoAtivo=false; sessao.status='FALHA_TESTE_QR_MINIMO';
-      sessao.erro=`Teste QR mínimo falhou: ${motivo}${code ? ` (código ${code})` : ''}`; sessao.qr=null; emitirStatusSessaoMulti(sessao);
-    }
-  });
-  return true;
 }
 
 function descricaoFuncoesSessao(sessao) {
@@ -6550,112 +6235,9 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   const socketAtual = sessao.socket;
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0; sessao.falhasReconexao = 0; sessao.proximaTentativaEm = 0;
+  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
   if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); }
   emitirStatusSessaoMulti(sessao);
-}
-
-// V142: limpeza ÚNICA das credenciais/conexões antigas do WhatsApp.
-// O marcador fica em /data para que o reset aconteça somente no primeiro boot
-// desta versão. As configurações das sessões (nome e funções) são preservadas;
-// apenas autenticação, número e arquivos de sessão são zerados para gerar QR novo.
-const WHATSAPP_RESET_V142_MARKER = path.join(DATA_DIR, '.whatsapp-reset-v142-concluido');
-
-async function limparTodasConexoesWhatsAppV142() {
-  if (fs.existsSync(WHATSAPP_RESET_V142_MARKER)) return false;
-
-  console.log('🧹 V142: iniciando limpeza total das conexões antigas do WhatsApp...');
-
-  // Fecha qualquer runtime eventualmente criado antes da limpeza.
-  for (const sessao of whatsappSessoes.values()) {
-    try { if (sessao.timer) clearTimeout(sessao.timer); } catch (_) {}
-    sessao.timer = null;
-    try { if (sessao.socket?.end) sessao.socket.end(new Error('reset V142')); } catch (_) {}
-    sessao.socket = null;
-    sessao.conectado = false;
-    sessao.qr = null;
-    sessao.status = 'DESCONECTADO';
-    sessao.erro = '';
-    sessao.qrReinicios = 0;
-    sessao.falhasReconexao = 0;
-    sessao.proximaTentativaEm = 0;
-  }
-  whatsappSocket = null;
-  conectado = false;
-  whatsappNumeroConectado = '';
-  whatsappStatus = 'DESCONECTADO';
-  qrCodeBase64 = null;
-
-  const pastas = new Set([
-    WHATSAPP_SESSION_DIR,
-    path.join(DATA_DIR, 'whatsapp-session'),
-    path.join(DATA_DIR, 'whatsapp-services-session'),
-    WHATSAPP_SUPPORT_SESSION_DIR,
-    WHATSAPP_ADS_SESSION_DIR,
-    WHATSAPP_MULTI_DIR
-  ].filter(Boolean).map(x => path.resolve(x)));
-
-  // Também remove diretórios legados de WhatsApp que possam ter sobrado em /data.
-  try {
-    for (const nome of fs.readdirSync(DATA_DIR)) {
-      if (/^whatsapp-(?:session|sessions|services-session|support-session|ads-session)(?:$|-)/i.test(nome)) {
-        pastas.add(path.resolve(path.join(DATA_DIR, nome)));
-      }
-    }
-  } catch (_) {}
-
-  for (const dir of pastas) {
-    try {
-      if (dir === path.resolve(DATA_DIR)) continue;
-      fs.rmSync(dir, { recursive: true, force: true });
-      console.log('🗑️ V142: sessão removida:', dir);
-    } catch (e) {
-      console.log('⚠️ V142: não foi possível remover', dir, e.message);
-    }
-  }
-
-  fs.mkdirSync(WHATSAPP_MULTI_DIR, { recursive: true });
-  fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
-
-  // Preserva os cadastros/funções das sessões, mas remove vínculo com números antigos.
-  await run(`UPDATE whatsapp_sessoes SET numero=NULL, atualizado_em=CURRENT_TIMESTAMP`);
-
-  // Recria as pastas canônicas vazias para cada sessão cadastrada.
-  const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
-  for (const row of rows) {
-    const canonica = pastaCanonicaSessaoWhatsApp(row.session_key);
-    fs.mkdirSync(canonica, { recursive: true });
-    if (String(row.session_dir || '') !== canonica) {
-      await run('UPDATE whatsapp_sessoes SET session_dir=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [canonica, row.id]);
-    }
-    const runtime = criarRuntimeSessaoWhatsApp({ ...row, session_dir: canonica, numero: '' });
-    runtime.numero = '';
-    runtime.status = 'DESCONECTADO';
-    runtime.erro = '';
-    runtime.qr = null;
-    runtime.conectado = false;
-    runtime.qrReinicios = 0;
-    runtime.falhasReconexao = 0;
-    runtime.proximaTentativaEm = 0;
-  }
-
-  // Grava por último: se o processo cair no meio, o próximo boot tenta limpar de novo.
-  fs.writeFileSync(WHATSAPP_RESET_V142_MARKER, new Date().toISOString(), 'utf8');
-  console.log('✅ V142: limpeza total concluída. Configurações preservadas; credenciais antigas removidas.');
-  return true;
-}
-
-async function gerarQrNovoAposResetV142() {
-  // V146: QR desativado. Após uma limpeza, as sessões aguardam código por número.
-  await carregarSessoesWhatsApp();
-  const sessoes = Array.from(whatsappSessoes.values()).filter(s => s.ativo);
-  for (const sessao of sessoes) {
-    sessao.qr = null;
-    sessao.status = 'AGUARDANDO_CODIGO';
-    sessao.erro = 'Sessão limpa. Gere um código de conexão pelo número.';
-    emitirStatusSessaoMulti(sessao);
-  }
-  console.log(`🔢 V146: ${sessoes.length} sessão(ões) aguardando conexão por código.`);
 }
 
 async function iniciarTodasSessoesWhatsAppSalvas() {
@@ -6667,17 +6249,20 @@ async function iniciarTodasSessoesWhatsAppSalvas() {
     const rowAtual = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [sessao.id]);
     if (rowAtual) criarRuntimeSessaoWhatsApp(rowAtual);
     const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    if (!registrada) {
-      sessao.status = 'AGUARDANDO_CODIGO';
-      sessao.erro = 'Sessão não registrada. Gere um código de conexão pelo número.';
-      sessao.qr = null;
+    if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) {
+      sessao.status = 'DESCONECTADO';
+      sessao.erro = 'Sessão nunca conectada ou sem dados recuperáveis. Gere QR Code para esta sessão.';
       emitirStatusSessaoMulti(sessao);
-      console.log(`🔢 V146: ${sessao.nome} aguardando código; QR automático desativado.`);
+      console.log(`⚠️ V95: ${sessao.nome} sem dados suficientes para tentativa automática em ${sessao.sessionDir}`);
       continue;
     }
     try {
-      console.log(`🔐 V146: restaurando automaticamente ${sessao.nome} — ${sessao.sessionDir}`);
-      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: 'restaurar' });
+      // V95: se o número já esteve conectado, executa automaticamente no boot
+      // o MESMO fluxo que o botão Gerar QR Code usaria quando registered=false.
+      // Isso resolve o caso observado no Render: clicar no botão conecta sozinho,
+      // portanto o usuário não deve precisar clicar após cada restart.
+      console.log(`🔐 V95: iniciando automaticamente ${sessao.nome} (${registrada ? 'restauração' : 'recuperação automática'}) — ${sessao.sessionDir}`);
+      await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' });
     } catch (e) {
       console.log(`❌ V93 START #${sessao.id}:`, e.message);
       agendarReconexaoSessaoMulti(sessao);
@@ -6695,11 +6280,12 @@ async function watchdogSessoesWhatsApp() {
     await carregarSessoesWhatsApp();
     for (const sessao of whatsappSessoes.values()) {
       if (!sessao.ativo || sessao.conectado || sessao.iniciando || sessao.timer) continue;
-      if (!sessaoWhatsAppRegistrada(sessao.sessionDir)) continue;
-      // V141: o watchdog não abre mais a conexão diretamente. Ele apenas
-      // garante que exista uma tentativa agendada, respeitando o backoff.
-      console.log(`🩺 V141 WATCHDOG: ${sessao.nome} está offline; garantindo reconexão agendada.`);
-      agendarReconexaoSessaoMulti(sessao, 'watchdog');
+      if (!sessaoWhatsAppPodeTentarAutomatico(sessao)) continue;
+      const registrada = sessaoWhatsAppRegistrada(sessao.sessionDir);
+      console.log(`🩺 V95 WATCHDOG: ${sessao.nome} está offline; tentando ${registrada ? 'restaurar' : 'recuperar'} automaticamente.`);
+      try { await iniciarSessaoWhatsAppMulti(sessao.id, { modo: registrada ? 'restaurar' : 'qr' }); }
+      catch (e) { console.log(`❌ V95 WATCHDOG #${sessao.id}:`, e.message); }
+      await new Promise(r => setTimeout(r, 1000));
     }
   } catch (e) {
     console.log('❌ V93 WATCHDOG:', e.message);
@@ -6749,7 +6335,7 @@ function agendarReconexaoExtra(key) {
   sessao.timer = setTimeout(() => {
     sessao.timer = null;
     const possuiSessao = sessaoWhatsAppRegistrada(sessao.sessionDir);
-    if (possuiSessao) iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message)); else { sessao.status='AGUARDANDO_CODIGO'; sessao.qr=null; emitirStatusExtra(sessao); }
+    iniciarWhatsAppExtra(key, { modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ RECONEXÃO ${key}:`, e.message));
   }, 5000);
 }
 async function processarMensagemSuporte({ numero, nome, texto, jid }) {
@@ -6763,14 +6349,13 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   const sessao = whatsappExtra[key];
   if (!sessao || !sessao.enabled || sessao.iniciando) return;
   sessao.iniciando = true; sessao.status = 'INICIANDO'; sessao.erro = '';
-  sessao.connectionMode = 'restaurar';
+  sessao.connectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
   sessao.pairingNumero = '';
   sessao.pairingCode = '';
-  sessao.qr = null;
+  if (sessao.connectionMode === 'qr') sessao.qr = null;
   emitirStatusExtra(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
-    
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
     const pino = pinoModule.default || pinoModule;
@@ -6782,14 +6367,15 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu(`CentralUnlocker ${sessao.label}`) : [`CentralUnlocker ${sessao.label}`, 'Chrome', '1.0.0'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', async () => {
-      try { await saveCreds(); sessao.pareamentoEmAndamento = false; }
-      catch (e) { console.log(`❌ V144 SAVE CREDS ${key}:`, e.message); }
-    });
+    socketAtual.ev.on('creds.update', saveCreds);
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
-      if (qr) { sessao.qr = null; console.log(`🚫 V146: QR extra ignorado para ${sessao.label}.`); }
-      if (connection === 'connecting') { sessao.status = 'CONECTANDO'; emitirStatusExtra(sessao); }
+      if (qr) {
+        sessao.qr = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
+        sessao.conectado = false; sessao.status = 'AGUARDANDO_QR'; sessao.erro = ''; emitirStatusExtra(sessao);
+        console.log(`📷 QR Code gerado para ${sessao.label}`);
+      }
+      if (connection === 'connecting') { sessao.status = sessao.qr ? 'AGUARDANDO_QR' : 'CONECTANDO'; emitirStatusExtra(sessao); }
       if (connection === 'open') { if (sessao.socket !== socketAtual) return; sessao.qrReinicios = 0; sessao.conectado = true; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.status = 'CONECTADO'; sessao.erro = ''; sessao.numero = jidToNumber(socketAtual?.user?.id || ''); emitirStatusExtra(sessao); notificarPainel('whatsapp', `✅ ${sessao.label} conectado`, sessao.numero || 'Sessão ativa'); }
       if (connection === 'close') {
         if (sessao.socket !== socketAtual) return;
@@ -6799,18 +6385,20 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         const loggedOut = code === baileys.DisconnectReason?.loggedOut;
         const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
         const motivo = lastDisconnect?.error?.message || `código ${code || 'desconhecido'}`;
-        const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(sessao.sessionDir);
+        const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
         sessao.qr = null;
-        console.log(`🔎 V144 CLOSE ${sessao.label}: code=${code || 'n/a'} registered=${registradoAgora} modo=${sessao.connectionMode} erro=${motivo}`);
-        if (restartRequired && !loggedOut && registradoAgora) {
-          sessao.status = 'FINALIZANDO_PAREAMENTO'; sessao.erro = 'Código aceito. Finalizando vinculação.'; emitirStatusExtra(sessao);
-          setTimeout(() => iniciarWhatsAppExtra(key, { modo: 'restaurar' }).catch(e => console.log(`❌ V144 RESTAURAR ${key}:`, e.message)), 2500);
+        if (restartRequired || podeReiniciarQr) {
+          sessao.qrReinicios += 1;
+          sessao.status = 'REGERANDO_QR';
+          sessao.erro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
+          emitirStatusExtra(sessao);
+          setTimeout(() => iniciarWhatsAppExtra(key, { modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log(`❌ NOVO QR ${key}:`, e.message)), 1500);
           return;
         }
-        sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
+        sessao.status = loggedOut ? 'SESSAO_EXPIRADA' : (sessao.connectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
         sessao.erro = motivo;
         emitirStatusExtra(sessao);
-        if (!loggedOut && registradoAgora && sessao.connectionMode === 'restaurar') agendarReconexaoExtra(key);
+        if (!loggedOut && state.creds.registered && sessao.connectionMode === 'restaurar') agendarReconexaoExtra(key);
       }
     });
     if (key === 'support') socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -6835,7 +6423,7 @@ async function desconectarWhatsAppExtra(key) {
   const sessao = whatsappExtra[key]; if (!sessao) return;
   try { if (sessao.socket) await sessao.socket.logout(); } catch (_) {}
   if (sessao.timer) clearTimeout(sessao.timer);
-  sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'codigo'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
+  sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'qr'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
   try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); emitirStatusExtra(sessao);
 }
 async function funcoesSessaoServicos() {
@@ -6975,9 +6563,8 @@ function agendarReconexaoWhatsApp() {
   whatsappReconectarTimer = setTimeout(() => {
     whatsappReconectarTimer = null;
     const possuiSessao = sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
-    if (!possuiSessao) { whatsappStatus='AGUARDANDO_CODIGO'; whatsappUltimoErro='Sessão não registrada. Use conexão por código no painel.'; return; }
-    console.log('🔄 Reconectando automaticamente com a sessão salva.');
-    iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
+    console.log(possuiSessao ? '🔄 Reconectando automaticamente com a sessão salva.' : '📷 Sessão não registrada; aguardando novo QR Code.');
+    iniciarWhatsAppQrCode({ modo: possuiSessao ? 'restaurar' : 'qr' }).catch(e => console.log('❌ RECONEXÃO WHATSAPP:', e.message));
   }, 5000);
 }
 
@@ -6993,10 +6580,10 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
   }
 
   whatsappIniciando = true;
-  whatsappConnectionMode = 'restaurar';
+  whatsappConnectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
   whatsappPairingNumero = '';
   whatsappPairingCode = '';
-  qrCodeBase64 = null;
+  if (whatsappConnectionMode === 'qr') qrCodeBase64 = null;
   whatsappInicioEm = Date.now();
   whatsappUltimoErro = '';
   whatsappStatus = 'INICIANDO';
@@ -7008,7 +6595,6 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
     fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
     console.log('✅ Pasta da sessão acessível para leitura e gravação');
-    
 
     console.log('📦 Carregando Baileys...');
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
@@ -7048,16 +6634,20 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     whatsappSocket = socketAtual;
     console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
-    socketAtual.ev.on('creds.update', async () => {
-      try { await saveCreds(); console.log(`🔐 V144: credenciais do Bot de Serviços atualizadas (registered=${state.creds.registered === true}).`); }
-      catch (e) { console.log('❌ V144 SAVE CREDS WHATSAPP:', e.message); }
-    });
+    socketAtual.ev.on('creds.update', saveCreds);
     socketAtual.ev.on('connection.update', async update => {
       try {
         const { connection, lastDisconnect, qr } = update || {};
-        if (qr) { qrCodeBase64 = null; console.log('🚫 V146: QR legado ignorado; conexão somente por código no painel multi-sessão.'); }
+        if (qr) {
+          qrCodeBase64 = await QRCode.toDataURL(qr, { width: 360, margin: 2, errorCorrectionLevel: 'M' });
+          conectado = false;
+          whatsappStatus = 'AGUARDANDO_QR';
+          whatsappUltimoErro = '';
+          console.log('📷 QR Code do WhatsApp gerado');
+          io.emit('whatsapp-status', { status: whatsappStatus });
+        }
         if (connection === 'connecting') {
-          whatsappStatus = 'CONECTANDO';
+          whatsappStatus = qrCodeBase64 ? 'AGUARDANDO_QR' : 'CONECTANDO';
           io.emit('whatsapp-status', { status: whatsappStatus });
         }
         if (connection === 'open') {
@@ -7082,20 +6672,21 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           const motivo = lastDisconnect?.error?.message || `código ${statusCode || 'desconhecido'}`;
           const loggedOut = statusCode === baileys.DisconnectReason?.loggedOut;
           const restartRequired = statusCode === baileys.DisconnectReason?.restartRequired || statusCode === 515;
-          const registradoAgora = state.creds.registered === true || sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR);
+          const podeReiniciarQr = whatsappConnectionMode === 'qr' && !loggedOut && whatsappQrReinicios < WHATSAPP_QR_MAX_REINICIOS;
           qrCodeBase64 = null;
-          console.log(`🔎 V144 CLOSE Bot de Serviços: code=${statusCode || 'n/a'} registered=${registradoAgora} modo=${whatsappConnectionMode} erro=${motivo}`);
-          if (restartRequired && !loggedOut && registradoAgora) {
-            whatsappStatus = 'FINALIZANDO_PAREAMENTO';
-            whatsappUltimoErro = 'QR lido. Finalizando vinculação sem gerar outro QR Code.';
+          console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
+          if (restartRequired || podeReiniciarQr) {
+            whatsappQrReinicios += 1;
+            whatsappStatus = 'REGERANDO_QR';
+            whatsappUltimoErro = restartRequired ? 'Reiniciando conexão para concluir o QR Code.' : motivo;
             io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-            setTimeout(() => iniciarWhatsAppQrCode({ modo: 'restaurar' }).catch(e => console.log('❌ V144 RESTAURAR PÓS-QR:', e.message)), 2500);
+            setTimeout(() => iniciarWhatsAppQrCode({ modo: state.creds.registered ? 'restaurar' : 'qr' }).catch(e => console.log('❌ NOVO QR WHATSAPP:', e.message)), 1500);
             return;
           }
-          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : 'DESCONECTADO';
+          whatsappStatus = loggedOut ? 'SESSAO_EXPIRADA' : (whatsappConnectionMode === 'qr' ? 'FALHA_QR' : 'DESCONECTADO');
           whatsappUltimoErro = motivo;
           io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
-          if (!loggedOut && registradoAgora && whatsappConnectionMode === 'restaurar') agendarReconexaoWhatsApp();
+          if (!loggedOut && state.creds.registered && whatsappConnectionMode === 'restaurar') agendarReconexaoWhatsApp();
         }
       } catch (eventError) {
         whatsappUltimoErro = eventError.message;
@@ -7154,7 +6745,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     console.log('❌ INICIAR WHATSAPP QR CODE:', e.stack || e.message);
     io.emit('whatsapp-status', { status: whatsappStatus, erro: whatsappUltimoErro });
     // Se há credenciais persistidas, uma falha transitória do Render/Baileys não
-    // deve usar o código pelo painel. Sessões registradas são restauradas automaticamente.
+    // deve obrigar o usuário a clicar em Gerar QR Code. Tenta restaurar sozinho.
     if (whatsappConnectionMode === 'restaurar' && sessaoWhatsAppRegistrada(WHATSAPP_SESSION_DIR)) agendarReconexaoWhatsApp();
   } finally {
     whatsappIniciando = false;
@@ -7169,7 +6760,7 @@ async function desconectarWhatsApp() {
   qrCodeBase64 = null;
   whatsappPairingCode = '';
   whatsappPairingNumero = '';
-  whatsappConnectionMode = 'codigo';
+  whatsappConnectionMode = 'qr';
   whatsappNumeroConectado = '';
   whatsappStatus = 'DESCONECTADO';
   whatsappUltimoErro = '';
@@ -8761,22 +8352,22 @@ app.get('/admin/whatsapp', async (req, res) => {
   const rows = await all('SELECT * FROM whatsapp_sessoes ORDER BY id ASC');
   const cards = rows.map(row => {
     const sessao = criarRuntimeSessaoWhatsApp(row);
-    const status = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_CODIGO' ? '🟡 AGUARDANDO CÓDIGO' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
+    const status = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : sessao.status === 'REGERANDO_QR' ? '🟠 GERANDO NOVO QR CODE' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
     const funcoes = [
       sessao.funcaoBot ? '<span class="pill">🤖 Bot de Serviços</span>' : '',
       sessao.funcaoGrupos ? '<span class="pill">📢 Anúncios em Grupos</span>' : '',
       sessao.funcaoStatus ? '<span class="pill">🟢 Anúncios no Status</span>' : ''
     ].filter(Boolean).join(' ');
-    return `<div class="card"><h2>📱 ${safeHtml(row.nome)}</h2><h3>${status}</h3><p><b>Número:</b> ${sessao.numero ? '+' + safeHtml(sessao.numero) : 'Ainda não conectado'}</p><p>${funcoes || '<span class="muted">Nenhuma função marcada</span>'}</p>${sessao.erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>` : ''}<div class="actions"><a class="btn green" href="/admin/whatsapp/${row.id}/editar">⚙️ Editar / Conectar</a><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar as credenciais desta sessão?')">🔌 Desconectar</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/excluir"><button class="btn red" onclick="return confirm('Excluir esta sessão definitivamente?')">🗑️ Excluir</button></form></div></div>`;
+    return `<div class="card"><h2>📱 ${safeHtml(row.nome)}</h2><h3>${status}</h3><p><b>Número:</b> ${sessao.numero ? '+' + safeHtml(sessao.numero) : 'Ainda não conectado'}</p><p>${funcoes || '<span class="muted">Nenhuma função marcada</span>'}</p>${sessao.erro ? `<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>` : ''}<div class="actions"><a class="btn green" href="/admin/whatsapp/${row.id}/editar">⚙️ Editar / Conectar</a><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar o QR desta sessão?')">🔌 Desconectar</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${row.id}/excluir"><button class="btn red" onclick="return confirm('Excluir esta sessão definitivamente?')">🗑️ Excluir</button></form></div></div>`;
   }).join('') || '<div class="card"><p class="muted">Nenhum WhatsApp cadastrado. Clique em Adicionar WhatsApp.</p></div>';
 
-  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO','TESTE_MINIMO_INICIANDO','TESTE_MINIMO_CONECTANDO','TESTE_MINIMO_GERANDO_CODIGO'].includes(String(x.status || '')));
+  const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(x.status || '')));
   const autoRefresh = emConexao ? `<script>setTimeout(()=>{if(!document.hidden)location.reload()},8000)</script>` : '';
   res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Um mesmo número pode ter uma, duas ou as três funções. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
 });
 
 app.get('/admin/whatsapp/adicionar', async (req, res) => {
-  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Você pode marcar uma, duas ou as três opções. Depois de criar, informe o número e gere o código de conexão.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
+  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Você pode marcar uma, duas ou as três opções. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
 });
 
 app.post('/admin/whatsapp/adicionar', async (req, res) => {
@@ -8818,11 +8409,9 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
   const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
   if (!row) return res.status(404).send(page('Não encontrado', '<h1>❌ Sessão não encontrada</h1><a class="btn" href="/admin/whatsapp">Voltar</a>'));
   const sessao = criarRuntimeSessaoWhatsApp(row);
-  const label = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_CODIGO' ? '🟡 AGUARDANDO CÓDIGO' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
-  const qrHtml = ''; // V146: QR removido do painel
-  const codigoHtml = sessao.pairingCode ? `<div style="text-align:center;margin:14px 0;padding:18px;border:1px solid rgba(34,197,94,.35);border-radius:16px"><div class="muted">Código para +${safeHtml(sessao.pairingNumero || '')}</div><div style="font-size:34px;font-weight:900;letter-spacing:6px;margin:10px 0;color:#22c55e">${safeHtml(String(sessao.pairingCode).replace(/(.{4})/g,'$1 ').trim())}</div><p class="mini-help">No celular: WhatsApp → Aparelhos conectados → Conectar um aparelho → Conectar com número de telefone.</p></div>` : '';
-  const qrMinimoHtml = sessao.qr ? `<div style="text-align:center;margin:14px 0;padding:18px;border:1px solid rgba(34,197,94,.35);border-radius:16px"><div class="muted">Teste mínimo por QR Code</div><img src="${safeHtml(sessao.qr)}" alt="QR Code WhatsApp" style="max-width:360px;width:100%;background:#fff;padding:10px;border-radius:12px;margin-top:10px"><p class="mini-help">Leia este QR uma única vez no WhatsApp. O teste não usa watchdog nem reconexão automática.</p></div>` : '';
-  const refresh = ['INICIANDO','CONECTANDO','GERANDO_CODIGO','AGUARDANDO_CODIGO','FINALIZANDO_PAREAMENTO'].includes(String(sessao.status || '')) ? `<script>setTimeout(()=>{if(!document.hidden&&!document.querySelector('input:focus,textarea:focus'))location.reload()},7000)</script>` : '';
+  const label = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
+  const qrHtml = sessao.qr ? `<div style="text-align:center"><img src="${sessao.qr}" style="width:min(330px,100%);background:#fff;padding:10px;border-radius:16px"><p>WhatsApp → Aparelhos conectados → Conectar aparelho.</p></div>` : '';
+  const refresh = ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(sessao.status || '')) ? `<script>setTimeout(()=>{if(!document.hidden&&!document.querySelector('input:focus,textarea:focus'))location.reload()},7000)</script>` : '';
 
   let gruposHtml = '';
   if (sessao.funcaoBot) {
@@ -8832,7 +8421,7 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${codigoHtml}${qrMinimoHtml}${sessaoWhatsAppRegistrada(sessao.sessionDir)?`<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">🔄 Reconectar sessão</button></form>`:`<form method="post" action="/admin/whatsapp/${id}/conectar-codigo" style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.15)"><label>Conectar por número</label><input name="numero" inputmode="numeric" pattern="[0-9]{10,15}" placeholder="5575981635708" value="${safeHtml(sessao.pairingNumero || '')}" required><p class="mini-help">Informe DDI + DDD + número, somente números. O QR Code está desativado.</p><button class="btn green">🔢 Gerar código de conexão</button></form><form method="post" action="/admin/whatsapp/${id}/teste-codigo-minimo" style="margin-top:10px"><input type="hidden" name="numero" value="${safeHtml(sessao.pairingNumero || '')}"><button class="btn" style="border:1px solid #f59e0b;color:#fbbf24" onclick="const n=prompt('Número com DDI + DDD + número (somente números):', '${safeHtml(sessao.pairingNumero || '')}'); if(!n) return false; this.form.numero.value=n.replace(/\D/g,'');">🧪 TESTE MÍNIMO POR CÓDIGO</button><p class="mini-help">Teste isolado por código: um único socket, sem QR, sem watchdog e sem tentativa automática.</p></form><form method="post" action="/admin/whatsapp/${id}/teste-qr-minimo" style="margin-top:10px"><button class="btn" style="border:1px solid #38bdf8;color:#7dd3fc">📷 TESTE MÍNIMO POR QR CODE</button><p class="mini-help">V148: um único socket, sem watchdog e sem reconexão automática.</p></form>`}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar gerar outro código.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppRegistrada(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
@@ -8858,75 +8447,8 @@ app.post('/admin/whatsapp/:id/conectar', async (req, res) => {
   if (sessao.socket?.end) { try { sessao.socket.end(new Error('reinício manual')); } catch (_) {} }
   sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.erro = ''; sessao.status = 'INICIANDO';
   const possui = sessaoWhatsAppRegistrada(sessao.sessionDir);
-  if (!possui) {
-    sessao.status = 'AGUARDANDO_CODIGO';
-    sessao.erro = 'QR Code desativado. Informe o número e gere o código de conexão.';
-    emitirStatusSessaoMulti(sessao);
-    return res.redirect(`/admin/whatsapp/${id}/editar`);
-  }
   await dormir(400);
-  await iniciarSessaoWhatsAppMulti(id, { modo: 'restaurar' });
-  res.redirect(`/admin/whatsapp/${id}/editar`);
-});
-
-app.post('/admin/whatsapp/:id/conectar-codigo', async (req, res) => {
-  const id = Number(req.params.id);
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
-  if (!row) return res.redirect('/admin/whatsapp');
-  const sessao = criarRuntimeSessaoWhatsApp(row);
-  const numero = normalizarNumeroWhatsApp(req.body.numero || '');
-  if (!/^\d{10,15}$/.test(numero)) {
-    sessao.erro = 'Número inválido. Digite DDI + DDD + número, somente números.';
-    sessao.status = 'ERRO_NUMERO';
-    return res.redirect(`/admin/whatsapp/${id}/editar`);
-  }
-  if (sessaoWhatsAppRegistrada(sessao.sessionDir)) {
-    sessao.erro = 'Esta sessão já possui credenciais. Desconecte/apague a sessão antes de gerar um novo código.';
-    return res.redirect(`/admin/whatsapp/${id}/editar`);
-  }
-  if (sessao.timer) { clearTimeout(sessao.timer); sessao.timer = null; }
-  if (sessao.socket?.end) { try { sessao.socket.end(new Error('novo pareamento por código')); } catch (_) {} }
-  sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = numero; sessao.erro = ''; sessao.status = 'INICIANDO';
-  await dormir(400);
-  iniciarSessaoWhatsAppMulti(id, { modo: 'codigo', numero }).catch(e => {
-    sessao.status = 'ERRO'; sessao.erro = e.message || String(e); emitirStatusSessaoMulti(sessao);
-    console.log(`❌ V145 CÓDIGO #${id}:`, e.stack || e.message);
-  });
-  res.redirect(`/admin/whatsapp/${id}/editar`);
-});
-
-
-app.post('/admin/whatsapp/:id/teste-codigo-minimo', async (req, res) => {
-  const id = Number(req.params.id);
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
-  if (!row) return res.redirect('/admin/whatsapp');
-  const sessao = criarRuntimeSessaoWhatsApp(row);
-  const numero = normalizarNumeroWhatsApp(req.body.numero || '');
-  if (!/^\d{10,15}$/.test(numero)) {
-    sessao.erro = 'Número inválido. Digite DDI + DDD + número, somente números.';
-    sessao.status = 'ERRO_NUMERO';
-    return res.redirect(`/admin/whatsapp/${id}/editar`);
-  }
-  iniciarPareamentoCodigoMinimoV147(id, numero).catch(e => {
-    sessao.status = 'FALHA_TESTE_MINIMO';
-    sessao.erro = `Teste mínimo: ${e.message || e}`;
-    sessao.pairingCode = '';
-    sessao.testeMinimoAtivo = false;
-    emitirStatusSessaoMulti(sessao);
-    console.log(`❌ V147 MINIMO ROUTE #${id}:`, e.stack || e.message);
-  });
-  res.redirect(`/admin/whatsapp/${id}/editar`);
-});
-
-app.post('/admin/whatsapp/:id/teste-qr-minimo', async (req, res) => {
-  const id = Number(req.params.id);
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
-  if (!row) return res.redirect('/admin/whatsapp');
-  const sessao = criarRuntimeSessaoWhatsApp(row);
-  iniciarPareamentoQrMinimoV148(id).catch(e => {
-    sessao.status='FALHA_TESTE_QR_MINIMO'; sessao.erro=`Teste QR mínimo: ${e.message || e}`; sessao.qr=null; sessao.testeMinimoAtivo=false;
-    emitirStatusSessaoMulti(sessao); console.log(`❌ V148 QR MINIMO ROUTE #${id}:`, e.stack || e.message);
-  });
+  await iniciarSessaoWhatsAppMulti(id, { modo: possui ? 'restaurar' : 'qr' });
   res.redirect(`/admin/whatsapp/${id}/editar`);
 });
 
@@ -9109,15 +8631,12 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
   .then(async () => {
-    // Aguarda o servidor/banco estabilizarem. Na V142, o primeiro boot faz uma
-    // limpeza única de TODAS as credenciais antigas e pede um QR realmente novo.
+    // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
     await new Promise(r => setTimeout(r, 2500));
-    const resetExecutado = await limparTodasConexoesWhatsAppV142();
-    if (resetExecutado) await gerarQrNovoAposResetV142();
-    else await iniciarTodasSessoesWhatsAppSalvas();
+    await iniciarTodasSessoesWhatsAppSalvas();
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
-  .catch(e => console.log('❌ V142 START:', e.message));
+  .catch(e => console.log('❌ V93 START:', e.message));
 
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
