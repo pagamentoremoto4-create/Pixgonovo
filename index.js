@@ -3407,27 +3407,26 @@ function numeroParticipanteGrupo(participante) {
 
 async function verificarAtivacaoAutomaticaPorGrupo(numero, sessaoId) {
   const sessao = whatsappSessoes.get(Number(sessaoId));
-  if (!sessao?.funcaoBot || !sessao?.autoAtivarClientesGrupo || !sessao?.socket || !sessao?.conectado) {
+  // V157: todo cliente NOVO pode ser liberado se estiver em QUALQUER grupo
+  // do qual a mesma sessão do Bot de Serviços também participa.
+  if (!sessao?.funcaoBot || !sessao?.socket || !sessao?.conectado) {
     return { autorizado: false };
   }
-  const permitidos = gruposAtivacaoDaSessao(sessao);
-  if (!permitidos.length) return { autorizado: false };
   try {
     const todos = await comTimeoutWhatsApp(
       sessao.socket.groupFetchAllParticipating(),
       15000,
-      `verificar grupos para ativação automática (${sessao.nome})`
+      `verificar grupos compartilhados para ativação automática (${sessao.nome})`
     );
     const alvo = normalizarNumeroWhatsApp(numero);
-    for (const id of permitidos) {
-      const grupo = todos?.[id];
-      if (!grupo) continue;
+    for (const grupo of Object.values(todos || {})) {
+      if (!grupo?.id || !String(grupo.id).endsWith('@g.us')) continue;
       const participantes = Array.isArray(grupo.participants) ? grupo.participants : [];
       const encontrado = participantes.some(p => numeroParticipanteGrupo(p) === alvo);
-      if (encontrado) return { autorizado: true, grupoId: id, grupoNome: grupo.subject || id };
+      if (encontrado) return { autorizado: true, grupoId: grupo.id, grupoNome: grupo.subject || grupo.id };
     }
   } catch (e) {
-    console.log('⚠️ V117 ATIVAÇÃO POR GRUPO:', e.message);
+    console.log('⚠️ V157 ATIVAÇÃO POR GRUPO:', e.message);
   }
   return { autorizado: false };
 }
@@ -3471,8 +3470,8 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   let cliente = await get('SELECT * FROM revendas WHERE id=?', [cadastroWhatsApp.cliente.id]) || cadastroWhatsApp.cliente;
   let autoAtivadoPorGrupo = false;
 
-  // V117: cliente NOVO pode ser liberado automaticamente quando participa de
-  // um dos grupos autorizados da mesma sessão do Bot de Serviços. Uma revenda
+  // V157: cliente NOVO pode ser liberado automaticamente quando participa de
+  // qualquer grupo compartilhado com a mesma sessão do Bot de Serviços. Uma revenda
   // já existente e desativada manualmente NÃO é reativada por esta regra.
   if (novo && !Number(cliente?.bot_ativo || 0) && sessaoId) {
     const liberacao = await verificarAtivacaoAutomaticaPorGrupo(numeroNorm, sessaoId);
@@ -3481,7 +3480,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
         [liberacao.grupoId || '', liberacao.grupoNome || '', cliente.id]);
       cliente = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
       autoAtivadoPorGrupo = true;
-      console.log(`✅ V117 CLIENTE ATIVADO AUTOMATICAMENTE POR GRUPO: +${numeroNorm} — ${liberacao.grupoNome || liberacao.grupoId}`);
+      console.log(`✅ V157 CLIENTE ATIVADO AUTOMATICAMENTE POR GRUPO: +${numeroNorm} — ${liberacao.grupoNome || liberacao.grupoId}`);
       notificarPainel('cliente', '✅ Cliente ativado automaticamente', `${cliente.nome} — ${liberacao.grupoNome || liberacao.grupoId}`);
       await avisarAdminTelegram(`✅ Cliente ativado automaticamente por grupo\n\nCliente: ${cliente.nome}\nWhatsApp: +${numeroNorm}\nGrupo: ${liberacao.grupoNome || liberacao.grupoId}`);
     }
@@ -3498,6 +3497,22 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   // Todo cliente novo ou ainda não liberado pelo administrador permanece em silêncio.
   if (!Number(cliente?.bot_ativo || 0)) {
     if (novo) console.log('🔇 CLIENTE CADASTRADO COM BOT DESATIVADO:', numeroNorm);
+    return;
+  }
+
+  // V157: se o cliente ativo ficou 12 horas ou mais sem falar com o bot,
+  // qualquer nova mensagem reabre o atendimento diretamente no menu principal.
+  // O horário anterior é lido antes de registrar a interação atual.
+  const ultimoAcessoAnterior = cliente?.ultimo_acesso ? Date.parse(String(cliente.ultimo_acesso).replace(' ', 'T') + (String(cliente.ultimo_acesso).includes('Z') ? '' : 'Z')) : NaN;
+  const inativoHa12Horas = Number.isFinite(ultimoAcessoAnterior) && (Date.now() - ultimoAcessoAnterior >= 12 * 60 * 60 * 1000);
+  await run('UPDATE revendas SET ultimo_acesso=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
+  cliente = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
+  if (inativoHa12Horas) {
+    encerrarSessaoIAWhatsApp(numeroNorm);
+    await apagarSessaoPedido(from);
+    await salvarSessaoPedido(from, { etapa: 'menu' });
+    console.log(`🕛 V157 MENU 12H: +${numeroNorm} voltou após 12h ou mais sem interação.`);
+    await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
 
@@ -7690,6 +7705,15 @@ app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY nome COLLATE NOCASE ASC, id DESC');
   const ativos = rows.filter(r => r.status === 'ATIVA').length;
   const bloqueados = rows.filter(r => r.status === 'BLOQUEADA').length;
+  // V157: carrega de uma vez os serviços relevantes para exibir dentro do cadastro.
+  const pedidosClientes = await all(`SELECT id, revenda_id, servico_nome, imei, entrada_valor, status, criado_em
+    FROM pedidos WHERE status IN ('PENDENTE','EM PROCESSO','CANCELADO') ORDER BY id DESC`);
+  const pedidosPorCliente = new Map();
+  for (const p of pedidosClientes) {
+    const chave = Number(p.revenda_id);
+    if (!pedidosPorCliente.has(chave)) pedidosPorCliente.set(chave, []);
+    pedidosPorCliente.get(chave).push(p);
+  }
 
   let lista = '';
   for (const r of rows) {
@@ -7700,6 +7724,13 @@ app.get('/admin/revendas', async (req, res) => {
     const vinculo = somenteWhatsApp
       ? `<a class="cli-action" href="/admin/revenda/${r.id}/vincular-telegram"><span>🔗</span><b>Vincular Telegram</b><small>Associar conta antiga</small></a>`
       : '';
+    const pedidosCliente = pedidosPorCliente.get(Number(r.id)) || [];
+    const blocoStatusCliente = (status, titulo, classe) => {
+      const itens = pedidosCliente.filter(p => String(p.status || '').toUpperCase() === status);
+      const linhas = itens.length ? itens.map(p => `<div class="cli-service-row"><span><b>#${p.id} ${safeHtml(p.servico_nome || 'Serviço')}</b><small>${safeHtml(p.imei || p.entrada_valor || '-')} · ${dateBR(p.criado_em)}</small></span><em class="${classe}">${safeHtml(status)}</em></div>`).join('') : '<div class="cli-service-empty">Nenhum serviço neste status.</div>';
+      return `<div class="cli-service-box"><h4>${titulo} <b>${itens.length}</b></h4>${linhas}</div>`;
+    };
+    const servicosClienteHtml = `<div class="cli-services"><h3>📦 Serviços do cliente</h3><div class="cli-services-grid">${blocoStatusCliente('PENDENTE','⏳ Pendentes','st-pendente')}${blocoStatusCliente('EM PROCESSO','🔄 Em processo','st-processo')}${blocoStatusCliente('CANCELADO','❌ Cancelados','st-cancelado')}</div></div>`;
 
     lista += `<div class="cli-item" data-search="${safeHtml(identificador)}">
       <button type="button" class="cli-head" onclick="toggleCliente(${r.id})" aria-expanded="false">
@@ -7719,6 +7750,7 @@ app.get('/admin/revendas', async (req, res) => {
           <form method="post" action="/admin/revenda/${r.id}/status" class="cli-form"><input type="hidden" name="status" value="${r.status === 'BLOQUEADA' ? 'ATIVA' : 'BLOQUEADA'}"><button class="cli-action cli-button" type="submit"><span>${r.status === 'BLOQUEADA' ? '✅' : '⛔'}</span><b>${r.status === 'BLOQUEADA' ? 'Ativar Cliente' : 'Bloquear Cliente'}</b><small>${r.status === 'BLOQUEADA' ? 'Liberar acesso' : 'Suspender acesso'}</small></button></form>
           <form method="post" action="/admin/revenda/${r.id}/remover" class="cli-form"><button class="cli-action cli-button danger" type="submit" onclick="return confirm('Remover cliente? O histórico será mantido no banco.')"><span>🗑️</span><b>Remover Cliente</b><small>Manter histórico no banco</small></button></form>
         </div>
+        ${servicosClienteHtml}
       </div>
     </div>`;
   }
@@ -7733,7 +7765,8 @@ app.get('/admin/revendas', async (req, res) => {
     .cli-avatar{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:rgba(59,130,246,.12);font-size:19px}.cli-main{min-width:0}.cli-main b{display:block;font-size:15px}.cli-main small{display:block;color:#94a3b8;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cli-badges{display:flex;align-items:flex-end;flex-direction:column;gap:4px}.cli-badges em{font-style:normal;font-size:10px;font-weight:800;padding:3px 7px;border-radius:999px}.cli-badges em.ok{color:#22c55e;background:rgba(34,197,94,.12)}.cli-badges em.off{color:#f97316;background:rgba(249,115,22,.12)}.cli-badges strong{font-size:12px}.cli-arrow{font-size:22px;transition:.2s}.cli-item.open .cli-arrow{transform:rotate(180deg)}
     .cli-options{display:none;border-top:1px solid rgba(148,163,184,.14);padding:12px}.cli-item.open .cli-options{display:block}.cli-actions-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.cli-action{min-height:86px;padding:12px;border:1px solid rgba(148,163,184,.16);border-radius:12px;text-decoration:none;color:inherit;background:rgba(30,41,59,.38);display:flex;flex-direction:column;justify-content:center}.cli-action:hover{border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.08)}.cli-action span{font-size:19px;margin-bottom:5px}.cli-action b{font-size:13px}.cli-action small{font-size:11px;color:#94a3b8;margin-top:3px}.cli-form{margin:0}.cli-button{width:100%;text-align:left;cursor:pointer;font-family:inherit}.cli-action.danger{border-color:rgba(239,68,68,.22)}
     .cli-empty{display:none;padding:20px;text-align:center;color:#94a3b8}.cadastro-card{max-width:950px}
-    @media(max-width:760px){.cli-top{grid-template-columns:1fr 1fr}.cli-head{grid-template-columns:38px minmax(0,1fr) 24px}.cli-badges{display:none}.cli-actions-grid{grid-template-columns:1fr 1fr}.cli-action{min-height:78px}.cli-main small{font-size:11px}}
+    .cli-services{margin-top:14px;padding-top:14px;border-top:1px solid rgba(148,163,184,.14)}.cli-services h3{margin:0 0 10px;font-size:15px}.cli-services-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.cli-service-box{border:1px solid rgba(148,163,184,.14);border-radius:12px;overflow:hidden;background:rgba(15,23,42,.28)}.cli-service-box h4{margin:0;padding:10px 11px;font-size:12px;border-bottom:1px solid rgba(148,163,184,.12)}.cli-service-box h4 b{float:right}.cli-service-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-bottom:1px solid rgba(148,163,184,.08)}.cli-service-row:last-child{border-bottom:0}.cli-service-row span{min-width:0}.cli-service-row span b{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cli-service-row small{display:block;color:#94a3b8;font-size:10px;margin-top:3px}.cli-service-row em{font-style:normal;font-size:9px;font-weight:800;padding:3px 6px;border-radius:999px;white-space:nowrap}.st-pendente{color:#f59e0b;background:rgba(245,158,11,.12)}.st-processo{color:#38bdf8;background:rgba(56,189,248,.12)}.st-cancelado{color:#ef4444;background:rgba(239,68,68,.12)}.cli-service-empty{padding:12px 10px;color:#64748b;font-size:11px}
+    @media(max-width:760px){.cli-services-grid{grid-template-columns:1fr}.cli-top{grid-template-columns:1fr 1fr}.cli-head{grid-template-columns:38px minmax(0,1fr) 24px}.cli-badges{display:none}.cli-actions-grid{grid-template-columns:1fr 1fr}.cli-action{min-height:78px}.cli-main small{font-size:11px}}
     @media(max-width:430px){.cli-top{grid-template-columns:1fr}.cli-actions-grid{grid-template-columns:1fr 1fr}}
   </style>
   <h1>👥 Clientes</h1>
