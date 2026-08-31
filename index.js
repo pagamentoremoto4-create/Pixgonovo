@@ -8078,7 +8078,131 @@ app.get('/admin/revenda/:id/conta', async (req, res) => {
   <h2>Histórico</h2>${pedidoTable(pedidos)}`;
   res.send(page('Conta', html));
 });
-app.get('/admin/revenda/:id/historico', async (req, res) => { const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]); const pedidos = await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 300', [r.id]); res.send(page('Histórico', `<h1>📋 Histórico - ${safeHtml(r.nome)}</h1>${pedidoTable(pedidos)}`)); });
+// V158 — histórico avançado por cliente: abas, contadores, filtros e exportação de IMEIs.
+function v158StatusHistoricoNormalizado(valor) {
+  const s = String(valor || '').trim().toUpperCase();
+  return ['PENDENTE','EM PROCESSO','FINALIZADO','CANCELADO'].includes(s) ? s : '';
+}
+function v158CsvCampo(valor) {
+  const s = String(valor ?? '');
+  return `"${s.replace(/"/g, '""')}"`;
+}
+function v158FiltrosHistorico(req) {
+  const status = v158StatusHistoricoNormalizado(req.query.status);
+  const busca = String(req.query.busca || '').trim().slice(0, 80);
+  const servico = String(req.query.servico || '').trim().slice(0, 120);
+  const periodo = String(req.query.periodo || 'todos').trim().toLowerCase();
+  const de = String(req.query.de || '').trim();
+  const ate = String(req.query.ate || '').trim();
+  return { status, busca, servico, periodo, de, ate };
+}
+function v158WhereHistoricoCliente(revendaId, filtros) {
+  const where = ['revenda_id=?'];
+  const params = [revendaId];
+  if (filtros.status) { where.push('UPPER(status)=?'); params.push(filtros.status); }
+  if (filtros.busca) {
+    where.push(`(CAST(id AS TEXT) LIKE ? OR COALESCE(imei,'') LIKE ? OR COALESCE(entrada_valor,'') LIKE ? OR COALESCE(servico_nome,'') LIKE ?)`);
+    const q = `%${filtros.busca}%`; params.push(q,q,q,q);
+  }
+  if (filtros.servico) { where.push('servico_nome=?'); params.push(filtros.servico); }
+  if (filtros.periodo === 'hoje') where.push(`date(criado_em,'localtime')=date('now','localtime')`);
+  if (filtros.periodo === '7') where.push(`datetime(criado_em) >= datetime('now','-7 days')`);
+  if (filtros.periodo === '30') where.push(`datetime(criado_em) >= datetime('now','-30 days')`);
+  if (filtros.periodo === 'personalizado') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(filtros.de)) { where.push(`date(criado_em) >= date(?)`); params.push(filtros.de); }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(filtros.ate)) { where.push(`date(criado_em) <= date(?)`); params.push(filtros.ate); }
+  }
+  return { sql: where.join(' AND '), params };
+}
+
+app.get('/admin/revenda/:id/historico', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (!r) return res.redirect('/admin/revendas');
+  const filtros = v158FiltrosHistorico(req);
+  const base = v158WhereHistoricoCliente(r.id, filtros);
+  const pedidos = await all(`SELECT * FROM pedidos WHERE ${base.sql} ORDER BY id DESC LIMIT 1000`, base.params);
+  const contagensRows = await all(`SELECT UPPER(status) status, COUNT(*) qtd, COALESCE(SUM(valor),0) total FROM pedidos WHERE revenda_id=? GROUP BY UPPER(status)`, [r.id]);
+  const cont = { TODOS:0, PENDENTE:0, 'EM PROCESSO':0, FINALIZADO:0, CANCELADO:0 };
+  const financeiro = { TODOS:0, PENDENTE:0, 'EM PROCESSO':0, FINALIZADO:0, CANCELADO:0 };
+  for (const x of contagensRows) {
+    const st=String(x.status||'').toUpperCase(); const qtd=Number(x.qtd||0); const total=Number(x.total||0);
+    cont.TODOS += qtd; financeiro.TODOS += total;
+    if (Object.prototype.hasOwnProperty.call(cont,st)) { cont[st]=qtd; financeiro[st]=total; }
+  }
+  const servicos = await all(`SELECT DISTINCT servico_nome nome FROM pedidos WHERE revenda_id=? AND servico_nome IS NOT NULL AND TRIM(servico_nome)<>'' ORDER BY servico_nome COLLATE NOCASE ASC`, [r.id]);
+  const qsBase = new URLSearchParams();
+  if (filtros.busca) qsBase.set('busca', filtros.busca);
+  if (filtros.servico) qsBase.set('servico', filtros.servico);
+  if (filtros.periodo && filtros.periodo !== 'todos') qsBase.set('periodo', filtros.periodo);
+  if (filtros.de) qsBase.set('de', filtros.de); if (filtros.ate) qsBase.set('ate', filtros.ate);
+  const tabHref = (st) => { const q=new URLSearchParams(qsBase); if(st) q.set('status',st); return `/admin/revenda/${r.id}/historico?${q.toString()}`; };
+  const statusAtivo = filtros.status || 'TODOS';
+  const statusClass = (s) => s==='FINALIZADO'?'h-ok':s==='CANCELADO'?'h-bad':s==='EM PROCESSO'?'h-proc':'h-pend';
+  const linhas = pedidos.length ? pedidos.map(p=>`<tr>
+    <td><b>#${p.id}</b></td><td><b>${safeHtml(p.servico_nome||'Serviço')}</b></td><td><code>${safeHtml(p.imei||p.entrada_valor||'-')}</code></td>
+    <td>${brl(p.valor||0)}</td><td><span class="h-status ${statusClass(String(p.status||'').toUpperCase())}">${safeHtml(p.status||'-')}</span></td><td>${dateBR(p.criado_em)}</td>
+  </tr>`).join('') : `<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">Nenhum serviço encontrado com estes filtros.</td></tr>`;
+  const exportParams = new URLSearchParams();
+  if (filtros.status) exportParams.set('status',filtros.status); if(filtros.busca) exportParams.set('busca',filtros.busca); if(filtros.servico) exportParams.set('servico',filtros.servico);
+  if(filtros.periodo && filtros.periodo!=='todos') exportParams.set('periodo',filtros.periodo); if(filtros.de) exportParams.set('de',filtros.de); if(filtros.ate) exportParams.set('ate',filtros.ate);
+  const optsServicos = servicos.map(s=>`<option value="${safeHtml(s.nome)}" ${filtros.servico===s.nome?'selected':''}>${safeHtml(s.nome)}</option>`).join('');
+  const imeisCopiar = pedidos.map(p=>String(p.imei||p.entrada_valor||'').trim()).filter(Boolean).join('\n');
+  const html = `<style>
+    .hist-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}.hist-head h1{margin-bottom:5px}.hist-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.hist-tab{padding:10px 12px;border-radius:12px;border:1px solid rgba(148,163,184,.2);text-decoration:none;color:inherit;background:rgba(15,23,42,.42);font-weight:700;font-size:12px}.hist-tab.active{border-color:#3b82f6;background:rgba(59,130,246,.14)}.hist-tab b{margin-left:5px}
+    .hist-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin-bottom:14px}.hist-kpi{padding:12px;border:1px solid rgba(148,163,184,.15);border-radius:12px;background:rgba(15,23,42,.32)}.hist-kpi small{display:block;color:#94a3b8}.hist-kpi b{font-size:18px}.hist-kpi em{display:block;font-style:normal;font-size:11px;margin-top:4px;color:#cbd5e1}
+    .hist-tools{display:grid;grid-template-columns:1.4fr 1fr .8fr .8fr .8fr;gap:9px;align-items:end}.hist-tools label{font-size:11px;color:#94a3b8}.hist-tools input,.hist-tools select{width:100%;padding:10px;border-radius:10px}.hist-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.hist-actions .btn{margin:0}.hist-table{overflow:auto}.hist-table table{min-width:760px}.h-status{font-size:10px;font-weight:800;padding:4px 7px;border-radius:999px}.h-pend{color:#f59e0b;background:rgba(245,158,11,.12)}.h-proc{color:#38bdf8;background:rgba(56,189,248,.12)}.h-ok{color:#22c55e;background:rgba(34,197,94,.12)}.h-bad{color:#ef4444;background:rgba(239,68,68,.12)}
+    @media(max-width:850px){.hist-summary{grid-template-columns:1fr 1fr}.hist-tools{grid-template-columns:1fr 1fr}.hist-tools .full{grid-column:1/-1}}@media(max-width:480px){.hist-summary{grid-template-columns:1fr}.hist-tools{grid-template-columns:1fr}}
+  </style>
+  <div class="hist-head"><div><h1>📋 Histórico - ${safeHtml(r.nome)}</h1><div class="muted">Cliente #${r.id}${r.whatsapp?` · +${safeHtml(r.whatsapp)}`:''}</div></div><a class="btn gray" href="/admin/revendas">← Voltar aos clientes</a></div>
+  <div class="hist-tabs">
+    <a class="hist-tab ${statusAtivo==='TODOS'?'active':''}" href="${tabHref('')}">📦 Todos <b>${cont.TODOS}</b></a>
+    <a class="hist-tab ${statusAtivo==='PENDENTE'?'active':''}" href="${tabHref('PENDENTE')}">⏳ Pendentes <b>${cont.PENDENTE}</b></a>
+    <a class="hist-tab ${statusAtivo==='EM PROCESSO'?'active':''}" href="${tabHref('EM PROCESSO')}">🔄 Em processo <b>${cont['EM PROCESSO']}</b></a>
+    <a class="hist-tab ${statusAtivo==='FINALIZADO'?'active':''}" href="${tabHref('FINALIZADO')}">✅ Finalizados <b>${cont.FINALIZADO}</b></a>
+    <a class="hist-tab ${statusAtivo==='CANCELADO'?'active':''}" href="${tabHref('CANCELADO')}">❌ Cancelados <b>${cont.CANCELADO}</b></a>
+  </div>
+  <div class="hist-summary">
+    <div class="hist-kpi"><small>Total de serviços</small><b>${cont.TODOS}</b><em>${brl(financeiro.TODOS)}</em></div>
+    <div class="hist-kpi"><small>Pendentes</small><b>${cont.PENDENTE}</b><em>${brl(financeiro.PENDENTE)}</em></div>
+    <div class="hist-kpi"><small>Em processo</small><b>${cont['EM PROCESSO']}</b><em>${brl(financeiro['EM PROCESSO'])}</em></div>
+    <div class="hist-kpi"><small>Finalizados</small><b>${cont.FINALIZADO}</b><em>${brl(financeiro.FINALIZADO)}</em></div>
+    <div class="hist-kpi"><small>Cancelados</small><b>${cont.CANCELADO}</b><em>${brl(financeiro.CANCELADO)}</em></div>
+  </div>
+  <div class="card"><form method="get" class="hist-tools">
+    <div class="full"><label>Pesquisar IMEI, pedido ou serviço</label><input name="busca" value="${safeHtml(filtros.busca)}" placeholder="Digite o IMEI ou ID..."></div>
+    <div><label>Serviço</label><select name="servico"><option value="">Todos</option>${optsServicos}</select></div>
+    <div><label>Período</label><select name="periodo"><option value="todos" ${filtros.periodo==='todos'?'selected':''}>Todos</option><option value="hoje" ${filtros.periodo==='hoje'?'selected':''}>Hoje</option><option value="7" ${filtros.periodo==='7'?'selected':''}>7 dias</option><option value="30" ${filtros.periodo==='30'?'selected':''}>30 dias</option><option value="personalizado" ${filtros.periodo==='personalizado'?'selected':''}>Personalizado</option></select></div>
+    <div><label>De</label><input type="date" name="de" value="${safeHtml(filtros.de)}"></div><div><label>Até</label><input type="date" name="ate" value="${safeHtml(filtros.ate)}"></div>
+    ${filtros.status?`<input type="hidden" name="status" value="${safeHtml(filtros.status)}">`:''}<div><button class="btn green" type="submit">🔎 Filtrar</button></div>
+  </form>
+  <div class="hist-actions"><button class="btn" type="button" onclick="copiarImeisV158()">📋 Copiar IMEIs (${pedidos.length})</button><a class="btn" href="/admin/revenda/${r.id}/historico/export?formato=txt&${exportParams.toString()}">⬇️ Baixar IMEIs</a><a class="btn" href="/admin/revenda/${r.id}/historico/export?formato=csv&${exportParams.toString()}">📊 Exportar CSV</a><a class="btn gray" href="/admin/revenda/${r.id}/historico">Limpar filtros</a></div>
+  </div>
+  <div class="card hist-table"><table><tr><th>ID</th><th>Serviço</th><th>IMEI/Entrada</th><th>Valor</th><th>Status</th><th>Data/Hora</th></tr>${linhas}</table></div>
+  <textarea id="imeisV158" style="position:fixed;left:-9999px;top:-9999px">${safeHtml(imeisCopiar)}</textarea>
+  <script>async function copiarImeisV158(){const t=document.getElementById('imeisV158').value;if(!t){alert('Nenhum IMEI nesta seleção.');return;}try{await navigator.clipboard.writeText(t);alert('IMEIs copiados: '+t.split('\\n').filter(Boolean).length);}catch(e){const el=document.getElementById('imeisV158');el.style.position='static';el.select();document.execCommand('copy');el.style.position='fixed';alert('IMEIs copiados.');}}</script>`;
+  res.send(page('Histórico do cliente', html));
+});
+
+app.get('/admin/revenda/:id/historico/export', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
+  if (!r) return res.status(404).send('Cliente não encontrado');
+  const filtros = v158FiltrosHistorico(req);
+  const base = v158WhereHistoricoCliente(r.id, filtros);
+  const pedidos = await all(`SELECT id,servico_nome,imei,entrada_valor,valor,status,criado_em FROM pedidos WHERE ${base.sql} ORDER BY id ASC`, base.params);
+  const formato = String(req.query.formato || 'txt').toLowerCase();
+  const nomeSeguro = String(r.nome || `cliente-${r.id}`).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'') || `cliente-${r.id}`;
+  if (formato === 'csv') {
+    const linhas = ['ID,Servico,IMEI_Entrada,Valor,Status,Data_Hora'];
+    for (const p of pedidos) linhas.push([p.id,p.servico_nome||'',p.imei||p.entrada_valor||'',Number(p.valor||0).toFixed(2),p.status||'',p.criado_em||''].map(v158CsvCampo).join(','));
+    res.setHeader('Content-Type','text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition',`attachment; filename="historico-${nomeSeguro}.csv"`);
+    return res.send('\ufeff'+linhas.join('\r\n'));
+  }
+  const imeis = pedidos.map(p=>String(p.imei||p.entrada_valor||'').trim()).filter(Boolean);
+  res.setHeader('Content-Type','text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition',`attachment; filename="imeis-${nomeSeguro}${filtros.status?'-'+filtros.status.toLowerCase().replace(/\s+/g,'-'):''}.txt"`);
+  return res.send(imeis.join('\n'));
+});
 app.post('/admin/revenda/:id/pagamento', async (req, res) => {
   const valor = Number(String(req.body.valor || '0').replace(',', '.'));
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
