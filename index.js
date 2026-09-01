@@ -923,6 +923,28 @@ function dhruDecodeReplay(v){
   try { const b=Buffer.from(s,'base64').toString('utf8'); if(b && /[\x20-\x7E\u00A0-\uFFFF]/.test(b)) return b; } catch(_){}
   return s;
 }
+function limparResultadoDhru(v){
+  let s=String(v||'');
+  if(!s) return '';
+  // Preserva quebras de linha úteis antes de remover tags HTML do retorno do fornecedor.
+  s=s.replace(/<\s*br\s*\/?\s*>/gi,'\n')
+     .replace(/<\s*\/\s*(p|div|li|tr|h[1-6])\s*>/gi,'\n')
+     .replace(/<\s*li(?:\s[^>]*)?>/gi,'• ')
+     .replace(/<\s*td(?:\s[^>]*)?>/gi,' ')
+     .replace(/<[^>]+>/g,'');
+  const entities={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '};
+  s=s.replace(/&(#x?[0-9a-f]+|amp|lt|gt|quot|apos|nbsp);/gi,(m,e)=>{
+    const k=String(e).toLowerCase();
+    if(entities[k]!==undefined) return entities[k];
+    if(k[0]==='#'){
+      const hex=k[1]==='x';
+      const n=parseInt(k.slice(hex?2:1),hex?16:10);
+      return Number.isFinite(n)?String.fromCodePoint(n):m;
+    }
+    return m;
+  });
+  return s.replace(/\r/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+}
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
   if(!reference) throw new Error('reference_id ausente');
@@ -935,8 +957,14 @@ async function processarFeedbackDhru(body){
   await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,status.toUpperCase()||'ATUALIZADO',JSON.stringify(body),replay,pedidoId]);
   const cliente=pedido.revenda_id?await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]):null;
   if(['success','completed','complete','done'].includes(status)){
-    if(String(pedido.status).toUpperCase()!=='FINALIZADO') await finalizarPedido(pedido);
-    if(cliente) await enviarParaCanaisCliente(cliente,`✅ *Serviço concluído*\n\n🛠 ${pedido.servico_nome}\n${pedido.entrada_label||'Entrada'}: ${pedido.entrada_valor||pedido.imei||'-'}${replay?`\n\n📄 Resultado:\n${replay}`:''}`,pedido.revenda_jid||'');
+    const jaFinalizado=String(pedido.status).toUpperCase()==='FINALIZADO';
+    if(!jaFinalizado) await finalizarPedido(pedido,{notificarCliente:false});
+    if(cliente && !jaFinalizado){
+      const clienteAtual=await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]);
+      const resultadoLimpo=limparResultadoDhru(replay);
+      const saldoLinha=clienteAtual?`\n\n💳 Saldo: ${brl(clienteAtual.saldo||0)}`:'';
+      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${pedido.servico_nome}\n${pedido.entrada_label||'Entrada'}: ${pedido.entrada_valor||pedido.imei||'-'}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *Resultado*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
+    }
   } else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
     if(atual?.revenda_id && Number(atual.cobrado||0)===1 && Number(atual.estornado||0)!==1){
@@ -4162,7 +4190,7 @@ ${detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIANDO AO FORNECEDOR...' : 'PENDENTE'}`, from);
+${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, from);
     if (servico.api_provider === 'DHRU') {
       for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
     }
@@ -5979,7 +6007,7 @@ ${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIANDO AO FORNECEDOR...' : 'PENDENTE'}`, jid);
+${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, jid);
   if (servico.api_provider === 'DHRU') {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
@@ -6082,7 +6110,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
   }, 30000);
 }
 
-async function finalizarPedido(pedido) {
+async function finalizarPedido(pedido, opcoes = {}) {
   await run('UPDATE pedidos SET status="FINALIZADO", finalizado_em=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [pedido.id]);
   if (pedido.tipo === 'REVENDA' && pedido.revenda_id) {
     // Reserva a cobrança de forma condicional. Assim, mesmo que o botão de
@@ -6096,8 +6124,9 @@ async function finalizarPedido(pedido) {
   if (normalizarNomeServico(atualizado?.servico_nome)==='bloqueio tim') emitirAtualizacaoBloqueioTim('finalizado', atualizado.id);
   notificarPainel('finalizado', '✅ Pedido finalizado', `Pedido #${pedido.id} - ${atualizado.servico_nome || ''}`);
   await enviarAvisoDestinatarios('FINALIZADO', `✅ *Serviço finalizado*\n\n🆔 Pedido: #${atualizado.id}\n👤 Cliente: ${atualizado.revenda_nome || atualizado.cliente_nome || '-'}\n🛠 Serviço: ${atualizado.servico_nome || '-'}\n📱 Entrada: ${atualizado.entrada_valor || atualizado.imei || '-'}\n💰 Valor: ${brl(atualizado.valor)}\n🏢 Centralunlocker`);
-  await notificarPedido(atualizado, 'finalizar');
+  if (opcoes.notificarCliente !== false) await notificarPedido(atualizado, 'finalizar');
 }
+
 async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '') {
   const destinos = new Set();
   const telegramId = cliente?.telegram_id;
