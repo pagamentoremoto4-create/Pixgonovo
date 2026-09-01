@@ -1,0 +1,13 @@
+V160 - eSIM: aparelho antes do pagamento
+
+Fluxo atualizado:
+1. Cliente escolhe o plano eSIM.
+2. ANTES de confirmar/pagar, o bot pergunta: iPhone ou Android.
+3. O aparelho escolhido fica salvo na sessão do pedido.
+4. Só depois o bot mostra a confirmação da compra/pagamento.
+5. Após aprovação:
+   - iPhone: envia SM-DP+ + código de ativação (+ confirmação, se houver), sem QR Code.
+   - Android: envia QR Code + LPA completo original.
+6. Se faltar saldo e for necessário PIX, a escolha do aparelho é preservada durante o pagamento.
+
+Mantidas as funções V159 de leitura automática de QR e cadastro automático no estoque.

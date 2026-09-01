@@ -1,0 +1,11 @@
+V161 — GARANTIA eSIM / VÍDEO DA PRIMEIRA INSTALAÇÃO
+
+Alteração de mensagem/tutorial apenas.
+
+- iPhone: aviso de garantia aparece na mesma mensagem que SM-DP+, código de ativação e tutorial.
+- Android: aviso de garantia aparece na mesma mensagem que acompanha o QR/LPA e tutorial.
+- O cliente é orientado a gravar vídeo desde a PRIMEIRA tentativa de instalação.
+- O vídeo deve mostrar início, dados/QR utilizados, processo de ativação e eventual erro.
+- A mensagem informa que o vídeo é necessário para validar solicitação de troca por erro de instalação.
+- O aviso também foi incluído no tutorial genérico usado nas entregas manuais.
+- Nenhuma regra de pagamento, estoque, escolha de aparelho ou entrega foi alterada.
