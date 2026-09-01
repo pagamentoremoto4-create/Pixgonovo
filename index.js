@@ -749,53 +749,193 @@ async function sincronizarServicosImeiInfo() {
   await setConfig('imei_info_ultima_sync', new Date().toISOString());
   return { sincronizados, novos, totalRecebido: lista.length };
 }
-function formatarObjetoImeiInfo(data) {
-  const ignorar = new Set(['id','created_at','updated_at','raw']);
-  const linhas=[];
-  function walk(v,prefix='',depth=0){
-    if (linhas.length>=45 || depth>3 || v===null || v===undefined) return;
-    if (Array.isArray(v)) { if(v.length && typeof v[0] !== 'object') linhas.push(`${prefix}: ${v.join(', ')}`); else v.slice(0,8).forEach((x,i)=>walk(x,`${prefix} ${i+1}`.trim(),depth+1)); return; }
-    if (typeof v==='object') { for(const [k,x] of Object.entries(v)){ if(ignorar.has(k)) continue; const label=String(k).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); walk(x,prefix?`${prefix} • ${label}`:label,depth+1); if(linhas.length>=45) break;} return; }
-    const txt=String(v).trim(); if(txt && txt!=='[object Object]') linhas.push(`${prefix}: ${txt}`);
+function valorProfundoImeiInfo(obj, nomes) {
+  if (!obj || typeof obj !== 'object') return '';
+  const alvos = new Set(nomes.map(x => String(x).toLowerCase().replace(/[^a-z0-9]/g,'')));
+  const fila = [obj];
+  const vistos = new Set();
+  while (fila.length) {
+    const atual = fila.shift();
+    if (!atual || typeof atual !== 'object' || vistos.has(atual)) continue;
+    vistos.add(atual);
+    for (const [k,v] of Object.entries(atual)) {
+      const nk = String(k).toLowerCase().replace(/[^a-z0-9]/g,'');
+      if (alvos.has(nk) && v !== undefined && v !== null && String(v).trim() !== '') return v;
+      if (v && typeof v === 'object') fila.push(v);
+    }
   }
-  const raiz = data?.data ?? data?.result ?? data;
+  return '';
+}
+function textoImeiInfo(payload) {
+  try { return JSON.stringify(payload ?? ''); } catch (_) { return String(payload ?? ''); }
+}
+function extrairCoordenadasImeiInfo(payload) {
+  const txt = textoImeiInfo(payload);
+  let historyId = valorProfundoImeiInfo(payload,['history_id','historyId','history id','id']);
+  let ulid = valorProfundoImeiInfo(payload,['ulid','uuid']);
+  if (!historyId) historyId = (txt.match(/History\s*Id[^0-9]*(\d+)/i)||[])[1] || '';
+  if (!ulid) ulid = (txt.match(/Ulid[^A-Z0-9]*([A-Z0-9]{20,})/i)||[])[1] || '';
+  return { historyId: String(historyId||'').trim(), ulid: String(ulid||'').trim() };
+}
+function statusImeiInfo(payload) {
+  const bruto = valorProfundoImeiInfo(payload,['status','state','result_status','resultStatus']);
+  return String(bruto||'').trim().toLowerCase();
+}
+function estaProcessandoImeiInfo(payload) {
+  const st = statusImeiInfo(payload);
+  const txt = textoImeiInfo(payload).toLowerCase();
+  return ['running','processing','pending','queued','in progress','in_progress','waiting'].some(x=>st.includes(x)) ||
+    txt.includes('service is running') || txt.includes('please wait few second') || txt.includes('please wait few seconds');
+}
+function estaFalhaImeiInfo(payload) {
+  const st = statusImeiInfo(payload);
+  return ['failed','error','rejected','cancelled','canceled'].some(x=>st.includes(x));
+}
+function resultadoPrincipalImeiInfo(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  return payload.result ?? payload.data?.result ?? payload.data ?? payload;
+}
+function formatarObjetoImeiInfo(data) {
+  const raiz = resultadoPrincipalImeiInfo(data);
+  const mapa = {
+    model:'Modelo', model_name:'Modelo', manufacturer:'Fabricante', brand:'Marca', imei_number:'IMEI', imei:'IMEI',
+    blacklist_status:'Status da blacklist', general_list_status:'Status geral', blacklist_records:'Registros de blacklist',
+    blacklisted_by:'Operadora responsável', blacklisted_country:'País', blacklisted_on:'Data da blacklist',
+    blacklist_reason:'Motivo', device_is_clean:'Aparelho limpo', carrier:'Operadora', carrier_lock:'Bloqueio de operadora',
+    original_carrier:'Operadora original', purchase_country:'País de compra', serial_number:'Número de série',
+    warranty_status:'Garantia', fmi:'Buscar iPhone', find_my_iphone:'Buscar iPhone', icloud_status:'Status iCloud'
+  };
+  const ignorar = new Set(['id','created_at','updated_at','raw','history_id','ulid','uuid','message','status']);
+  const linhas=[];
+  function traduzValor(label,v){
+    if (typeof v === 'boolean') return v ? 'SIM' : 'NÃO';
+    const t=String(v).trim();
+    const low=t.toLowerCase();
+    if (low==='true') return 'SIM'; if (low==='false') return 'NÃO';
+    if (low==='blacklisted') return 'BLACKLISTED 🚫'; if (low==='clean') return 'CLEAN ✅';
+    if (low==='stolen or lost') return 'Roubado ou perdido';
+    return t;
+  }
+  function walk(v,prefix='',depth=0){
+    if (linhas.length>=50 || depth>3 || v===null || v===undefined) return;
+    if (Array.isArray(v)) { if(v.length && typeof v[0] !== 'object') linhas.push(`${prefix}: ${v.join(', ')}`); else v.slice(0,8).forEach((x,i)=>walk(x,`${prefix} ${i+1}`.trim(),depth+1)); return; }
+    if (typeof v==='object') {
+      for(const [k,x] of Object.entries(v)){
+        if(ignorar.has(k)) continue;
+        const label = mapa[k] || String(k).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+        walk(x,prefix?`${prefix} • ${label}`:label,depth+1);
+        if(linhas.length>=50) break;
+      }
+      return;
+    }
+    const txt=traduzValor(prefix,v); if(txt && txt!=='[object Object]') linhas.push(`${prefix}: ${txt}`);
+  }
   walk(raiz);
   return linhas.length ? linhas.join('\n') : JSON.stringify(raiz,null,2).slice(0,3500);
+}
+const imeiInfoPollers = new Map();
+async function entregarResultadoImeiInfo(consultaId, pedidoId, resposta) {
+  const consulta = await get('SELECT * FROM imei_info_consultas WHERE id=?',[consultaId]);
+  if (!consulta || consulta.status === 'CONCLUIDO') return;
+  const pedido = await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
+  if (!pedido || pedido.status === 'CANCELADO') return;
+  await run(`UPDATE imei_info_consultas SET status='CONCLUIDO',resposta_json=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [JSON.stringify(resposta),consultaId]);
+  await finalizarPedido(pedido);
+  const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
+  const imei=String(pedido.entrada_valor||pedido.imei||consulta.imei||'').replace(/\D/g,'');
+  const msg = `✅ *CONSULTA CONCLUÍDA*\n\n🛠 Serviço: ${pedido.servico_nome}\n📱 IMEI: ${imei}\n\n📋 *RESULTADO*\n${formatarObjetoImeiInfo(resposta)}`;
+  if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
+  console.log(`✅ IMEI.INFO AUTO: pedido #${pedido.id} resultado entregue`);
+}
+async function acompanharConsultaImeiInfo(consultaId, tentativa=0) {
+  if (imeiInfoPollers.has(consultaId) && tentativa===0) return;
+  imeiInfoPollers.set(consultaId,true);
+  try {
+    const c = await get('SELECT * FROM imei_info_consultas WHERE id=?',[consultaId]);
+    if (!c || c.status === 'CONCLUIDO' || c.status === 'ERRO') { imeiInfoPollers.delete(consultaId); return; }
+    if (!c.history_id) { imeiInfoPollers.delete(consultaId); return; }
+    let resposta;
+    try { resposta = await imeiInfoRequest('get',`/search_history/${encodeURIComponent(c.history_id)}/`); }
+    catch (e) {
+      const http=Number(e?.response?.status||0);
+      if (http>=400 && http<500 && http!==429) throw e;
+      const espera = tentativa < 60 ? 5000 : 30000;
+      imeiInfoPollers.delete(consultaId);
+      return setTimeout(()=>acompanharConsultaImeiInfo(consultaId,tentativa+1).catch(()=>{}),espera);
+    }
+    if (estaFalhaImeiInfo(resposta)) throw new Error(`Consulta retornou status ${statusImeiInfo(resposta)||'falha'}`);
+    if (estaProcessandoImeiInfo(resposta)) {
+      await run(`UPDATE imei_info_consultas SET status='PROCESSANDO',ultima_verificacao=CURRENT_TIMESTAMP WHERE id=?`,[consultaId]);
+      const espera = tentativa < 60 ? 5000 : 30000;
+      imeiInfoPollers.delete(consultaId);
+      return setTimeout(()=>acompanharConsultaImeiInfo(consultaId,tentativa+1).catch(()=>{}),espera);
+    }
+    await entregarResultadoImeiInfo(consultaId,c.pedido_id,resposta);
+    imeiInfoPollers.delete(consultaId);
+  } catch (e) {
+    imeiInfoPollers.delete(consultaId);
+    const c=await get('SELECT * FROM imei_info_consultas WHERE id=?',[consultaId]);
+    if (!c) return;
+    const detalhe=String(e?.response?.data?.detail||e?.response?.data?.message||e?.message||'Erro ao acompanhar consulta').slice(0,1000);
+    console.log(`❌ IMEI.INFO POLL: consulta #${consultaId} | ${detalhe}`);
+    // Falha definitiva do histórico: não marca como concluído e não entrega resposta incompleta.
+    await run(`UPDATE imei_info_consultas SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[detalhe,consultaId]);
+    const pedido=await get('SELECT * FROM pedidos WHERE id=?',[c.pedido_id]);
+    if (pedido?.revenda_id && Number(pedido.cobrado||0)===1) {
+      await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(pedido.valor||0),pedido.revenda_id]);
+      await run('UPDATE pedidos SET cobrado=0,estornado=1,status="CANCELADO",motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[`Falha IMEI.info: ${detalhe}`,pedido.id]);
+    }
+    await avisarAdminTelegram(`⚠️ IMEI.info falhou ao acompanhar\nPedido #${c.pedido_id}\n${detalhe}`);
+  }
 }
 async function executarConsultaImeiInfoPedido(pedidoId) {
   const pedido = await get(`SELECT p.*, s.api_provider,s.api_service_id,s.api_auto FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [pedidoId]);
   if (!pedido || pedido.api_provider !== 'IMEI_INFO' || !pedido.api_service_id) return { executado:false };
   const imei=String(pedido.entrada_valor||pedido.imei||'').replace(/\D/g,'');
   if (!/^\d{15}$/.test(imei)) return { executado:false, erro:'IMEI inválido' };
-  const ja = await get(`SELECT * FROM imei_info_consultas WHERE pedido_id=? AND status='CONCLUIDO' ORDER BY id DESC LIMIT 1`, [pedido.id]);
-  if (ja) return { executado:true, sucesso:true, resposta:JSON.parse(ja.resposta_json||'{}') };
+  const anterior = await get(`SELECT * FROM imei_info_consultas WHERE pedido_id=? ORDER BY id DESC LIMIT 1`, [pedido.id]);
+  if (anterior?.status === 'CONCLUIDO') return { executado:true, sucesso:true, resposta:JSON.parse(anterior.resposta_json||'{}') };
+  if (anterior?.status === 'PROCESSANDO' && anterior.history_id) { acompanharConsultaImeiInfo(anterior.id).catch(()=>{}); return {executado:true,processando:true}; }
   const ins = await run(`INSERT INTO imei_info_consultas (pedido_id,revenda_id,api_service_id,imei,status) VALUES (?,?,?,?, 'PROCESSANDO')`, [pedido.id,pedido.revenda_id,pedido.api_service_id,imei]);
   try {
     console.log(`🔎 IMEI.INFO AUTO: pedido #${pedido.id} | serviço ${pedido.api_service_id} | IMEI ${imei}`);
     const resposta = await imeiInfoRequest('get',`/check/${encodeURIComponent(pedido.api_service_id)}/`,{ imei, sync:true });
-    console.log(`✅ IMEI.INFO AUTO: pedido #${pedido.id} concluído`);
-    await run(`UPDATE imei_info_consultas SET status='CONCLUIDO',resposta_json=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [JSON.stringify(resposta),ins.lastID]);
-    await finalizarPedido(pedido);
-    const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
-    const msg = `✅ *Consulta IMEI concluída*\n\n🛠 Serviço: ${pedido.servico_nome}\n📱 IMEI: ${imei}\n\n${formatarObjetoImeiInfo(resposta)}`;
-    if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
+    const coord = extrairCoordenadasImeiInfo(resposta);
+    if (estaProcessandoImeiInfo(resposta)) {
+      if (!coord.historyId) throw new Error('IMEI.info informou processamento, mas não retornou History ID.');
+      await run(`UPDATE imei_info_consultas SET status='PROCESSANDO',resposta_json=?,history_id=?,ulid=?,ultima_verificacao=CURRENT_TIMESTAMP WHERE id=?`,[JSON.stringify(resposta),coord.historyId,coord.ulid,ins.lastID]);
+      await run(`UPDATE pedidos SET status='EM PROCESSO', atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
+      const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
+      const msg=`⏳ *CONSULTA EM PROCESSAMENTO*\n\n🛠 Serviço: ${pedido.servico_nome}\n📱 IMEI: ${imei}\n💰 Valor: ${brl(Number(pedido.valor||0))}\n\nSua consulta foi enviada com sucesso.\nAguarde enquanto buscamos o resultado automaticamente.`;
+      if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
+      console.log(`⏳ IMEI.INFO AUTO: pedido #${pedido.id} em processamento | History ID ${coord.historyId}`);
+      setTimeout(()=>acompanharConsultaImeiInfo(ins.lastID).catch(()=>{}),5000);
+      return {executado:true,processando:true,historyId:coord.historyId,ulid:coord.ulid};
+    }
+    await entregarResultadoImeiInfo(ins.lastID,pedido.id,resposta);
     return { executado:true,sucesso:true,resposta };
   } catch (e) {
     const status=Number(e?.response?.status||0); const detalhe=String(e?.response?.data?.detail||e?.response?.data?.message||e?.message||'Erro na API').slice(0,1000);
     console.log(`❌ IMEI.INFO AUTO: pedido #${pedido.id} falhou | HTTP ${status||'-'} | ${detalhe}`);
     await run(`UPDATE imei_info_consultas SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [`HTTP ${status||'-'} - ${detalhe}`,ins.lastID]);
-    // Se o cliente já foi debitado, devolve o valor; falha técnica/API nunca vira cobrança concluída.
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedido.id]);
     if (atual?.revenda_id && Number(atual.cobrado||0)===1) {
       await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
       await run('UPDATE pedidos SET cobrado=0,estornado=1,status="CANCELADO",motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[`Falha automática IMEI.info: ${detalhe}`,atual.id]);
     } else await run('UPDATE pedidos SET status="CANCELADO",motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[`Falha automática IMEI.info: ${detalhe}`,pedido.id]);
     const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
-    const msg = `⚠️ A consulta não pôde ser concluída agora.\n\nServiço: ${pedido.servico_nome}\nIMEI: ${imei}\n\nNenhum valor será mantido como cobrança desta consulta.\nDetalhe: ${detalhe}`;
+    const msg = `⚠️ A consulta não pôde ser concluída agora.\n\nServiço: ${pedido.servico_nome}\nIMEI: ${imei}\n\nNenhum valor será mantido como cobrança desta consulta.`;
     if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
     await avisarAdminTelegram(`⚠️ IMEI.info falhou\nPedido #${pedido.id}\nServiço: ${pedido.servico_nome}\nIMEI: ${imei}\n${detalhe}`);
     return { executado:true,sucesso:false,erro:detalhe,status };
   }
+}
+async function retomarConsultasImeiInfoPendentes() {
+  try {
+    const pendentes=await all(`SELECT * FROM imei_info_consultas WHERE status='PROCESSANDO' AND COALESCE(history_id,'')<>'' ORDER BY id ASC LIMIT 200`);
+    if (pendentes.length) console.log(`🔄 IMEI.INFO: retomando ${pendentes.length} consulta(s) em processamento.`);
+    pendentes.forEach((c,i)=>setTimeout(()=>acompanharConsultaImeiInfo(c.id).catch(()=>{}),3000+(i*250)));
+  } catch(e) { console.log('⚠️ IMEI.INFO retomada:',e.message); }
 }
 
 
@@ -1277,6 +1417,9 @@ async function initDB() {
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     finalizado_em TEXT
   )`);
+  await addColumnIfMissing('imei_info_consultas','history_id','TEXT');
+  await addColumnIfMissing('imei_info_consultas','ulid','TEXT');
+  await addColumnIfMissing('imei_info_consultas','ultima_verificacao','TEXT');
 
   await run(`CREATE TABLE IF NOT EXISTS solicitacoes_cancelamento (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4490,6 +4633,7 @@ async function responderBotaoAdminTelegram(chatId, data) {
 
 async function iniciarTelegram() {
   await initDB();
+  retomarConsultasImeiInfoPendentes().catch(()=>{});
   iniciarWorkerAnuncios();
   if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
     console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
