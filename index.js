@@ -771,7 +771,9 @@ async function executarConsultaImeiInfoPedido(pedidoId) {
   if (ja) return { executado:true, sucesso:true, resposta:JSON.parse(ja.resposta_json||'{}') };
   const ins = await run(`INSERT INTO imei_info_consultas (pedido_id,revenda_id,api_service_id,imei,status) VALUES (?,?,?,?, 'PROCESSANDO')`, [pedido.id,pedido.revenda_id,pedido.api_service_id,imei]);
   try {
+    console.log(`🔎 IMEI.INFO AUTO: pedido #${pedido.id} | serviço ${pedido.api_service_id} | IMEI ${imei}`);
     const resposta = await imeiInfoRequest('get',`/check/${encodeURIComponent(pedido.api_service_id)}/`,{ imei, sync:true });
+    console.log(`✅ IMEI.INFO AUTO: pedido #${pedido.id} concluído`);
     await run(`UPDATE imei_info_consultas SET status='CONCLUIDO',resposta_json=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [JSON.stringify(resposta),ins.lastID]);
     await finalizarPedido(pedido);
     const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
@@ -780,6 +782,7 @@ async function executarConsultaImeiInfoPedido(pedidoId) {
     return { executado:true,sucesso:true,resposta };
   } catch (e) {
     const status=Number(e?.response?.status||0); const detalhe=String(e?.response?.data?.detail||e?.response?.data?.message||e?.message||'Erro na API').slice(0,1000);
+    console.log(`❌ IMEI.INFO AUTO: pedido #${pedido.id} falhou | HTTP ${status||'-'} | ${detalhe}`);
     await run(`UPDATE imei_info_consultas SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [`HTTP ${status||'-'} - ${detalhe}`,ins.lastID]);
     // Se o cliente já foi debitado, devolve o valor; falha técnica/API nunca vira cobrança concluída.
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedido.id]);
@@ -3438,12 +3441,16 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido Telegram', `${cliente.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(cliente, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
+      await enviarParaCanaisCliente(cliente, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: ${servico.api_provider === 'IMEI_INFO' ? 'PROCESSANDO AUTOMATICAMENTE' : 'PENDENTE'}`, from);
+      if (servico.api_provider === 'IMEI_INFO') await executarConsultaImeiInfoPedido(criados[0].id);
       return;
     }
     notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
     await avisarNovoLoteAdmins(cliente, servico, criados.length, valor * criados.length);
-    await enviarParaCanaisCliente(cliente, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
+    await enviarParaCanaisCliente(cliente, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\n${servico.api_provider === 'IMEI_INFO' ? '⚡ Consultas sendo processadas automaticamente.' : 'Cada IMEI virou um pedido separado.'}${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
+    if (servico.api_provider === 'IMEI_INFO') {
+      for (const criado of criados) await executarConsultaImeiInfoPedido(criado.id);
+    }
     return;
   }
 
@@ -5056,13 +5063,17 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: ${servico.api_provider === 'IMEI_INFO' ? 'PROCESSANDO AUTOMATICAMENTE' : 'PENDENTE'}`, from);
+      if (servico.api_provider === 'IMEI_INFO') await executarConsultaImeiInfoPedido(criados[0].id);
       return;
     }
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
     await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
-    await enviarParaCanaisCliente(revenda, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
+    await enviarParaCanaisCliente(revenda, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\n${servico.api_provider === 'IMEI_INFO' ? '⚡ Consultas sendo processadas automaticamente e serão entregues uma a uma.' : 'Cada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.'}${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
+    if (servico.api_provider === 'IMEI_INFO') {
+      for (const criado of criados) await executarConsultaImeiInfoPedido(criado.id);
+    }
     return;
   }
 
