@@ -862,13 +862,26 @@ async function executarPedidoDhru(pedidoId){
   try{
     const resp=await dhruRequest('post','/order',payload);
     if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'A API Dhru rejeitou o pedido');
-    const arr=Array.isArray(resp?.data)?resp.data:(resp?.data?[resp.data]:[]);
+    // A API oficial pode retornar data como array simples OU array aninhado (lotes).
+    // Achata de forma segura para localizar o pedido pelo reference_id.
+    const flattenDhruData=(v)=>{
+      if(!Array.isArray(v)) return v==null?[]:[v];
+      return v.flatMap(x=>Array.isArray(x)?flattenDhruData(x):[x]);
+    };
+    const arr=flattenDhruData(resp?.data).filter(Boolean);
     const data=arr.find(x=>String(x?.reference_id||'')===String(pedido.id))||arr[0]||{};
-    const orderUuid=String(data?.order_uuid||data?.order_id||'');
-    if(!orderUuid) throw new Error(resp?.message||'Pedido enviado, mas a API não retornou order_uuid');
-    await run(`UPDATE dhru_orders SET status='ENVIADO',order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid,JSON.stringify(resp),ins.lastID]);
+    const orderUuid=String(data?.order_uuid||data?.order_id||'').trim();
+
+    // status=success / code=200 significa que o fornecedor ACEITOU o pedido.
+    // Algumas instalações não retornam order_uuid imediatamente, mas o feedback_url
+    // ainda envia reference_id + order_id depois. NUNCA estornar um pedido aceito.
+    const apiOk=String(resp?.status||'').toLowerCase()==='success' || Number(resp?.code)===200;
+    if(!orderUuid && !apiOk) throw new Error(resp?.message||'A API Dhru não confirmou o envio do pedido');
+
+    await run(`UPDATE dhru_orders SET status=?,order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid?'ENVIADO':'AGUARDANDO_FEEDBACK',orderUuid,JSON.stringify(resp),ins.lastID]);
     await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
-    return {executado:true,sucesso:true,orderUuid,resposta:resp};
+    console.log(`✅ DHRU pedido ${pedido.id} aceito pelo fornecedor${orderUuid?' | '+orderUuid:' | aguardando feedback'}`);
+    return {executado:true,sucesso:true,orderUuid:orderUuid||null,aguardandoFeedback:!orderUuid,resposta:resp};
   } catch(e){
     const detalhe=String(e?.response?.data?.message||e?.response?.data?.detail||e.message||'Falha na API Dhru').slice(0,1000);
     await run(`UPDATE dhru_orders SET status='ERRO_ENVIO',erro=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[detalhe,ins.lastID]);
@@ -4125,7 +4138,7 @@ ${detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIADO AUTOMATICAMENTE AO FORNECEDOR' : 'PENDENTE'}`, from);
+📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIANDO AO FORNECEDOR...' : 'PENDENTE'}`, from);
     if (servico.api_provider === 'DHRU') {
       for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
     }
@@ -5942,7 +5955,7 @@ ${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIADO AUTOMATICAMENTE AO FORNECEDOR' : 'PENDENTE'}`, jid);
+📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIANDO AO FORNECEDOR...' : 'PENDENTE'}`, jid);
   if (servico.api_provider === 'DHRU') {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
