@@ -749,7 +749,28 @@ function dhruProductsFromPayload(payload){
   if(Array.isArray(products)) return products.map((v,i)=>[String(v.product_uuid||v.uuid||v.id||i),v]);
   return Object.entries(products||{});
 }
-function dhruCategoriesFromPayload(payload){ return payload?.data?.categories || payload?.categories || {}; }
+function dhruCategoriesFromPayload(payload){
+  const raw=payload?.data?.categories || payload?.categories || {};
+  if(Array.isArray(raw)){
+    const out={};
+    raw.forEach((c,i)=>{
+      if(!c) return;
+      const id=String(c.id||c.cid||c.uuid||c.code||`C${i+1}`);
+      out[id]=typeof c==='string'?{name:c}:c;
+    });
+    return out;
+  }
+  return raw&&typeof raw==='object'?raw:{};
+}
+function dhruCategoryNames(product,cats){
+  const cids=Array.isArray(product?.cids)?product.cids.map(String):[];
+  const names=cids.map(cid=>{
+    const c=cats?.[cid];
+    if(typeof c==='string') return c;
+    return c?.name||c?.title||c?.label||cid;
+  }).map(x=>String(x||'').trim()).filter(Boolean);
+  return [...new Set(names)];
+}
 function dhruUserFields(product){
   const fields=Array.isArray(product?.fields)?product.fields:[];
   return fields.filter(f=>{
@@ -781,8 +802,9 @@ async function sincronizarProdutosDhru(){
     if(!uuid||!prod) continue;
     const nome=String(prod.name||`Dhru ${uuid}`).trim();
     const custo=Number(prod.price||0)||0;
-    const cids=Array.isArray(prod.cids)?prod.cids:[];
-    const categoria=cids.map(cid=>cats?.[cid]?.name||cid).filter(Boolean).join(' / ') || 'Dhru';
+    const cids=Array.isArray(prod.cids)?prod.cids.map(String):[];
+    const categorias=dhruCategoryNames(prod,cats);
+    const categoria=categorias.join(' / ') || 'Sem categoria';
     const campos=dhruFieldSummary(prod);
     const descricao=`Produto sincronizado automaticamente da API Dhru. Campos: ${campos}`;
     const tipo=dhruTipoEntrada(prod), label=dhruEntradaLabel(prod);
@@ -795,7 +817,7 @@ async function sincronizarProdutosDhru(){
     } else {
       await run(`UPDATE servicos_catalogo SET nome=?,tipo_entrada=?,entrada_label=?,categoria=?,descricao=?,prazo='Automático via Dhru',api_cost=?,api_auto=1 WHERE id=?`,[nome,tipo,label,categoria,descricao,custo,existente.id]);
     }
-    await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,atualizado_em) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId]);
+    await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,cids_json,categorias_json,atualizado_em) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId,JSON.stringify(cids),JSON.stringify(categorias)]);
     sincronizados++;
   }
   await setConfig('dhru_ultima_sync',new Date().toISOString());
@@ -1076,6 +1098,8 @@ async function initDB() {
     catalogo_id INTEGER,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await addColumnIfMissing('dhru_products', 'cids_json', "TEXT DEFAULT '[]'");
+  await addColumnIfMissing('dhru_products', 'categorias_json', "TEXT DEFAULT '[]'");
   await run(`CREATE TABLE IF NOT EXISTS dhru_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pedido_id INTEGER UNIQUE,
@@ -9258,18 +9282,45 @@ app.post('/admin/temas/personalizar', async (req,res) => { const bg=String(req.b
 
 app.get('/admin/dhru', async (req,res) => {
   const tok=await dhruToken(), base=await dhruBaseUrl(), pub=await dhruPublicBase();
-  const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.categoria COLLATE NOCASE,d.nome COLLATE NOCASE`);
+  const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.nome COLLATE NOCASE`);
   const ultima=await getConfig('dhru_ultima_sync','Nunca');
   const prefix=await dhruApiPrefix();
   const detected=base?`${base}/${prefix}`:'';
+  const selectedCat=String(req.query.cat||'').trim();
+  const busca=String(req.query.q||'').trim().toLowerCase();
   const aviso=req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:'';
-  const tabela=rows.length?`<div class="card"><h2>📦 Produtos sincronizados (${rows.length})</h2><p class="muted">Todos os produtos da sua conta Dhru aparecem aqui. Defina o preço de venda e ative os que deseja oferecer.</p><table><tr><th>Categoria / Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Venda</th></tr>${rows.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){}return `<tr><td><small>${safeHtml(r.categoria||'Dhru')}</small><br><b>${safeHtml(r.nome)}</b></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}</td><td>${safeHtml(fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>f.name).join(', ')||'—')}</td><td><form class="forms-inline" method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input name="preco" value="${Number(r.preco_padrao||0)}" style="width:100px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><button class="btn green">Salvar</button></form></td></tr>`}).join('')}</table></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`;
-  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, produtos, pedidos automáticos e retorno por feedback URL.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint detectado:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar todos os produtos</button></form><p class="mini-help">O teste usa as rotas oficiais /api/reseller/v1/account e /api/reseller/v1/products. Produtos novos entram inativos e com preço de venda R$ 0,00.</p></div></div>${tabela}`));
+
+  function categoriasDaLinha(r){
+    let cs=[];
+    try{cs=JSON.parse(r.categorias_json||'[]')}catch(_){}
+    if(!Array.isArray(cs)||!cs.length) cs=String(r.categoria||'Sem categoria').split(' / ').map(x=>x.trim()).filter(Boolean);
+    return [...new Set(cs.length?cs:['Sem categoria'])];
+  }
+  const catMap=new Map();
+  for(const r of rows){
+    for(const c of categoriasDaLinha(r)){
+      if(!catMap.has(c)) catMap.set(c,{nome:c,total:0,ativos:0});
+      const x=catMap.get(c); x.total++; if(Number(r.ativo)) x.ativos++;
+    }
+  }
+  const categorias=[...catMap.values()].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+  const categoriasHtml=rows.length?`<div class="card"><h2>📂 Categorias da API (${categorias.length})</h2><p class="muted">Categorias importadas diretamente do campo <code>categories</code> da API Dhru. Abra uma categoria para escolher quais serviços deseja ativar.</p><div class="grid">${categorias.map(c=>`<a class="card" style="text-decoration:none;display:block" href="/admin/dhru?cat=${encodeURIComponent(c.nome)}"><h3>📁 ${safeHtml(c.nome)}</h3><p><b>${c.total}</b> produto(s)</p><p class="muted">${c.ativos} ativo(s) • ${c.total-c.ativos} inativo(s)</p></a>`).join('')}</div></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`;
+
+  let produtosHtml='';
+  if(selectedCat){
+    let filtrados=rows.filter(r=>categoriasDaLinha(r).includes(selectedCat));
+    if(busca) filtrados=filtrados.filter(r=>String(r.nome||'').toLowerCase().includes(busca)||String(r.product_uuid||'').toLowerCase().includes(busca));
+    const encodedCat=encodeURIComponent(selectedCat);
+    const linhas=filtrados.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){};const campos=fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>f.name).join(', ')||'—';return `<tr><td><input form="dhruBulk" type="checkbox" name="ids" value="${Number(r.catalogo_id)}"></td><td><b>${safeHtml(r.nome)}</b><br><small>${categoriasDaLinha(r).map(safeHtml).join(' • ')}</small></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}</td><td>${safeHtml(campos)}</td><td><form class="forms-inline" method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input type="hidden" name="voltar_cat" value="${safeHtml(selectedCat)}"><input name="preco" value="${Number(r.preco_padrao||0)}" style="width:100px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><button class="btn green">Salvar</button></form></td></tr>`}).join('');
+    produtosHtml=`<div class="card"><p><a class="btn gray" href="/admin/dhru">← Todas as categorias</a></p><h2>📁 ${safeHtml(selectedCat)} (${filtrados.length})</h2><form method="get" action="/admin/dhru" class="forms-inline"><input type="hidden" name="cat" value="${safeHtml(selectedCat)}"><input name="q" value="${safeHtml(req.query.q||'')}" placeholder="Buscar produto nesta categoria"><button class="btn">🔎 Buscar</button></form><form id="dhruBulk" method="post" action="/admin/dhru/produtos/lote"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><div class="forms-inline" style="margin:12px 0"><select name="acao"><option value="ativar">✅ Ativar selecionados</option><option value="desativar">⛔ Desativar selecionados</option></select><button class="btn green">Aplicar aos marcados</button></div></form><table><tr><th>✓</th><th>Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Venda</th></tr>${linhas||'<tr><td colspan="6">Nenhum produto encontrado.</td></tr>'}</table></div>`;
+  }
+  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, categorias oficiais, produtos, pedidos automáticos e retorno por feedback URL.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><p><b>Produtos:</b> ${rows.length} &nbsp; <b>Categorias oficiais:</b> ${categorias.length}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar produtos e categorias</button></form><p class="mini-help">As categorias vêm diretamente de <code>data.categories</code> e os produtos são ligados a elas pelo campo <code>cids</code> da própria API.</p></div></div>${selectedCat?produtosHtml:categoriasHtml}`));
 });
 app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','api/reseller/v1');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
 app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
-app.post('/admin/dhru/produto/:id',async(req,res)=>{const preco=Math.max(0,Number(String(req.body.preco||'0').replace(',','.'))||0);const ativo=String(req.body.ativo||'0')==='1'?1:0;await run(`UPDATE servicos_catalogo SET preco_padrao=?,ativo=? WHERE id=? AND api_provider='DHRU'`,[preco,ativo,req.params.id]);res.redirect('/admin/dhru?ok='+encodeURIComponent('Preço e status atualizados'));});
+app.post('/admin/dhru/produto/:id',async(req,res)=>{const preco=Math.max(0,Number(String(req.body.preco||'0').replace(',','.'))||0);const ativo=String(req.body.ativo||'0')==='1'?1:0;await run(`UPDATE servicos_catalogo SET preco_padrao=?,ativo=? WHERE id=? AND api_provider='DHRU'`,[preco,ativo,req.params.id]);const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent('Preço e status atualizados'));});
+app.post('/admin/dhru/produtos/lote',async(req,res)=>{try{let ids=req.body.ids||[];if(!Array.isArray(ids))ids=[ids];ids=ids.map(Number).filter(n=>Number.isInteger(n)&&n>0);const ativo=String(req.body.acao||'')==='ativar'?1:0;if(ids.length){const marks=ids.map(()=>'?').join(',');await run(`UPDATE servicos_catalogo SET ativo=? WHERE api_provider='DHRU' AND id IN (${marks})`,[ativo,...ids]);}const cat=String(req.body.categoria||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent(`${ids.length} serviço(s) ${ativo?'ativado(s)':'desativado(s)'}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
 
 app.get('/admin/config', async (req, res) => {
