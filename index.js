@@ -670,218 +670,505 @@ function temCor() { return TEMAS_PAINEL[temaAtual()].cor; }
 async function getConfig(chave, padrao='') { const r = await get('SELECT valor FROM configs WHERE chave=?', [chave]); return r ? r.valor : padrao; }
 async function setConfig(chave, valor) { await run('INSERT OR REPLACE INTO configs (chave, valor, atualizado_em) VALUES (?, ?, CURRENT_TIMESTAMP)', [chave, valor]); }
 
-// ===== V163 — Dhru Reseller API (exclusivo) =====
-const DHRU_SECRET_FILE = path.join(DATA_DIR, 'dhru-reseller-secret.key');
-function dhruCryptoKey() {
+// ===== V162 — IMEI.info API =====
+const IMEI_INFO_BASE_URL = 'https://dash.imei.info/api';
+const IMEI_INFO_SECRET_FILE = path.join(DATA_DIR, 'imei-info-secret.key');
+function imeiInfoCryptoKey() {
   try {
-    if (!fs.existsSync(DHRU_SECRET_FILE)) {
-      fs.mkdirSync(path.dirname(DHRU_SECRET_FILE), { recursive: true });
-      fs.writeFileSync(DHRU_SECRET_FILE, crypto.randomBytes(32), { mode: 0o600 });
+    if (!fs.existsSync(IMEI_INFO_SECRET_FILE)) {
+      fs.mkdirSync(path.dirname(IMEI_INFO_SECRET_FILE), { recursive: true });
+      fs.writeFileSync(IMEI_INFO_SECRET_FILE, crypto.randomBytes(32), { mode: 0o600 });
     }
-    const k = fs.readFileSync(DHRU_SECRET_FILE);
+    const k = fs.readFileSync(IMEI_INFO_SECRET_FILE);
     if (k.length === 32) return k;
-  } catch (e) { console.log('⚠️ Chave local Dhru:', e.message); }
-  return crypto.createHash('sha256').update(String(ADMIN_PANEL_PASS || 'centralunlocker') + '|dhru-v163').digest();
+  } catch (e) { console.log('⚠️ Chave local IMEI.info:', e.message); }
+  return crypto.createHash('sha256').update(String(ADMIN_PANEL_PASS || 'centralunlocker') + '|imei-info-v162').digest();
 }
-function dhruEncrypt(valor) {
-  const iv=crypto.randomBytes(12), key=dhruCryptoKey();
-  const cipher=crypto.createCipheriv('aes-256-gcm',key,iv);
-  const enc=Buffer.concat([cipher.update(String(valor),'utf8'),cipher.final()]);
-  const tag=cipher.getAuthTag();
-  return ['v1',iv.toString('base64'),tag.toString('base64'),enc.toString('base64')].join(':');
+function criptografarTokenImeiInfo(token) {
+  const iv = crypto.randomBytes(12), key = imeiInfoCryptoKey();
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(String(token), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ['v1', iv.toString('base64'), tag.toString('base64'), enc.toString('base64')].join(':');
 }
-function dhruDecrypt(valor) {
+function descriptografarTokenImeiInfo(valor) {
   try {
-    const [v,ivb,tagb,encb]=String(valor||'').split(':');
-    if(v!=='v1') return '';
-    const d=crypto.createDecipheriv('aes-256-gcm',dhruCryptoKey(),Buffer.from(ivb,'base64'));
-    d.setAuthTag(Buffer.from(tagb,'base64'));
-    return Buffer.concat([d.update(Buffer.from(encb,'base64')),d.final()]).toString('utf8');
-  } catch(_) { return ''; }
+    const [v,ivb,tagb,encb] = String(valor||'').split(':');
+    if (v !== 'v1') return '';
+    const decipher = crypto.createDecipheriv('aes-256-gcm', imeiInfoCryptoKey(), Buffer.from(ivb,'base64'));
+    decipher.setAuthTag(Buffer.from(tagb,'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(encb,'base64')), decipher.final()]).toString('utf8');
+  } catch (_) { return ''; }
 }
-function dhruMask(t){ t=String(t||''); return t?`${'•'.repeat(Math.min(12,Math.max(6,t.length-4)))}${t.slice(-4)}`:'Não configurado'; }
-function dhruNormalizeBaseUrl(u){ return String(u||'').trim().replace(/\/+$/,''); }
-async function dhruToken(){ return dhruDecrypt(await getConfig('dhru_token_enc','')); }
-async function dhruBaseUrl(){ return dhruNormalizeBaseUrl(await getConfig('dhru_base_url','')); }
-async function dhruCallbackSecret(){
-  let v=await getConfig('dhru_callback_secret','');
-  if(!v){ v=crypto.randomBytes(24).toString('hex'); await setConfig('dhru_callback_secret',v); }
-  return v;
-}
-async function dhruPublicBase(){ return dhruNormalizeBaseUrl(await getConfig('dhru_public_base_url', process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '')); }
-async function dhruRequest(method, endpoint, data=null, params=null){
-  const base=await dhruBaseUrl(), token=await dhruToken();
-  if(!base) throw new Error('URL da API Dhru não configurada no painel.');
-  if(!token) throw new Error('Token Dhru não configurado no painel.');
-  const url=`${base}${endpoint.startsWith('/')?'':'/'}${endpoint}`;
-  const r=await axios({method,url,data,params,timeout:90000,headers:{Authorization:`Bearer ${token}`,Accept:'application/json','Content-Type':'application/json'},validateStatus:s=>s>=200&&s<300});
-  return r.data;
-}
-function dhruProductsFromPayload(payload){
-  const data=payload?.data||payload||{};
-  const products=data.products||{};
-  if(Array.isArray(products)) return products.map((v,i)=>[String(v.product_uuid||v.uuid||v.id||i),v]);
-  return Object.entries(products||{});
-}
-function dhruCategoriesFromPayload(payload){ return payload?.data?.categories || payload?.categories || {}; }
-function dhruUserFields(product){
-  const fields=Array.isArray(product?.fields)?product.fields:[];
-  return fields.filter(f=>{
-    const n=String(f?.name||'').toLowerCase();
-    return !['feedback_url','reference_id','quantity'].includes(n);
-  });
-}
-function dhruFieldSummary(product){
-  const fs=dhruUserFields(product);
-  if(!fs.length) return 'Nenhum dado adicional';
-  return fs.map(f=>`${f.required?'*':''}${f.name}`).join(', ');
-}
-function dhruTipoEntrada(product){
-  const fs=dhruUserFields(product).filter(f=>f.required!==false);
-  return fs.length===1 && String(fs[0].name||'').toUpperCase()==='IMEI' ? 'IMEI' : 'OUTRO';
-}
-function dhruEntradaLabel(product){
-  const fs=dhruUserFields(product).filter(f=>f.required!==false);
-  if(fs.length===1) return String(fs[0].name||'Dados');
-  return fs.length ? `Dados: ${fs.map(f=>f.name).join(' / ')}`.slice(0,180) : 'Dados do pedido';
-}
-async function sincronizarProdutosDhru(){
-  const payload=await dhruRequest('get','/products');
-  const cats=dhruCategoriesFromPayload(payload);
-  const entries=dhruProductsFromPayload(payload);
-  const currency=String(payload?.data?.currency||payload?.currency||'').trim();
-  let sincronizados=0,novos=0;
-  for(const [uuid,prod] of entries){
-    if(!uuid||!prod) continue;
-    const nome=String(prod.name||`Dhru ${uuid}`).trim();
-    const custo=Number(prod.price||0)||0;
-    const cids=Array.isArray(prod.cids)?prod.cids:[];
-    const categoria=cids.map(cid=>cats?.[cid]?.name||cid).filter(Boolean).join(' / ') || 'Dhru';
-    const campos=dhruFieldSummary(prod);
-    const descricao=`Produto sincronizado automaticamente da API Dhru. Campos: ${campos}`;
-    const tipo=dhruTipoEntrada(prod), label=dhruEntradaLabel(prod);
-    const existente=await get(`SELECT * FROM servicos_catalogo WHERE api_provider='DHRU' AND api_service_id=?`,[uuid]);
-    let catalogoId=existente?.id||null;
-    if(!existente){
-      const ins=await run(`INSERT INTO servicos_catalogo (nome,preco_padrao,tipo_entrada,entrada_label,categoria,descricao,prazo,ativo,api_provider,api_service_id,api_cost,api_auto)
-        VALUES (?,0,?,?,?,?, 'Automático via Dhru',0,'DHRU',?,?,1)`,[nome,tipo,label,categoria,descricao,uuid,custo]);
-      catalogoId=ins.lastID; novos++;
-    } else {
-      await run(`UPDATE servicos_catalogo SET nome=?,tipo_entrada=?,entrada_label=?,categoria=?,descricao=?,prazo='Automático via Dhru',api_cost=?,api_auto=1 WHERE id=?`,[nome,tipo,label,categoria,descricao,custo,existente.id]);
+async function tokenImeiInfo() { return descriptografarTokenImeiInfo(await getConfig('imei_info_token_enc','')); }
+function mascaraTokenImeiInfo(t) { t=String(t||''); return t ? `${'•'.repeat(Math.min(12,Math.max(6,t.length-4)))}${t.slice(-4)}` : 'Não configurado'; }
+async function imeiInfoRequest(method, endpoint, params={}) {
+  const token = await tokenImeiInfo();
+  if (!token) throw new Error('Token IMEI.info não configurado no painel.');
+  const url = `${IMEI_INFO_BASE_URL}${endpoint.startsWith('/')?'':'/'}${endpoint}`;
+  const executar = async prefix => axios({ method, url, params, timeout: 90000, headers: { Authorization: `${prefix} ${token}`, Accept: 'application/json' }, validateStatus:s=>s>=200&&s<300 });
+  try { return (await executar('Bearer')).data; }
+  catch (e) {
+    if (Number(e?.response?.status||0) === 401) {
+      try { return (await executar('Token')).data; } catch (e2) { throw e2; }
     }
-    await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,atualizado_em) VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId]);
+    throw e;
+  }
+}
+function acharArrayServicosImeiInfo(payload) {
+  if (Array.isArray(payload)) return payload;
+  for (const k of ['results','data','services','items']) if (Array.isArray(payload?.[k])) return payload[k];
+  if (payload && typeof payload === 'object') {
+    for (const v of Object.values(payload)) if (Array.isArray(v)) return v;
+  }
+  return [];
+}
+function campoPrimeiro(obj, nomes, padrao='') { for (const n of nomes) if (obj?.[n] !== undefined && obj?.[n] !== null && String(obj[n]).trim()!=='') return obj[n]; return padrao; }
+async function sincronizarServicosImeiInfo() {
+  const payload = await imeiInfoRequest('get','/service/services/');
+  const lista = acharArrayServicosImeiInfo(payload);
+  let sincronizados=0, novos=0;
+  for (const item of lista) {
+    const sid = String(campoPrimeiro(item,['id','service_id','serviceId','service','slug','key'],'')).trim();
+    if (!sid) continue;
+    const nome = String(campoPrimeiro(item,['name','title','service_name','serviceName'],`IMEI.info ${sid}`)).trim();
+    const desc = String(campoPrimeiro(item,['description','desc','info'],'')||'').trim();
+    const custo = Number(String(campoPrimeiro(item,['price','cost','credit','credits','amount'],0)).replace(',','.')) || 0;
+    const existente = await get(`SELECT * FROM servicos_catalogo WHERE api_provider='IMEI_INFO' AND api_service_id=?`, [sid]);
+    let catalogoId = existente?.id || null;
+    if (!existente) {
+      const ins = await run(`INSERT INTO servicos_catalogo (nome,preco_padrao,tipo_entrada,entrada_label,categoria,descricao,prazo,ativo,api_provider,api_service_id,api_cost,api_auto)
+        VALUES (?,0,'IMEI','IMEI','Consultas IMEI.info',?,'Automático',0,'IMEI_INFO',?,?,1)`, [nome,desc,sid,custo]);
+      catalogoId = ins.lastID; novos++;
+    } else {
+      await run(`UPDATE servicos_catalogo SET nome=?, descricao=?, api_cost=?, api_auto=1 WHERE id=?`, [nome,desc,custo,existente.id]);
+    }
+    await run(`INSERT OR REPLACE INTO imei_info_services (api_service_id,nome,descricao,custo,raw_json,catalogo_id,atualizado_em) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)`, [sid,nome,desc,custo,JSON.stringify(item),catalogoId]);
     sincronizados++;
   }
-  await setConfig('dhru_ultima_sync',new Date().toISOString());
-  await setConfig('dhru_currency',currency);
-  return {sincronizados,novos,total:entries.length,currency};
+  await setConfig('imei_info_ultima_sync', new Date().toISOString());
+  return { sincronizados, novos, totalRecebido: lista.length };
 }
-async function dhruProductForService(servicoId){
-  const r=await get(`SELECT d.* FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE s.id=? AND s.api_provider='DHRU'`,[servicoId]);
-  if(!r) return null;
-  try { r.fields=JSON.parse(r.fields_json||'[]'); } catch(_){ r.fields=[]; }
-  try { r.raw=JSON.parse(r.raw_json||'{}'); } catch(_){ r.raw={}; }
-  return r;
+function formatarObjetoImeiInfo(data) {
+  const ignorar = new Set(['id','created_at','updated_at','raw']);
+  const linhas=[];
+  function walk(v,prefix='',depth=0){
+    if (linhas.length>=45 || depth>3 || v===null || v===undefined) return;
+    if (Array.isArray(v)) { if(v.length && typeof v[0] !== 'object') linhas.push(`${prefix}: ${v.join(', ')}`); else v.slice(0,8).forEach((x,i)=>walk(x,`${prefix} ${i+1}`.trim(),depth+1)); return; }
+    if (typeof v==='object') { for(const [k,x] of Object.entries(v)){ if(ignorar.has(k)) continue; const label=String(k).replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()); walk(x,prefix?`${prefix} • ${label}`:label,depth+1); if(linhas.length>=45) break;} return; }
+    const txt=String(v).trim(); if(txt && txt!=='[object Object]') linhas.push(`${prefix}: ${txt}`);
+  }
+  const raiz = data?.data ?? data?.result ?? data;
+  walk(raiz);
+  return linhas.length ? linhas.join('\n') : JSON.stringify(raiz,null,2).slice(0,3500);
 }
-function dhruParseInput(product, entrada){
-  const fields=(product?.fields||[]).filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
-  const required=fields.filter(f=>f.required!==false);
-  const txt=String(entrada||'').trim();
-  const out={};
-  if(required.length<=1 && fields.length<=1){
-    if(fields[0]) out[fields[0].name]=txt;
-    return out;
-  }
-  const lines=txt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-  for(const line of lines){
-    const m=line.match(/^([^:=]+)\s*[:=]\s*(.+)$/);
-    if(m) out[m[1].trim().toLowerCase()]=m[2].trim();
-  }
-  const final={};
-  for(const f of fields){
-    const key=String(f.name||'');
-    const val=out[key.toLowerCase()];
-    if(val!==undefined) final[key]=val;
-  }
-  const missing=required.filter(f=>!String(final[f.name]??'').trim());
-  if(missing.length) throw new Error(`Dados obrigatórios ausentes: ${missing.map(f=>f.name).join(', ')}`);
-  return final;
-}
-async function textoEntradaDhru(servico){
-  const p=await dhruProductForService(servico.id);
-  if(!p) return `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`;
-  const fs=(p.fields||[]).filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
-  if(fs.length<=1) return `${iconeEntradaServico(servico)} Informe o ${fs[0]?.name||labelEntradaServico(servico)}:`;
-  return `📋 Envie os dados abaixo, *um por linha*, usando exatamente este formato:\n\n${fs.map(f=>`${f.name}: ${f.required===false?'(opcional)':'...'}`).join('\n')}\n\nExemplo:\n${fs.map(f=>`${f.name}: exemplo`).join('\n')}`;
-}
-async function executarPedidoDhru(pedidoId){
-  const pedido=await get(`SELECT p.*,s.api_provider,s.api_service_id FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[pedidoId]);
-  if(!pedido||pedido.api_provider!=='DHRU'||!pedido.api_service_id) return {executado:false};
-  const ja=await get(`SELECT * FROM dhru_orders WHERE pedido_id=? AND status NOT IN ('ERRO_ENVIO','REJEITADO') ORDER BY id DESC LIMIT 1`,[pedido.id]);
-  if(ja) return {executado:true,jaExiste:true};
-  const product=await dhruProductForService(pedido.servico_id);
-  if(!product) throw new Error('Produto Dhru não encontrado localmente. Sincronize os serviços.');
-  let campos;
-  try { campos=dhruParseInput(product,pedido.entrada_valor||pedido.imei||''); }
-  catch(e){
-    await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[e.message,pedido.id]);
-    throw e;
-  }
-  const pub=await dhruPublicBase(), secret=await dhruCallbackSecret();
-  if(pub) campos.feedback_url=`${pub}/api/dhru/feedback?secret=${encodeURIComponent(secret)}`;
-  campos.reference_id=String(pedido.id);
-  if(campos.Quantity===undefined && campos.quantity===undefined) campos.Quantity=1;
-  const payload=[{product_uuid:pedido.api_service_id,fields:[campos]}];
-  const ins=await run(`INSERT INTO dhru_orders (pedido_id,revenda_id,product_uuid,reference_id,status,request_json) VALUES (?,?,?,?, 'ENVIANDO',?)`,[pedido.id,pedido.revenda_id,pedido.api_service_id,String(pedido.id),JSON.stringify(payload)]);
-  try{
-    const resp=await dhruRequest('post','/order',payload);
-    const data=Array.isArray(resp?.data)?resp.data[0]:resp?.data;
-    const orderUuid=String(data?.order_uuid||data?.order_id||'');
-    await run(`UPDATE dhru_orders SET status='ENVIADO',order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid,JSON.stringify(resp),ins.lastID]);
-    await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
-    return {executado:true,sucesso:true,orderUuid,resposta:resp};
-  } catch(e){
-    const detalhe=String(e?.response?.data?.message||e?.response?.data?.detail||e.message||'Falha na API Dhru').slice(0,1000);
-    await run(`UPDATE dhru_orders SET status='ERRO_ENVIO',erro=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[detalhe,ins.lastID]);
+async function executarConsultaImeiInfoPedido(pedidoId) {
+  const pedido = await get(`SELECT p.*, s.api_provider,s.api_service_id,s.api_auto FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [pedidoId]);
+  if (!pedido || pedido.api_provider !== 'IMEI_INFO' || !pedido.api_service_id) return { executado:false };
+  const imei=String(pedido.entrada_valor||pedido.imei||'').replace(/\D/g,'');
+  if (!/^\d{15}$/.test(imei)) return { executado:false, erro:'IMEI inválido' };
+  const ja = await get(`SELECT * FROM imei_info_consultas WHERE pedido_id=? AND status='CONCLUIDO' ORDER BY id DESC LIMIT 1`, [pedido.id]);
+  if (ja) return { executado:true, sucesso:true, resposta:JSON.parse(ja.resposta_json||'{}') };
+  const ins = await run(`INSERT INTO imei_info_consultas (pedido_id,revenda_id,api_service_id,imei,status) VALUES (?,?,?,?, 'PROCESSANDO')`, [pedido.id,pedido.revenda_id,pedido.api_service_id,imei]);
+  try {
+    const resposta = await imeiInfoRequest('get',`/check/${encodeURIComponent(pedido.api_service_id)}/`,{ imei, sync:true });
+    await run(`UPDATE imei_info_consultas SET status='CONCLUIDO',resposta_json=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [JSON.stringify(resposta),ins.lastID]);
+    await finalizarPedido(pedido);
+    const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
+    const msg = `✅ *Consulta IMEI concluída*\n\n🛠 Serviço: ${pedido.servico_nome}\n📱 IMEI: ${imei}\n\n${formatarObjetoImeiInfo(resposta)}`;
+    if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
+    return { executado:true,sucesso:true,resposta };
+  } catch (e) {
+    const status=Number(e?.response?.status||0); const detalhe=String(e?.response?.data?.detail||e?.response?.data?.message||e?.message||'Erro na API').slice(0,1000);
+    await run(`UPDATE imei_info_consultas SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`, [`HTTP ${status||'-'} - ${detalhe}`,ins.lastID]);
+    // Se o cliente já foi debitado, devolve o valor; falha técnica/API nunca vira cobrança concluída.
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedido.id]);
-    if(atual?.revenda_id && Number(atual.cobrado||0)===1){
-      await run('UPDATE revendas SET saldo=saldo+?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
-      await run(`UPDATE pedidos SET cobrado=0,estornado=1,status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Falha automática Dhru: ${detalhe}`,pedido.id]);
-    } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Falha automática Dhru: ${detalhe}`,pedido.id]);
-    const cliente=pedido.revenda_id?await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]):null;
-    if(cliente) await enviarParaCanaisCliente(cliente,`⚠️ O pedido não pôde ser enviado ao fornecedor.\n\n🛠 ${pedido.servico_nome}\n\nO valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
-    throw e;
+    if (atual?.revenda_id && Number(atual.cobrado||0)===1) {
+      await run('UPDATE revendas SET saldo=saldo+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
+      await run('UPDATE pedidos SET cobrado=0,estornado=1,status="CANCELADO",motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[`Falha automática IMEI.info: ${detalhe}`,atual.id]);
+    } else await run('UPDATE pedidos SET status="CANCELADO",motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[`Falha automática IMEI.info: ${detalhe}`,pedido.id]);
+    const cliente = pedido.revenda_id ? await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]) : null;
+    const msg = `⚠️ A consulta não pôde ser concluída agora.\n\nServiço: ${pedido.servico_nome}\nIMEI: ${imei}\n\nNenhum valor será mantido como cobrança desta consulta.\nDetalhe: ${detalhe}`;
+    if (cliente) await enviarParaCanaisCliente(cliente,msg,pedido.revenda_jid||''); else if (pedido.revenda_jid) await enviarTexto(pedido.revenda_jid,msg);
+    await avisarAdminTelegram(`⚠️ IMEI.info falhou\nPedido #${pedido.id}\nServiço: ${pedido.servico_nome}\nIMEI: ${imei}\n${detalhe}`);
+    return { executado:true,sucesso:false,erro:detalhe,status };
   }
 }
-function dhruDecodeReplay(v){
-  const s=String(v||'');
-  if(!s) return '';
-  try { const b=Buffer.from(s,'base64').toString('utf8'); if(b && /[\x20-\x7E\u00A0-\uFFFF]/.test(b)) return b; } catch(_){}
-  return s;
+
+
+const historicoIAWhatsApp = new Map();
+// Controla quais clientes estão em conversa exclusiva com a IA.
+// Enquanto a sessão estiver ativa, respostas curtas como "sim", "1" ou "2"
+// não são capturadas pelo menu tradicional.
+const sessoesIAWhatsApp = new Map();
+const OPENAI_API_URL = 'https://api.openai.com/v1/responses';
+const IA_INSTRUCAO_PADRAO = `Você é a atendente virtual e vendedora da CentralUnlocker. Responda sempre em português do Brasil, com educação, objetividade e linguagem simples para WhatsApp.
+
+REGRAS COMERCIAIS OBRIGATÓRIAS:
+1. Para preços, planos, produtos, categorias, estoque e disponibilidade, use SOMENTE o bloco "CATÁLOGO ATUAL DO SISTEMA" fornecido em cada atendimento.
+2. O catálogo atual tem prioridade sobre qualquer informação anterior da conversa. Nunca use preços memorizados.
+3. Nunca invente preço, desconto, prazo, estoque, promoção, serviço ou condição de pagamento.
+4. Quando perguntarem sobre eSIM, planos, produtos, serviços, SSP, blacklist, desbloqueio, bloqueio, preço, valor ou prazo, consulte os DADOS COMERCIAIS ATUAIS e responda com nome, preço, prazo e disponibilidade quando existirem.
+5. Se o estoque estiver zerado, informe claramente que o item está indisponível no momento.
+6. Se um produto ou serviço não existir nos dados atuais, diga que não o encontrou na lista e ofereça atendimento humano. Nunca invente serviço, preço, prazo ou disponibilidade.
+7. Quando houver várias opções, apresente no máximo 8 por resposta e pergunte qual interessa ao cliente.
+8. Ao identificar interesse em produto ou serviço, informe primeiro nome, preço, prazo e disponibilidade usando os dados atuais. Depois pergunte se o cliente deseja comprar ou contratar.
+9. Se o cliente perguntar “qual preço?”, “quanto custa?”, “qual valor?”, “tem estoque?”, “qual prazo?” ou “faz esse serviço?”, responda diretamente usando os dados atuais e o contexto das mensagens anteriores.
+10. Não obrigue o cliente a digitar MENU, COMPRAR ou SERVICOS quando a pergunta puder ser respondida imediatamente. Esses comandos devem ser oferecidos apenas para iniciar ou concluir o fluxo do bot.
+11. Quando a pergunta for curta e depender da mensagem anterior, como “qual preço?” ou “e o prazo?”, identifique o último produto ou serviço mencionado e responda sobre ele.
+12. Ofereça ATENDENTE apenas quando o item não existir nos dados atuais, quando faltarem informações confiáveis ou quando o cliente pedir atendimento humano.
+13. Não confirme pagamentos, não altere pedidos e não afirme que um pedido foi aprovado sem informação do sistema.
+14. Não peça senha, código de verificação, dados bancários completos ou informação sensível.
+15. Não exiba IDs internos do sistema ao cliente.
+16. Responda em no máximo 5 parágrafos curtos. Evite textos longos e não use tabelas.`;
+
+async function configuracaoIAWhatsApp() {
+  return {
+    ativa: (await getConfig('ia_ativa', process.env.IA_ENABLED === 'true' ? '1' : '0')) === '1',
+    modelo: await getConfig('ia_modelo', process.env.OPENAI_MODEL || 'gpt-5-mini'),
+    instrucao: await getConfig('ia_instrucao', IA_INSTRUCAO_PADRAO),
+    maxTokens: Math.max(200, Math.min(1500, Number(await getConfig('ia_max_tokens', process.env.OPENAI_MAX_OUTPUT_TOKENS || '700')) || 300))
+  };
 }
-async function processarFeedbackDhru(body){
-  const reference=String(body?.reference_id||'').trim();
-  if(!reference) throw new Error('reference_id ausente');
-  const pedidoId=Number(reference); if(!pedidoId) throw new Error('reference_id inválido');
-  const pedido=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
-  if(!pedido) throw new Error('pedido não encontrado');
-  const status=String(body?.status||'').toLowerCase();
-  const orderId=String(body?.order_id||body?.order_uuid||'');
-  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.message||'');
-  await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,status.toUpperCase()||'ATUALIZADO',JSON.stringify(body),replay,pedidoId]);
-  const cliente=pedido.revenda_id?await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]):null;
-  if(['success','completed','complete','done'].includes(status)){
-    if(String(pedido.status).toUpperCase()!=='FINALIZADO') await finalizarPedido(pedido);
-    if(cliente) await enviarParaCanaisCliente(cliente,`✅ *Serviço concluído*\n\n🛠 ${pedido.servico_nome}\n${pedido.entrada_label||'Entrada'}: ${pedido.entrada_valor||pedido.imei||'-'}${replay?`\n\n📄 Resultado:\n${replay}`:''}`,pedido.revenda_jid||'');
-  } else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
-    const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
-    if(atual?.revenda_id && Number(atual.cobrado||0)===1 && Number(atual.estornado||0)!==1){
-      await run('UPDATE revendas SET saldo=saldo+?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
-      await run(`UPDATE pedidos SET cobrado=0,estornado=1,status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
-    } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
-    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado pelo fornecedor*\n\n🛠 ${pedido.servico_nome}${replay?`\n📄 Motivo: ${replay}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
+
+const IA_SUPORTE_INSTRUCAO_PADRAO = `Você é a atendente de suporte da CentralUnlocker. Responda em português do Brasil, com mensagens curtas, claras e educadas.
+
+Sua função é tirar dúvidas, explicar produtos, serviços, preços, prazos e disponibilidade usando somente os DADOS COMERCIAIS ATUAIS fornecidos pelo sistema.
+
+REGRA PRINCIPAL: sempre que o cliente quiser comprar, contratar, pagar, gerar PIX, enviar IMEI, consultar saldo, fazer ou acompanhar pedido, direcione-o para o Bot de Serviços usando o link fornecido em cada atendimento. Você não cria pedidos, não recebe IMEI, não gera PIX, não altera saldo e não confirma pagamento.
+
+Nunca invente preço, prazo, estoque ou condição. Quando o cliente pedir atendimento humano, informe que a equipe continuará pelo mesmo WhatsApp.`;
+
+async function configuracaoIASuporte() {
+  return {
+    ativa: (await getConfig('ia_suporte_ativa', process.env.IA_SUPPORT_ENABLED === 'false' ? '0' : '1')) === '1',
+    modelo: await getConfig('ia_suporte_modelo', process.env.OPENAI_MODEL || 'gpt-5-mini'),
+    instrucao: await getConfig('ia_suporte_instrucao', IA_SUPORTE_INSTRUCAO_PADRAO),
+    maxTokens: Math.max(200, Math.min(1200, Number(await getConfig('ia_suporte_max_tokens', '600')) || 600)),
+    numeroBot: normalizarNumeroWhatsApp(await getConfig('whatsapp_bot_servicos_numero', process.env.WHATSAPP_BOT_SERVICOS || ''))
+  };
+}
+
+async function responderIASuporte(numero, texto, nome='Cliente') {
+  const cfg = await configuracaoIASuporte();
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (!cfg.ativa) return { respondeu: false, motivo: 'IA_DESATIVADA' };
+  if (!apiKey) return { respondeu: false, motivo: 'SEM_API_KEY' };
+  const chave = normalizarNumeroWhatsApp(numero);
+  const anterior = historicoIASuporte.get(chave) || [];
+  const contexto = anterior.slice(-8);
+  const linkBot = cfg.numeroBot ? `https://wa.me/${cfg.numeroBot}?text=${encodeURIComponent('Olá, quero acessar os serviços')}` : '';
+  try {
+    const resp = await axios.post(OPENAI_API_URL, {
+      model: cfg.modelo,
+      instructions: `${cfg.instrucao}
+
+Nome do cliente: ${nome}.
+LINK OFICIAL DO BOT DE SERVIÇOS: ${linkBot || 'não configurado no painel'}
+Ao direcionar, mostre o link puro em uma linha separada.
+
+${await montarContextoComercialIA()}`,
+      input: [...contexto, { role: 'user', content: String(texto).slice(0, 2500) }],
+      max_output_tokens: cfg.maxTokens,
+      reasoning: { effort: 'minimal' }, text: { verbosity: 'low' }, store: false
+    }, { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+    const data = resp.data || {};
+    let resposta = String(data.output_text || '').trim();
+    if (!resposta && Array.isArray(data.output)) resposta = data.output.flatMap(o => Array.isArray(o.content) ? o.content : []).map(c => c?.text || '').filter(Boolean).join('\n').trim();
+    if (!resposta) throw new Error('A OpenAI não retornou texto.');
+    resposta = resposta.slice(0, 3200);
+    historicoIASuporte.set(chave, [...contexto, { role: 'user', content: String(texto).slice(0,2500) }, { role: 'assistant', content: resposta }].slice(-10));
+    return { respondeu: true, texto: resposta };
+  } catch (e) {
+    console.log('❌ OPENAI SUPORTE:', e?.response?.data?.error?.message || e.message);
+    return { respondeu: false, motivo: 'ERRO_IA' };
   }
-  return {pedidoId,status,replay};
+}
+
+function chaveIAWhatsApp(numero) {
+  return normalizarNumeroWhatsApp(numero);
+}
+function iaWhatsAppAtivaPara(numero) {
+  return sessoesIAWhatsApp.has(chaveIAWhatsApp(numero));
+}
+function ativarSessaoIAWhatsApp(numero) {
+  const chave = chaveIAWhatsApp(numero);
+  if (chave) sessoesIAWhatsApp.set(chave, { iniciadaEm: Date.now(), ultimaMensagem: Date.now() });
+}
+function encerrarSessaoIAWhatsApp(numero, limparHistorico=false) {
+  const chave = chaveIAWhatsApp(numero);
+  sessoesIAWhatsApp.delete(chave);
+  if (limparHistorico) historicoIAWhatsApp.delete(chave);
+}
+function comandoSaidaIAWhatsApp(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[!?.,;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  if (['menu', 'inicio', 'start', 'voltar ao menu', 'sair da ia'].includes(t)) return 'menu';
+  if (['servicos', 'serviço', 'servico', 'contratar serviço', 'contratar servico', 'ver serviços', 'ver servicos'].includes(t)) return 'servicos';
+  // Só abre o catálogo de eSIM quando o cliente mencionar eSIM/produto/plano.
+  // Frases genéricas como "quero comprar" ou "quero pagar" precisam usar
+  // o contexto da conversa anterior para decidir entre serviço e produto.
+  if (['comprar esim', 'esim', 'ver produtos', 'catalogo', 'catálogo', 'ver planos', 'planos esim'].includes(t)) return 'comprar';
+  if (['cancelar', 'sair', 'parar', 'encerrar'].includes(t)) return 'cancelar';
+  if (t === '6' || t.includes('falar com atendente') || t.includes('atendimento humano') || t === 'atendente' || t === 'suporte') return 'suporte';
+  return '';
+}
+async function montarContextoComercialIA() {
+  try {
+    const produtos = await all(`
+      SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, p.descricao,
+             COALESCE(NULLIF(TRIM(p.categoria), ''), 'Sem categoria') AS categoria,
+             p.ativo,
+             COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END), 0) AS estoque
+      FROM esim_planos p
+      LEFT JOIN esim_estoque e ON e.nome_plano = p.nome_plano
+      WHERE COALESCE(p.ativo, 1)=1
+      GROUP BY p.id
+      ORDER BY categoria, p.nome_plano
+      LIMIT 100
+    `);
+
+    const servicos = await all(`
+      SELECT id, nome, preco_padrao, categoria, descricao, prazo, tipo_entrada, entrada_label
+      FROM servicos_catalogo
+      WHERE COALESCE(ativo, 1)=1
+      ORDER BY categoria, nome
+      LIMIT 100
+    `);
+
+    let campanhas = [];
+    try {
+      campanhas = await all(`
+        SELECT c.nome, c.produto_id, c.ativo, p.nome_plano
+        FROM campanhas_anuncios c
+        LEFT JOIN esim_planos p ON p.id=c.produto_id
+        WHERE COALESCE(c.ativo,0)=1
+        ORDER BY c.id DESC
+        LIMIT 20
+      `);
+    } catch (_) {}
+
+    const destaques = new Set(campanhas.map(c => Number(c.produto_id)).filter(Boolean));
+    const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const blocos = ['DADOS COMERCIAIS ATUAIS DO SISTEMA', `Atualizado em: ${agora}`];
+
+    if (produtos.length) {
+      const linhasProdutos = produtos.map(p => {
+        const preco = Number(p.preco_cliente || p.preco_revenda || 0);
+        const estoque = Number(p.estoque || 0);
+        const disponibilidade = estoque > 0 ? `DISPONÍVEL (${estoque} unidade${estoque === 1 ? '' : 's'})` : 'SEM ESTOQUE';
+        const descricao = String(p.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+        return [
+          `Produto: ${p.nome_plano}`,
+          `Categoria: ${p.categoria}`,
+          `Preço: ${brl(preco)}`,
+          `Disponibilidade: ${disponibilidade}`,
+          destaques.has(Number(p.id)) ? 'Destaque/campanha ativa: SIM' : '',
+          descricao ? `Descrição: ${descricao}` : ''
+        ].filter(Boolean).join(' | ');
+      });
+      blocos.push(`\nPRODUTOS E eSIM:\n${linhasProdutos.join('\n')}`);
+    } else {
+      blocos.push('\nPRODUTOS E eSIM:\nNenhum produto ativo cadastrado.');
+    }
+
+    if (servicos.length) {
+      const linhasServicos = servicos.map(s => {
+        const preco = Number(s.preco_padrao || 0);
+        const descricao = String(s.descricao || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+        const prazo = String(s.prazo || '').replace(/\s+/g, ' ').trim();
+        return [
+          `Serviço: ${s.nome}`,
+          `Categoria: ${s.categoria || 'Serviços'}`,
+          preco > 0 ? `Preço: ${brl(preco)}` : 'Preço: não cadastrado',
+          prazo ? `Prazo: ${prazo}` : 'Prazo: não cadastrado',
+          'Disponibilidade: ATIVO',
+          descricao ? `Descrição: ${descricao}` : ''
+        ].filter(Boolean).join(' | ');
+      });
+      blocos.push(`\nSERVIÇOS:\n${linhasServicos.join('\n')}`);
+    } else {
+      blocos.push('\nSERVIÇOS:\nNenhum serviço ativo cadastrado.');
+    }
+
+    blocos.push('\nINSTRUÇÃO: responda preços e prazos diretamente. Não mostre IDs internos. Quando o cliente disser apenas “qual preço?”, “qual valor?” ou “qual prazo?”, use o último produto ou serviço mencionado no histórico.');
+    return blocos.join('\n');
+  } catch (e) {
+    console.log('⚠️ IA CONTEXTO COMERCIAL:', e.message);
+    return 'DADOS COMERCIAIS ATUAIS DO SISTEMA\nNão foi possível consultar produtos e serviços agora. Não invente preços ou prazos; ofereça atendimento humano.';
+  }
+}
+
+function detectarIntencaoCompraIA(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  return /\b(quero comprar|quero esse|vou levar|pode fechar|pode fazer o pedido|como compro|como faco para comprar|como pagar|quero contratar|fechar pedido)\b/.test(t);
+}
+
+function normalizarBuscaComercial(valor) {
+  return String(valor || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+async function localizarUltimoItemComercialIA(numero) {
+  const chave = chaveIAWhatsApp(numero);
+  const historico = historicoIAWhatsApp.get(chave) || [];
+  const textoHistorico = normalizarBuscaComercial(historico.map(m => m?.content || '').join(' '));
+  if (!textoHistorico) return null;
+
+  const servicos = await all('SELECT * FROM servicos_catalogo WHERE COALESCE(ativo,1)=1 ORDER BY LENGTH(nome) DESC, id DESC');
+  for (const servico of servicos) {
+    const nome = normalizarBuscaComercial(servico.nome);
+    if (nome && textoHistorico.includes(nome)) return { tipo: 'servico', item: servico };
+  }
+
+  const produtos = await all('SELECT * FROM esim_planos WHERE COALESCE(ativo,1)=1 ORDER BY LENGTH(nome_plano) DESC, id DESC');
+  for (const produto of produtos) {
+    const nome = normalizarBuscaComercial(produto.nome_plano);
+    if (nome && textoHistorico.includes(nome)) return { tipo: 'produto', item: produto };
+  }
+  return null;
+}
+
+async function iniciarItemDoContextoIA(from, numeroNorm, cliente) {
+  const contexto = await localizarUltimoItemComercialIA(numeroNorm);
+  if (!contexto) return false;
+
+  encerrarSessaoIAWhatsApp(numeroNorm);
+  if (contexto.tipo === 'servico') {
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: contexto.item.id });
+    await enviarTexto(from, `🛠 *${contexto.item.nome}*\n💰 Valor: ${brl(await precoDaRevenda(cliente.id, contexto.item.id))}\n${contexto.item.prazo ? `⏳ Prazo: ${contexto.item.prazo}\n` : ''}\n${iconeEntradaServico(contexto.item)} Informe o ${labelEntradaServico(contexto.item)} para continuar:`);
+    return true;
+  }
+
+  const estoque = await get(`SELECT COUNT(*) AS qtd FROM esim_estoque WHERE nome_plano=? AND status='DISPONIVEL'`, [contexto.item.nome_plano]);
+  if (Number(estoque?.qtd || 0) < 1) {
+    await enviarTexto(from, `❌ O eSIM *${contexto.item.nome_plano}* está sem estoque no momento. Digite *comprar eSIM* para ver os planos disponíveis.`);
+    return true;
+  }
+  await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: contexto.item });
+  await enviarTexto(from, `📱 *${contexto.item.nome_plano}*\n\n💰 Valor: ${brl(contexto.item.preco_cliente || contexto.item.preco_revenda)}\n💳 Seu saldo: ${brl(cliente.saldo)}\n\n📲 *Antes do pagamento, escolha o aparelho:*\n\n1️⃣ 🍎 iPhone\n2️⃣ 🤖 Android\n0️⃣ ⬅️ Voltar`);
+  return true;
+}
+
+function mensagemPodeIrParaIA(texto, sessao, numero='') {
+  const t = String(texto || '').trim();
+  if (!t) return false;
+  // Em sessão exclusiva, inclusive números e respostas curtas vão para a IA.
+  if (numero && iaWhatsAppAtivaPara(numero)) return true;
+
+  const etapa = String(sessao?.etapa || '');
+  // Regra híbrida: sem fluxo ou no menu principal, qualquer mensagem que não
+  // tenha sido reconhecida anteriormente pelo bot pode ser assumida pela IA.
+  // Isso inclui respostas curtas como "sim" e números fora das opções 1 a 6.
+  return !etapa || etapa === 'menu';
+}
+
+async function responderComOpenAIWhatsApp(numero, texto, cliente) {
+  const cfg = await configuracaoIAWhatsApp();
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (!cfg.ativa || !apiKey) return { respondeu: false };
+
+  const chave = normalizarNumeroWhatsApp(numero);
+  const anterior = historicoIAWhatsApp.get(chave) || [];
+  const contexto = anterior.slice(-8);
+  const intencaoCompra = detectarIntencaoCompraIA(texto);
+  const input = [
+    ...contexto,
+    { role: 'user', content: `${String(texto).slice(0, 2500)}${intencaoCompra ? '\n\n[SISTEMA: Foi detectada intenção de compra. Informe primeiro os dados comerciais disponíveis e pergunte se deseja prosseguir. Só depois indique COMPRAR ou SERVICOS para concluir no fluxo do bot.]' : ''}` }
+  ];
+
+  try {
+    const resp = await axios.post(OPENAI_API_URL, {
+      model: cfg.modelo,
+      instructions: `${cfg.instrucao}\n\nREGRAS DE EXECUÇÃO MAIS RECENTES E OBRIGATÓRIAS:\n- Informe diretamente preço, prazo, estoque e disponibilidade de produtos e serviços cadastrados.\n- Use o contexto da conversa para perguntas curtas como \"qual preço?\".\n- Não diga que não pode informar preço quando ele estiver nos dados atuais.\n- Não mostre IDs internos.\n- Não mande o cliente voltar ao menu antes de responder à pergunta.\n\nNome do cliente: ${cliente?.nome || 'Cliente'}.\n\n${await montarContextoComercialIA()}`,
+      input,
+      max_output_tokens: cfg.maxTokens,
+      reasoning: { effort: 'minimal' },
+      text: { verbosity: 'low' },
+      store: false
+    }, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 30000
+    });
+
+    const data = resp.data || {};
+    let resposta = String(data.output_text || '').trim();
+    if (!resposta && Array.isArray(data.output)) {
+      resposta = data.output.flatMap(o => Array.isArray(o.content) ? o.content : [])
+        .filter(c => c && (c.type === 'output_text' || c.text))
+        .map(c => c.text || '')
+        .join('\n').trim();
+    }
+    if (!resposta) {
+      const motivo = data?.incomplete_details?.reason || data?.status || 'sem_texto';
+      console.log('⚠️ OPENAI RESPOSTA SEM TEXTO:', JSON.stringify({ status: data?.status, motivo, uso: data?.usage }));
+      throw new Error(`A OpenAI não retornou texto (${motivo}).`);
+    }
+    resposta = resposta.slice(0, 3200);
+    // Sem rodapé fixo: a IA responde preço/prazo antes de sugerir comandos.
+
+    ativarSessaoIAWhatsApp(numero);
+    historicoIAWhatsApp.set(chave, [
+      ...contexto,
+      { role: 'user', content: String(texto).slice(0, 2500) },
+      { role: 'assistant', content: resposta }
+    ].slice(-10));
+
+    return { respondeu: true, texto: resposta };
+  } catch (e) {
+    const detalhe = e?.response?.data?.error?.message || e.message;
+    console.log('❌ OPENAI WHATSAPP:', detalhe);
+    return { respondeu: false, erro: detalhe };
+  }
+}
+
+function normalizarTelegramSuporte(valor) {
+  let v = String(valor || '').trim();
+  if (!v) return '';
+  v = v.replace(/^https?:\/\/t\.me\//i, '').replace(/^t\.me\//i, '').replace('@', '').trim();
+  v = v.split(/[\s/?#]/)[0];
+  return v.replace(/[^a-zA-Z0-9_]/g, '');
+}
+async function getTelegramSuporte() {
+  const cfg = await getConfig('telegram_suporte', process.env.SUPORTE_TELEGRAM || process.env.TELEGRAM_SUPORTE || 'alinesantos3360');
+  return normalizarTelegramSuporte(cfg) || 'alinesantos3360';
+}
+async function enviarSuporteTelegram(chatId) {
+  if (!tgBot) return;
+  const usuario = await getTelegramSuporte();
+  const link = `https://t.me/${usuario}`;
+  return tgBot.sendMessage(chatId, `🆘 *Suporte CentralUnlocker*\n\nPrecisa de ajuda?\nClique no botão abaixo para falar diretamente com o suporte.`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: [
+      [{ text: '💬 Falar com o suporte', url: link }],
+      [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
+    ] }
+  });
+}
+
+function emitirAtualizacaoBloqueioTim(motivo='alteracao', pedidoId=null) {
+  io.emit('bloqueio-tim-update', { motivo, pedidoId: pedidoId ? Number(pedidoId) : null, at: Date.now() });
+}
+function notificarPainel(tipo, titulo, mensagem) {
+  const n = { tipo, titulo, mensagem, hora: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) };
+  io.emit('notificacao', n);
+  io.emit('dashboard-update', { at: Date.now() });
+  // V140: novo pedido Bloqueio TIM atualiza a fila dos operadores em tempo real.
+  if (String(tipo||'').toLowerCase()==='pedido' && /bloqueio\s*tim/i.test(String(mensagem||''))) {
+    emitirAtualizacaoBloqueioTim('novo-pedido');
+  }
+  console.log('🔔 PAINEL:', titulo, mensagem || '');
+}
+
+function getText(msg) { return msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || ''; }
+
+async function columnExists(table, col) {
+  const cols = await all(`PRAGMA table_info(${table})`);
+  return cols.some(c => c.name === col);
+}
+async function addColumnIfMissing(table, col, definition) {
+  if (!(await columnExists(table, col))) await run(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition}`);
 }
 
 async function initDB() {
@@ -960,37 +1247,32 @@ async function initDB() {
   await addColumnIfMissing('servicos_catalogo', 'prazo', "TEXT DEFAULT ''");
   // V126: o administrador escolhe quais serviços aceitam solicitação de cancelamento.
   await addColumnIfMissing('servicos_catalogo', 'cancelamento_permitido', 'INTEGER DEFAULT 0');
-  // V163: integração exclusiva com Dhru Reseller API.
+  // V162: integração automática IMEI.info. Serviços sincronizados ficam vinculados
+  // ao catálogo existente para aproveitar saldo, PIX, preços por revenda e histórico.
   await addColumnIfMissing('servicos_catalogo', 'api_provider', "TEXT DEFAULT ''");
   await addColumnIfMissing('servicos_catalogo', 'api_service_id', "TEXT DEFAULT ''");
   await addColumnIfMissing('servicos_catalogo', 'api_cost', 'REAL DEFAULT 0');
   await addColumnIfMissing('servicos_catalogo', 'api_auto', 'INTEGER DEFAULT 0');
-  await run(`CREATE TABLE IF NOT EXISTS dhru_products (
-    product_uuid TEXT PRIMARY KEY,
+  await run(`CREATE TABLE IF NOT EXISTS imei_info_services (
+    api_service_id TEXT PRIMARY KEY,
     nome TEXT NOT NULL,
-    categoria TEXT DEFAULT '',
+    descricao TEXT DEFAULT '',
     custo REAL DEFAULT 0,
-    currency TEXT DEFAULT '',
-    fields_json TEXT DEFAULT '[]',
     raw_json TEXT DEFAULT '',
     catalogo_id INTEGER,
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
-  await run(`CREATE TABLE IF NOT EXISTS dhru_orders (
+  await run(`CREATE TABLE IF NOT EXISTS imei_info_consultas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pedido_id INTEGER UNIQUE,
+    pedido_id INTEGER,
     revenda_id INTEGER,
-    product_uuid TEXT,
-    reference_id TEXT,
-    order_uuid TEXT DEFAULT '',
+    api_service_id TEXT,
+    imei TEXT,
     status TEXT DEFAULT 'PENDENTE',
-    request_json TEXT DEFAULT '',
-    response_json TEXT DEFAULT '',
-    feedback_json TEXT DEFAULT '',
-    resultado TEXT DEFAULT '',
+    resposta_json TEXT DEFAULT '',
     erro TEXT DEFAULT '',
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+    finalizado_em TEXT
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS solicitacoes_cancelamento (
@@ -1569,7 +1851,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/imei-info">⌕ <span>Consulta IMEI.info</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/imei-info">🔎 <span>Consulta IMEI.info</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -3077,11 +3359,6 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const servico = servicos[Number(opcao) - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
     await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
-    if (servico.api_provider === 'DHRU') {
-      const promptDhru = await textoEntradaDhru(servico);
-      const tipoDhru = normalizarTipoEntrada(servico.tipo_entrada);
-      if (tipoDhru !== 'IMEI') { await enviarTexto(from, `🛠 *${servico.nome}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id, servico.id))}\n\n${promptDhru}\n\n0️⃣ ⬅️ Voltar`); return; }
-    }
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     if (tipoEntrada === 'IMEI') {
       await enviarTexto(from, `📱 Envie os IMEIs\n\n• Máximo 5 IMEIs\n• 1 IMEI por linha\n• Cada IMEI precisa ter 15 números\n\nExemplo:\n353625361425365\n353625361425366`);
@@ -4028,9 +4305,9 @@ ${detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIADO AUTOMATICAMENTE AO FORNECEDOR' : 'PENDENTE'}`, from);
-    if (servico.api_provider === 'DHRU') {
-      for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
+📍 Status: ${servico.api_provider === 'IMEI_INFO' ? 'PROCESSANDO AUTOMATICAMENTE' : 'PENDENTE'}`, from);
+    if (servico.api_provider === 'IMEI_INFO') {
+      for (const criado of criados) await executarConsultaImeiInfoPedido(criado.id);
     }
     return;
   }
@@ -4428,11 +4705,6 @@ Exemplo: 50`);
           const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
           if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
           await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
-          if (servico.api_provider === 'DHRU') {
-            const promptDhru = await textoEntradaDhru(servico);
-            const tipoDhru = normalizarTipoEntrada(servico.tipo_entrada);
-            if (tipoDhru !== 'IMEI') return tgBot.sendMessage(chatId, promptDhru);
-          }
           const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
           if (tipoEntrada === 'IMEI') {
             return tgBot.sendMessage(chatId, `📱 Envie os IMEIs
@@ -5845,9 +6117,9 @@ ${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-📍 Status: ${servico.api_provider === 'DHRU' ? 'ENVIADO AUTOMATICAMENTE AO FORNECEDOR' : 'PENDENTE'}`, jid);
-  if (servico.api_provider === 'DHRU') {
-    for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
+📍 Status: ${servico.api_provider === 'IMEI_INFO' ? 'PROCESSANDO AUTOMATICAMENTE' : 'PENDENTE'}`, jid);
+  if (servico.api_provider === 'IMEI_INFO') {
+    for (const criado of criados) await executarConsultaImeiInfoPedido(criado.id);
   }
   return true;
 }
@@ -8652,7 +8924,7 @@ app.get('/admin/servicos', async (req, res) => {
   for (const s of rows) {
     const tipo = normalizarTipoEntrada(s.tipo_entrada);
     const icon = tipo === 'LOCK_CODE' ? '🔑' : tipo === 'OUTRO' ? '✍️' : '📱';
-    html += `<div class="service-card"><div><div class="service-title">${icon} ${safeHtml(s.nome)}</div><div class="service-meta"><span class="tag">Entrada: ${safeHtml(tituloTipoEntrada(s.tipo_entrada))}</span><span class="tag">Campo: ${safeHtml(labelEntradaServico(s))}</span><span class="tag">Preço: ${brl(s.preco_padrao)}</span>${s.categoria?`<span class="tag">Categoria: ${safeHtml(s.categoria)}</span>`:''}${s.prazo?`<span class="tag">Prazo: ${safeHtml(s.prazo)}</span>`:''}<span class="tag">Pedidos: ${s.total}</span><span class="tag">${s.ativo ? '✅ Ativo' : '⛔ Inativo'}</span>${s.api_provider==='DHRU'?`<span class="tag">⚡ Dhru automático</span><span class="tag">Custo fornecedor: ${brl(s.api_cost||0)}</span>`:''}</div></div><div class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📋 Pedidos</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️</button></form></div></div>`;
+    html += `<div class="service-card"><div><div class="service-title">${icon} ${safeHtml(s.nome)}</div><div class="service-meta"><span class="tag">Entrada: ${safeHtml(tituloTipoEntrada(s.tipo_entrada))}</span><span class="tag">Campo: ${safeHtml(labelEntradaServico(s))}</span><span class="tag">Preço: ${brl(s.preco_padrao)}</span>${s.categoria?`<span class="tag">Categoria: ${safeHtml(s.categoria)}</span>`:''}${s.prazo?`<span class="tag">Prazo: ${safeHtml(s.prazo)}</span>`:''}<span class="tag">Pedidos: ${s.total}</span><span class="tag">${s.ativo ? '✅ Ativo' : '⛔ Inativo'}</span>${s.api_provider==='IMEI_INFO'?`<span class="tag">⚡ IMEI.info automático</span><span class="tag">Custo API: ${brl(s.api_cost||0)}</span>`:''}</div></div><div class="actions"><a class="btn" href="/admin/servico/${s.id}/imeis">📋 Pedidos</a><a class="btn purple" href="/admin/servico/${s.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/servico/${s.id}/toggle"><button class="btn gray">${s.ativo ? 'Desativar' : 'Ativar'}</button></form><form class="forms-inline" method="post" action="/admin/servico/${s.id}/excluir"><button class="btn red" onclick="return confirm('Excluir serviço e pedidos vinculados?')">🗑️</button></form></div></div>`;
   }
   res.send(page('Serviços', html));
 });
@@ -9146,19 +9418,19 @@ app.get('/admin/temas/preview/:id', async (req,res) => {
 app.post('/admin/temas/aplicar', async (req,res) => { const theme=String(req.body.theme||''); if(TEMAS_PAINEL[theme]){PAINEL_TEMA=theme;await setConfig('painel_tema',theme);notificarPainel('tema','🎨 Tema alterado',TEMAS_PAINEL[theme].nome);} res.redirect('/admin/temas?ok='+encodeURIComponent('Tema aplicado e salvo')); });
 app.post('/admin/temas/personalizar', async (req,res) => { const bg=String(req.body.bg_mode||'soft'); PAINEL_BG_MODE=['strong','soft','none'].includes(bg)?bg:'soft'; PAINEL_EFEITOS=String(req.body.efeitos||'1')==='1'; await setConfig('painel_bg_mode',PAINEL_BG_MODE); await setConfig('painel_efeitos',PAINEL_EFEITOS?'1':'0'); res.redirect('/admin/temas?ok='+encodeURIComponent('Personalização salva')); });
 
-app.get('/admin/dhru', async (req,res) => {
-  const tok=await dhruToken(), base=await dhruBaseUrl(), pub=await dhruPublicBase();
-  const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.categoria COLLATE NOCASE,d.nome COLLATE NOCASE`);
-  const ultima=await getConfig('dhru_ultima_sync','Nunca');
-  const aviso=req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:'';
-  const tabela=rows.length?`<div class="card"><h2>📦 Produtos sincronizados (${rows.length})</h2><p class="muted">Todos os produtos da sua conta Dhru aparecem aqui. Defina o preço de venda e ative os que deseja oferecer.</p><table><tr><th>Categoria / Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Venda</th></tr>${rows.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){}return `<tr><td><small>${safeHtml(r.categoria||'Dhru')}</small><br><b>${safeHtml(r.nome)}</b></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}</td><td>${safeHtml(fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>f.name).join(', ')||'—')}</td><td><form class="forms-inline" method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input name="preco" value="${Number(r.preco_padrao||0)}" style="width:100px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><button class="btn green">Salvar</button></form></td></tr>`}).join('')}</table></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`;
-  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, produtos, pedidos automáticos e retorno por feedback URL.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://seu-fornecedor.com/api/..." required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">Testar conta</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar todos os produtos</button></form><p class="mini-help">Produtos novos entram inativos e com preço de venda R$ 0,00.</p></div></div>${tabela}`));
+app.get('/admin/imei-info', async (req,res) => {
+  const tok = await tokenImeiInfo();
+  const rows = await all(`SELECT i.*,s.preco_padrao,s.ativo FROM imei_info_services i LEFT JOIN servicos_catalogo s ON s.id=i.catalogo_id ORDER BY i.nome COLLATE NOCASE`);
+  const ultima = await getConfig('imei_info_ultima_sync','Nunca');
+  const aviso = req.query.ok ? `<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>` : req.query.erro ? `<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>` : '';
+  let tabela = rows.length ? `<div class="card"><h2>📋 Serviços sincronizados (${rows.length})</h2><p class="muted">Defina seu preço de venda e ative apenas os serviços que deseja mostrar aos clientes.</p><table><tr><th>Serviço</th><th>ID API</th><th>Custo API</th><th>Seu preço</th><th>Status</th><th>Ação</th></tr>${rows.map(r=>`<tr><td><b>${safeHtml(r.nome)}</b><br><small>${safeHtml(r.descricao||'')}</small></td><td>${safeHtml(r.api_service_id)}</td><td>${brl(Number(r.custo||0))}</td><td><form class="forms-inline" method="post" action="/admin/imei-info/servico/${r.catalogo_id}"><input name="preco" value="${Number(r.preco_padrao||0)}" style="width:110px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><button class="btn green">Salvar</button></form></td><td>${r.ativo?'✅ Ativo':'⛔ Inativo'}</td><td><a class="btn" href="/admin/servico/${r.catalogo_id}/editar">Editar</a></td></tr>`).join('')}</table></div>` : `<div class="card empty">Nenhum serviço sincronizado. Salve o token e clique em <b>Sincronizar todos os serviços</b>.</div>`;
+  res.send(page('IMEI.info', `<div class="hero"><h1>🔎 API IMEI.info</h1><p>Token no painel, teste de conexão, sincronização automática de todos os serviços e preço de venda individual.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Token da API</h2><p><b>Status:</b> ${tok?'Configurado ✅':'Não configurado ❌'}</p><p><b>Token:</b> ${safeHtml(mascaraTokenImeiInfo(tok))}</p><form method="post" action="/admin/imei-info/token"><label>Novo token</label><input name="token" type="password" autocomplete="new-password" placeholder="Cole aqui o token do IMEI.info" required><p class="mini-help">O token é criptografado antes de ser salvo no banco.</p><button class="btn green">💾 Salvar token</button></form><br><form class="forms-inline" method="post" action="/admin/imei-info/remover-token"><button class="btn red" onclick="return confirm('Remover o token IMEI.info?')">Remover token</button></form></div><div class="card"><h2>🔄 Conexão e serviços</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><form class="forms-inline" method="post" action="/admin/imei-info/testar"><button class="btn">🧪 Testar conexão</button></form> <form class="forms-inline" method="post" action="/admin/imei-info/sincronizar"><button class="btn green">🔄 Sincronizar todos os serviços</button></form><p class="mini-help">Novos serviços entram inicialmente INATIVOS e com preço R$ 0,00 para evitar venda acidental.</p></div></div>${tabela}`));
 });
-app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
-app.post('/admin/dhru/testar',async(req,res)=>{try{const r=await dhruRequest('get','/account');const d=r?.data||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão OK${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
-app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
-app.post('/admin/dhru/produto/:id',async(req,res)=>{const preco=Math.max(0,Number(String(req.body.preco||'0').replace(',','.'))||0);const ativo=String(req.body.ativo||'0')==='1'?1:0;await run(`UPDATE servicos_catalogo SET preco_padrao=?,ativo=? WHERE id=? AND api_provider='DHRU'`,[preco,ativo,req.params.id]);res.redirect('/admin/dhru?ok='+encodeURIComponent('Preço e status atualizados'));});
-app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
+app.post('/admin/imei-info/token', async (req,res) => { const token=String(req.body.token||'').trim(); if(!token) return res.redirect('/admin/imei-info?erro='+encodeURIComponent('Token vazio')); await setConfig('imei_info_token_enc',criptografarTokenImeiInfo(token)); res.redirect('/admin/imei-info?ok='+encodeURIComponent('Token salvo com segurança')); });
+app.post('/admin/imei-info/remover-token', async (req,res) => { await setConfig('imei_info_token_enc',''); res.redirect('/admin/imei-info?ok='+encodeURIComponent('Token removido')); });
+app.post('/admin/imei-info/testar', async (req,res) => { try { const p=await imeiInfoRequest('get','/service/services/'); const n=acharArrayServicosImeiInfo(p).length; res.redirect('/admin/imei-info?ok='+encodeURIComponent(`Conexão OK — ${n} serviço(s) retornado(s)`)); } catch(e){ res.redirect('/admin/imei-info?erro='+encodeURIComponent(`Falha na conexão: ${e?.response?.status||''} ${e?.response?.data?.detail||e.message}`)); } });
+app.post('/admin/imei-info/sincronizar', async (req,res) => { try { const r=await sincronizarServicosImeiInfo(); res.redirect('/admin/imei-info?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} serviço(s); ${r.novos} novo(s)`)); } catch(e){ res.redirect('/admin/imei-info?erro='+encodeURIComponent(`Falha ao sincronizar: ${e?.response?.status||''} ${e?.response?.data?.detail||e.message}`)); } });
+app.post('/admin/imei-info/servico/:id', async (req,res) => { const preco=Math.max(0,Number(String(req.body.preco||'0').replace(',','.'))||0); const ativo=String(req.body.ativo||'0')==='1'?1:0; await run(`UPDATE servicos_catalogo SET preco_padrao=?,ativo=? WHERE id=? AND api_provider='IMEI_INFO'`,[preco,ativo,req.params.id]); res.redirect('/admin/imei-info?ok='+encodeURIComponent('Preço e status atualizados')); });
 
 app.get('/admin/config', async (req, res) => {
   const suporteTelegram = await getTelegramSuporte();

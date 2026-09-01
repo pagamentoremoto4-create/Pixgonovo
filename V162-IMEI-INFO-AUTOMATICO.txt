@@ -1,0 +1,13 @@
+V162 — IMEI.info automático
+
+- Token configurável no painel /admin/imei-info
+- Token criptografado AES-256-GCM; chave local no DATA_DIR
+- Testar conexão
+- Sincronizar todos os serviços disponíveis da conta
+- Novos serviços entram inativos e com preço de venda 0
+- Admin define preço e ativa cada serviço
+- Consulta automática após pedido/pagamento
+- Resultado entregue automaticamente ao cliente
+- Histórico em imei_info_consultas
+- Falha da API cancela a consulta e estorna cobrança já debitada
+- Bearer Token com fallback para Token em HTTP 401
