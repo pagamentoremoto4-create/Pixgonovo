@@ -703,7 +703,7 @@ function dhruMask(t){ t=String(t||''); return t?`${'•'.repeat(Math.min(12,Math
 function dhruNormalizeBaseUrl(u){ return String(u||'').trim().replace(/\/+$/,''); }
 async function dhruToken(){ return dhruDecrypt(await getConfig('dhru_token_enc','')); }
 async function dhruBaseUrl(){ return dhruNormalizeBaseUrl(await getConfig('dhru_base_url','')); }
-async function dhruApiPrefix(){ return String(await getConfig('dhru_api_prefix','')).trim().replace(/^\/+|\/+$/g,''); }
+async function dhruApiPrefix(){ return 'api/reseller/v1'; }
 async function dhruCallbackSecret(){
   let v=await getConfig('dhru_callback_secret','');
   if(!v){ v=crypto.randomBytes(24).toString('hex'); await setConfig('dhru_callback_secret',v); }
@@ -727,46 +727,21 @@ async function dhruRequest(method, endpoint, data=null, params=null){
   const r=await dhruRawRequest(method,url,token,data,params);
   return r.data;
 }
-async function dhruDetectLatestApi(){
+async function dhruTestOfficialApi(){
   const base=await dhruBaseUrl(), token=await dhruToken();
   if(!base) throw new Error('URL da API Dhru não configurada no painel.');
-  if(!token) throw new Error('Token Dhru não configurado no painel.');
-  const configured=await dhruApiPrefix();
-  const prefixes=[configured,'','api','v1','api/v1'].filter((v,i,a)=>a.indexOf(v)===i);
-  const attempts=[];
-  for(const prefix of prefixes){
-    const accountUrl=dhruBuildUrl(base,prefix,'account');
-    try{
-      const ar=await dhruRawRequest('get',accountUrl,token);
-      const body=ar.data||{};
-      if(String(body?.status||'').toLowerCase()==='error') throw new Error(body?.message||'API retornou erro');
-      const productsUrl=dhruBuildUrl(base,prefix,'products');
-      const pr=await dhruRawRequest('get',productsUrl,token);
-      const pbody=pr.data||{};
-      if(String(pbody?.status||'').toLowerCase()==='error') throw new Error(pbody?.message||'API de produtos retornou erro');
-      await setConfig('dhru_api_prefix',prefix);
-      await setConfig('dhru_last_account_url',accountUrl);
-      await setConfig('dhru_last_products_url',productsUrl);
-      return {prefix,account:body,products:pbody,accountUrl,productsUrl};
-    }catch(e){
-      attempts.push(`${accountUrl} -> ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`.trim());
-      const slashUrl=accountUrl+'/';
-      try{
-        const ar=await dhruRawRequest('get',slashUrl,token);
-        const body=ar.data||{};
-        const productsUrl=dhruBuildUrl(base,prefix,'products')+'/';
-        const pr=await dhruRawRequest('get',productsUrl,token);
-        await setConfig('dhru_api_prefix',prefix);
-        await setConfig('dhru_force_trailing_slash','1');
-        await setConfig('dhru_last_account_url',slashUrl);
-        await setConfig('dhru_last_products_url',productsUrl);
-        return {prefix,account:body,products:pr.data||{},accountUrl:slashUrl,productsUrl};
-      }catch(e2){ attempts.push(`${slashUrl} -> ${e2?.response?.status||''} ${e2?.response?.data?.message||e2?.response?.data?.error||e2.message}`.trim()); }
-    }
-  }
-  const err=new Error('Nenhuma rota compatível da Latest API respondeu.');
-  err.dhruAttempts=attempts;
-  throw err;
+  if(!token) throw new Error('Access Token/Bearer Token Dhru não configurado no painel.');
+  const prefix='api/reseller/v1';
+  const accountUrl=dhruBuildUrl(base,prefix,'account');
+  const productsUrl=dhruBuildUrl(base,prefix,'products');
+  const account=(await dhruRawRequest('get',accountUrl,token)).data||{};
+  if(String(account?.status||'').toLowerCase()==='error') throw new Error(account?.message||'Erro ao consultar conta Dhru');
+  const products=(await dhruRawRequest('get',productsUrl,token)).data||{};
+  if(String(products?.status||'').toLowerCase()==='error') throw new Error(products?.message||'Erro ao consultar produtos Dhru');
+  await setConfig('dhru_api_prefix',prefix);
+  await setConfig('dhru_last_account_url',accountUrl);
+  await setConfig('dhru_last_products_url',productsUrl);
+  return {prefix,account,products,accountUrl,productsUrl};
 }
 function dhruProductsFromPayload(payload){
   const data=payload?.data||payload||{};
@@ -886,8 +861,11 @@ async function executarPedidoDhru(pedidoId){
   const ins=await run(`INSERT INTO dhru_orders (pedido_id,revenda_id,product_uuid,reference_id,status,request_json) VALUES (?,?,?,?, 'ENVIANDO',?)`,[pedido.id,pedido.revenda_id,pedido.api_service_id,String(pedido.id),JSON.stringify(payload)]);
   try{
     const resp=await dhruRequest('post','/order',payload);
-    const data=Array.isArray(resp?.data)?resp.data[0]:resp?.data;
+    if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'A API Dhru rejeitou o pedido');
+    const arr=Array.isArray(resp?.data)?resp.data:(resp?.data?[resp.data]:[]);
+    const data=arr.find(x=>String(x?.reference_id||'')===String(pedido.id))||arr[0]||{};
     const orderUuid=String(data?.order_uuid||data?.order_id||'');
+    if(!orderUuid) throw new Error(resp?.message||'Pedido enviado, mas a API não retornou order_uuid');
     await run(`UPDATE dhru_orders SET status='ENVIADO',order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid,JSON.stringify(resp),ins.lastID]);
     await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
     return {executado:true,sucesso:true,orderUuid,resposta:resp};
@@ -933,6 +911,42 @@ async function processarFeedbackDhru(body){
     if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado pelo fornecedor*\n\n🛠 ${pedido.servico_nome}${replay?`\n📄 Motivo: ${replay}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
   }
   return {pedidoId,status,replay};
+}
+
+async function consultarPedidoDhru(orderUuid){
+  if(!orderUuid) throw new Error('order_uuid ausente');
+  const resp=await dhruRequest('get','/order',null,{order_uuid:orderUuid});
+  if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'Erro ao consultar pedido Dhru');
+  return resp;
+}
+
+let dhruPollEmExecucao=false;
+async function acompanharPedidosDhru(){
+  if(dhruPollEmExecucao) return;
+  dhruPollEmExecucao=true;
+  try{
+    const pendentes=await all(`SELECT * FROM dhru_orders WHERE status IN ('ENVIADO','PROCESSANDO','AGUARDANDO_FEEDBACK') AND COALESCE(order_uuid,'')<>'' ORDER BY id ASC LIMIT 30`);
+    for(const row of pendentes){
+      try{
+        const resp=await consultarPedidoDhru(row.order_uuid);
+        const d=resp?.data||{};
+        const st=String(d?.status||'').toLowerCase();
+        await run(`UPDATE dhru_orders SET status=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),JSON.stringify(resp),row.id]);
+        if(['rejected','reject','failed','failure','cancelled','canceled'].includes(st)){
+          await processarFeedbackDhru({reference_id:row.reference_id,order_id:row.order_uuid,status:st,replay:d?.replay||d?.reply||d?.message||''});
+        } else if(['success','completed','complete','done'].includes(st)){
+          const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+          if(replay){
+            await processarFeedbackDhru({reference_id:row.reference_id,order_id:row.order_uuid,status:st,replay});
+          } else {
+            await run(`UPDATE dhru_orders SET status='AGUARDANDO_FEEDBACK',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[row.id]);
+          }
+        } else {
+          await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO')`,[row.pedido_id]);
+        }
+      }catch(e){ console.log('⚠️ DHRU STATUS',row.order_uuid,e?.response?.status||'',e?.response?.data?.message||e.message); }
+    }
+  }finally{ dhruPollEmExecucao=false; }
 }
 
 async function columnExists(table, col) {
@@ -9210,13 +9224,13 @@ app.get('/admin/dhru', async (req,res) => {
   const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.categoria COLLATE NOCASE,d.nome COLLATE NOCASE`);
   const ultima=await getConfig('dhru_ultima_sync','Nunca');
   const prefix=await dhruApiPrefix();
-  const detected=prefix?`${base}/${prefix}`:base;
+  const detected=base?`${base}/${prefix}`:'';
   const aviso=req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:'';
   const tabela=rows.length?`<div class="card"><h2>📦 Produtos sincronizados (${rows.length})</h2><p class="muted">Todos os produtos da sua conta Dhru aparecem aqui. Defina o preço de venda e ative os que deseja oferecer.</p><table><tr><th>Categoria / Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Venda</th></tr>${rows.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){}return `<tr><td><small>${safeHtml(r.categoria||'Dhru')}</small><br><b>${safeHtml(r.nome)}</b></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}</td><td>${safeHtml(fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>f.name).join(', ')||'—')}</td><td><form class="forms-inline" method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input name="preco" value="${Number(r.preco_padrao||0)}" style="width:100px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><button class="btn green">Salvar</button></form></td></tr>`}).join('')}</table></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`;
-  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, produtos, pedidos automáticos e retorno por feedback URL.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://seu-fornecedor.com/api/..." required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint detectado:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Detectar e testar Latest API</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar todos os produtos</button></form><p class="mini-help">O teste verifica /account e /products e detecta automaticamente o caminho compatível do fornecedor. Produtos novos entram inativos e com preço de venda R$ 0,00.</p></div></div>${tabela}`));
+  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, produtos, pedidos automáticos e retorno por feedback URL.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint detectado:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar todos os produtos</button></form><p class="mini-help">O teste usa as rotas oficiais /api/reseller/v1/account e /api/reseller/v1/products. Produtos novos entram inativos e com preço de venda R$ 0,00.</p></div></div>${tabela}`));
 });
-app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
-app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruDetectLatestApi();const d=t.account?.data||t.account||{};const rota=t.prefix?'/'+t.prefix:'raiz';res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão Latest API OK — rota ${rota}${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){const at=(e.dhruAttempts||[]).slice(-4).join(' | ');res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha ao localizar Latest API: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}${at?' — '+at:''}`));}});
+app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','api/reseller/v1');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
 app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
 app.post('/admin/dhru/produto/:id',async(req,res)=>{const preco=Math.max(0,Number(String(req.body.preco||'0').replace(',','.'))||0);const ativo=String(req.body.ativo||'0')==='1'?1:0;await run(`UPDATE servicos_catalogo SET preco_padrao=?,ativo=? WHERE id=? AND api_provider='DHRU'`,[preco,ativo,req.params.id]);res.redirect('/admin/dhru?ok='+encodeURIComponent('Preço e status atualizados'));});
 app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
@@ -9298,6 +9312,9 @@ iniciarTelegram()
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
 setInterval(() => watchdogSessoesWhatsApp().catch(()=>{}), 15000);
+// V169: acompanha pedidos Dhru como fallback do feedback_url.
+setInterval(() => acompanharPedidosDhru().catch(e=>console.log('❌ DHRU WORKER:',e.message)), 20000);
+setTimeout(() => acompanharPedidosDhru().catch(()=>{}), 12000);
 
 // A antiga sessão separada “Suporte + IA” não é iniciada na V87, porque o novo
 // painel centraliza as funções nas sessões configuráveis. As credenciais antigas
