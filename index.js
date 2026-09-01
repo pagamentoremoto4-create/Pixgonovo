@@ -949,6 +949,20 @@ async function acompanharPedidosDhru(){
   }finally{ dhruPollEmExecucao=false; }
 }
 
+
+function notificarPainel(tipo, titulo, mensagem) {
+  try {
+    const n = { tipo, titulo, mensagem, hora: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) };
+    if (io && typeof io.emit === 'function') {
+      io.emit('notificacao', n);
+      io.emit('dashboard-update', { at: Date.now() });
+    }
+    console.log('🔔 PAINEL:', titulo, mensagem || '');
+  } catch (e) {
+    console.log('⚠️ notificarPainel:', e.message);
+  }
+}
+
 async function columnExists(table, col) {
   const cols = await all(`PRAGMA table_info(${table})`);
   return cols.some(c => c.name === col);
