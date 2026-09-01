@@ -1,0 +1,18 @@
+V163 — Integração exclusiva Dhru Reseller API
+
+- Removida a integração IMEI.info da versão anterior.
+- Nova área /admin/dhru no painel.
+- URL base da API e Bearer Token configuráveis no painel.
+- Token armazenado criptografado.
+- Teste de conexão pela rota /account.
+- Sincronização de todos os produtos via /products.
+- Produtos novos entram inativos e com preço de venda R$ 0,00.
+- Categoria, custo, moeda e campos obrigatórios são salvos automaticamente.
+- Pedidos pagos são enviados automaticamente via POST /order.
+- feedback_url exclusivo para conclusão/rejeição automática.
+- Resultado do fornecedor é enviado ao cliente.
+- Rejeição/falha de envio estorna o saldo quando aplicável.
+- Serviços com apenas IMEI mantêm envio em lote; produtos com vários campos aceitam o formato Campo: valor, um por linha.
+
+Configuração:
+Painel > API Dhru > informe URL base da API, token e URL pública do Render.
