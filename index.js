@@ -3725,7 +3725,17 @@ Agora você pode solicitar serviços pelo Telegram ou WhatsApp usando a mesma co
     }
   }
 
-  // V121: regra única para todos os clientes. Fora de um fluxo iniciado por
+  
+// V171: compatibilidade com o antigo módulo de IA do WhatsApp, removido do projeto.
+// Algumas rotinas históricas ainda chamam estas funções para encerrar/consultar
+// uma sessão de IA. Como a IA está desativada, elas devem ser no-op e nunca
+// interromper o fluxo normal do Bot de Serviços.
+function iaWhatsAppAtivaPara(_numero) { return false; }
+function ativarSessaoIAWhatsApp(_numero) { return false; }
+function encerrarSessaoIAWhatsApp(_numero, _limparHistorico = false) { return false; }
+function comandoSaidaIAWhatsApp(_texto) { return ''; }
+
+// V121: regra única para todos os clientes. Fora de um fluxo iniciado por
   // "menu", o Bot de Serviços permanece totalmente silencioso. Uma antiga
   // sessão de IA também é encerrada para não responder mensagens livres.
   // V122: uma sessão estruturada do bot (ex.: saldo insuficiente / PIX / eSIM)
