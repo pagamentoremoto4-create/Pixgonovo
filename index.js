@@ -1174,8 +1174,95 @@ function limparResultadoDhru(v){
   });
   return s.replace(/\r/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
 }
+function timUnlockReference(pedidoId){ return `TIMUNLOCK:${Number(pedidoId)}`; }
+function timUnlockPedidoIdFromReference(ref){
+  const m=String(ref||'').trim().match(/^TIMUNLOCK:(\d+)$/i);
+  return m?Number(m[1]):0;
+}
+function timUnlockIsDesbloqueioTim(pedido){ return normalizarNomeServico(pedido?.servico_nome||'')==='desbloqueio tim'; }
+function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return /^\d{15}$/.test(v)?v:''; }
+async function timUnlockDhruProduct(){
+  const uuid=String(await getConfig('tim_unlock_dhru_product_uuid','')).trim();
+  if(!uuid) return null;
+  return await get(`SELECT d.*,s.id AS catalogo_id,s.nome AS catalogo_nome,s.nome_exibicao,s.ativo FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE d.product_uuid=?`,[uuid]);
+}
+async function executarConsultaAutomaticaDesbloqueioTim(pedidoId,{force=false}={}){
+  const pedido=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
+  if(!pedido||!timUnlockIsDesbloqueioTim(pedido)) return {executado:false,motivo:'nao_desbloqueio_tim'};
+  const imei=timUnlockImei(pedido); if(!imei) return {executado:false,motivo:'imei_invalido'};
+  const produto=await timUnlockDhruProduct(); if(!produto) return {executado:false,motivo:'consulta_nao_configurada'};
+  let fields=[]; try{fields=JSON.parse(produto.fields_json||'[]')}catch(_){}
+  const userFields=fields.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
+  const imeiField=userFields.find(f=>String(f?.name||'').toLowerCase()==='imei');
+  if(!imeiField) return {executado:false,motivo:'produto_sem_imei'};
+  const anterior=await get('SELECT * FROM tim_unlock_dhru_checks WHERE pedido_id=?',[pedidoId]);
+  if(anterior&&!force&&!['ERRO_ENVIO','REJEITADO'].includes(String(anterior.status||'').toUpperCase())) return {executado:true,jaExiste:true};
+  if(anterior&&force) await run('DELETE FROM tim_unlock_dhru_checks WHERE pedido_id=?',[pedidoId]);
+  const campos={}; campos[String(imeiField.name||'IMEI')]=imei;
+  const pub=await dhruPublicBase(),secret=await dhruCallbackSecret();
+  if(pub) campos.feedback_url=`${pub}/api/dhru/feedback?secret=${encodeURIComponent(secret)}`;
+  campos.reference_id=timUnlockReference(pedidoId); campos.Quantity=1;
+  const payload=[{product_uuid:produto.product_uuid,fields:[campos]}];
+  await run(`INSERT INTO tim_unlock_dhru_checks (pedido_id,product_uuid,status,request_json) VALUES (?,?,'ENVIANDO',?)`,[pedidoId,produto.product_uuid,JSON.stringify(payload)]);
+  try{
+    const resp=await dhruRequest('post','/order',payload);
+    if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'A API Dhru rejeitou a consulta interna');
+    const arr=[];(function walk(x){if(Array.isArray(x))x.forEach(walk);else if(x&&typeof x==='object')arr.push(x)})(resp?.data);
+    const data=arr.find(x=>String(x?.reference_id||'')===timUnlockReference(pedidoId))||arr[0]||{};
+    const orderUuid=String(data?.order_uuid||data?.order_id||'').trim();
+    const accepted=String(resp?.status||'').toLowerCase()==='success'||Number(resp?.code||0)===200||/submitted|success|accepted/i.test(String(resp?.message||''))||!!orderUuid;
+    if(!accepted) throw new Error(resp?.message||'Consulta interna não confirmada');
+    await run(`UPDATE tim_unlock_dhru_checks SET status=?,order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderUuid?'ENVIADO':'AGUARDANDO_FEEDBACK',orderUuid,JSON.stringify(resp),pedidoId]);
+    return {executado:true,orderUuid};
+  }catch(e){
+    await run(`UPDATE tim_unlock_dhru_checks SET status='ERRO_ENVIO',erro=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[String(e?.response?.data?.message||e.message||e),pedidoId]);
+    console.log('❌ DHRU TIM AUTO:',pedidoId,e?.response?.status||'',e?.response?.data?.message||e.message);
+    return {executado:false,erro:e.message};
+  }
+}
+async function processarFeedbackTimUnlock(body){
+  const pedidoId=timUnlockPedidoIdFromReference(body?.reference_id); if(!pedidoId) throw new Error('reference_id TIM inválido');
+  const status=String(body?.status||'').toLowerCase();
+  const orderId=String(body?.order_id||body?.order_uuid||'');
+  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+  const falha=['rejected','reject','failed','failure','cancelled','canceled'].includes(status);
+  const concluido=['success','completed','complete','done'].includes(status);
+  await run(`UPDATE tim_unlock_dhru_checks SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado_original=CASE WHEN ?<>'' THEN ? ELSE resultado_original END,erro=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,falha?'REJEITADO':concluido?'CONCLUIDO':(status.toUpperCase()||'PROCESSANDO'),JSON.stringify(body),replay,replay,falha?replay:'',pedidoId]);
+  notificarPainel('pedido','🔎 Consulta automática Desbloqueio TIM',`Pedido #${pedidoId} — ${concluido?'concluída':falha?'falhou':'em processo'}`);
+  return {pedidoId,status,replay,interno:true};
+}
+function timUnlockResultadoEstruturado(raw){
+  const txt=limparResultadoDhru(raw||'');
+  const linhas=txt.split(/\n+/).map(x=>x.trim()).filter(Boolean),pares=[];
+  for(const l of linhas){const m=l.match(/^([^:]+):\s*(.*)$/);if(m)pares.push([m[1].trim(),m[2].trim()]);}
+  const first=names=>{for(const [k,v] of pares){if(names.includes(k.toLowerCase()))return v}return ''};
+  const eventos=[];
+  for(let i=0;i<pares.length;i++){
+    const [k,v]=pares[i],kl=k.toLowerCase();
+    if(kl==='blacklisted by'||kl==='removed by'){
+      const ev={tipo:kl==='removed by'?'REMOVIDO':'BLOQUEADO',operadora:v,pais:'',data:'',motivo:''};
+      for(let j=i+1;j<Math.min(pares.length,i+5);j++){
+        const [kk,vv]=pares[j],x=kk.toLowerCase(); if(x==='blacklisted by'||x==='removed by') break;
+        if(x.includes('country'))ev.pais=vv; else if(x.endsWith(' on'))ev.data=vv; else if(x.includes('reason'))ev.motivo=vv;
+      }
+      eventos.push(ev);
+    }
+  }
+  return {modelo:first(['model','model name']),status:first(['blacklist status']),geral:first(['general list status']),registros:first(['blacklist records']),eventos,raw:txt};
+}
+function timUnlockResultadoHtml(check){
+  if(!check) return '<div class="muted">Consulta automática ainda não criada.</div>';
+  const st=String(check.status||'PENDENTE').toUpperCase();
+  if(st!=='CONCLUIDO') return `<div><b>${['REJEITADO','ERRO_ENVIO'].includes(st)?'🔴 Falhou':'🟡 Em processo'}</b>${check.erro?`<br><span class="muted">${safeHtml(check.erro)}</span>`:''}</div>`;
+  const d=timUnlockResultadoEstruturado(check.resultado_original||'');
+  const ev=d.eventos.map((e,i)=>`<div style="border-top:1px solid #374151;padding-top:8px;margin-top:8px"><b>${i+1}º registro — ${e.tipo==='REMOVIDO'?'🟢 Removido':(i>0?'🔴 Bloqueado novamente':'🔴 Bloqueado')}</b><br>Operadora: ${safeHtml(e.operadora||'-')}<br>País: ${safeHtml(dhruValorPt(e.pais||'-'))}<br>Data: ${safeHtml(e.data||'-')}<br>Motivo: ${safeHtml(dhruValorPt(e.motivo||'-'))}</div>`).join('');
+  const atual=d.eventos.length?(d.eventos[d.eventos.length-1].tipo==='REMOVIDO'?'🟢 FORA DA BLACKLIST':'🔴 BLACKLIST TIM'):(/blacklisted/i.test(d.status)?'🔴 BLACKLIST':'—');
+  return `<b>Aparelho:</b> ${safeHtml(d.modelo||'-')}<br><b>Status Blacklist:</b> ${safeHtml(dhruValorPt(d.status||'-'))}<br><b>Lista geral:</b> ${safeHtml(dhruValorPt(d.geral||'-'))}<br><b>Registros encontrados:</b> ${safeHtml(d.registros||String(d.eventos.length))}<br><br><b>📋 Histórico de Blacklist</b>${ev||'<div class="muted">Nenhum evento estruturado.</div>'}<br><br><b>Situação atual: ${safeHtml(atual)}</b>`;
+}
+
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
+  if(timUnlockPedidoIdFromReference(reference)) return processarFeedbackTimUnlock(body);
   if(!reference) throw new Error('reference_id ausente');
   const pedidoId=Number(reference); if(!pedidoId) throw new Error('reference_id inválido');
   const pedido=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
@@ -1240,6 +1327,17 @@ async function acompanharPedidosDhru(){
           await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO')`,[row.pedido_id]);
         }
       }catch(e){ console.log('⚠️ DHRU STATUS',row.order_uuid,e?.response?.status||'',e?.response?.data?.message||e.message); }
+    }
+    const timPendentes=await all(`SELECT * FROM tim_unlock_dhru_checks WHERE status IN ('ENVIADO','PROCESSANDO','AGUARDANDO_FEEDBACK') AND COALESCE(order_uuid,'')<>'' ORDER BY id ASC LIMIT 30`);
+    for(const row of timPendentes){
+      try{
+        const resp=await consultarPedidoDhru(row.order_uuid),d=resp?.data||{},st=String(d?.status||'').toLowerCase();
+        await run(`UPDATE tim_unlock_dhru_checks SET status=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),JSON.stringify(resp),row.id]);
+        if(['rejected','reject','failed','failure','cancelled','canceled','success','completed','complete','done'].includes(st)){
+          const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+          if(replay||['rejected','reject','failed','failure','cancelled','canceled'].includes(st)) await processarFeedbackTimUnlock({reference_id:timUnlockReference(row.pedido_id),order_id:row.order_uuid,status:st,replay});
+        }
+      }catch(e){ console.log('⚠️ DHRU TIM STATUS',row.order_uuid,e?.response?.status||'',e?.response?.data?.message||e.message); }
     }
   }finally{ dhruPollEmExecucao=false; }
 }
@@ -1399,6 +1497,21 @@ async function initDB() {
   await addColumnIfMissing('dhru_products', 'cids_json', "TEXT DEFAULT '[]'");
   await addColumnIfMissing('dhru_products', 'categorias_json', "TEXT DEFAULT '[]'");
   await addColumnIfMissing('dhru_products', 'service_type', "TEXT DEFAULT 'IMEI_SERVICE'");
+  await run(`CREATE TABLE IF NOT EXISTS tim_unlock_dhru_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pedido_id INTEGER UNIQUE,
+    product_uuid TEXT DEFAULT '',
+    order_uuid TEXT DEFAULT '',
+    status TEXT DEFAULT 'PENDENTE',
+    request_json TEXT DEFAULT '',
+    response_json TEXT DEFAULT '',
+    feedback_json TEXT DEFAULT '',
+    resultado_original TEXT DEFAULT '',
+    erro TEXT DEFAULT '',
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS dhru_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pedido_id INTEGER UNIQUE,
@@ -3135,6 +3248,7 @@ ${entrada}
 ${extra}` : ''}
 
 🏢 Centralunlocker`, String(pedido.servico_nome || '').toLowerCase().includes('esim') ? 'ESIM' : 'NOVO_SERVICO');
+  if (timUnlockIsDesbloqueioTim(pedido)) { try { await executarConsultaAutomaticaDesbloqueioTim(pedido.id); } catch(e) { console.log('⚠️ DHRU TIM AUTO HOOK:',pedido.id,e.message); } }
 }
 
 async function avisarEsimManualAdminTelegram(pedido) {
@@ -9454,11 +9568,22 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
   if (notaFiltro === 'enviadas') sql += ' AND COALESCE(nota_enviada,0)=1';
   sql += controleNota ? ' ORDER BY id ASC LIMIT 1000' : ' ORDER BY id DESC LIMIT 1000';
   const rows = await all(sql, params);
+  if(controleNota){ for(const r of rows) r._timDhru=await get('SELECT * FROM tim_unlock_dhru_checks WHERE pedido_id=?',[r.id]); }
 
   const base = `/admin/servico/${servicoId}/imeis`;
   const notaQS = notaFiltro ? `&notas=${encodeURIComponent(notaFiltro)}` : '';
   const tabs = `<div class="topbar"><div><a class="btn gray" href="${base}${notaFiltro ? `?notas=${encodeURIComponent(notaFiltro)}` : ''}">Todos</a><a class="btn" href="${base}?status=PENDENTE${notaQS}">🟡 Pendente (${Number(contagens?.pendentes||0)})</a><a class="btn orange" href="${base}?status=${encodeURIComponent('EM PROCESSO')}${notaQS}">🔄 Em processo (${Number(contagens?.processo||0)})</a><a class="btn green" href="${base}?status=FINALIZADO${notaQS}">✅ Finalizado (${Number(contagens?.finalizados||0)})</a></div></div>`;
   const notaTabs = controleNota ? `<div class="nota-tabs"><a class="nota-tab ${notaFiltro==='nao_enviadas'?'active-pending':''}" href="${base}?notas=nao_enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">📋</span><span>NOTAS NÃO ENVIADAS</span><b>${Number(contagensNotas?.nao_enviadas||0)}</b></a><a class="nota-tab ${notaFiltro==='enviadas'?'active-sent':''}" href="${base}?notas=enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">✅</span><span>NOTAS ENVIADAS</span><b>${Number(contagensNotas?.enviadas||0)}</b></a></div>` : '';
+
+  let consultaDhruCard='', consultasPedidosHtml='';
+  if(controleNota){
+    const cfgUuid=String(await getConfig('tim_unlock_dhru_product_uuid','')).trim();
+    const prods=await all(`SELECT d.product_uuid,d.nome,d.fields_json,s.nome_exibicao,s.ativo FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE COALESCE(s.ativo,0)=1 ORDER BY COALESCE(NULLIF(s.nome_exibicao,''),d.nome) COLLATE NOCASE`);
+    const validos=prods.filter(x=>{try{const fs=JSON.parse(x.fields_json||'[]');return fs.some(f=>String(f?.name||'').toLowerCase()==='imei')}catch(_){return false}});
+    const atual=validos.find(x=>x.product_uuid===cfgUuid);
+    consultaDhruCard=`<div class="card"><h2>🔎 Consulta automática Dhru</h2><p class="muted">Todo novo pedido de Desbloqueio TIM consulta automaticamente o serviço Dhru escolhido. Esta informação é exclusiva do administrador.</p><form method="post" action="/admin/desbloqueio-tim/dhru-config"><label>Buscar consulta Dhru</label><input id="timDhruBusca" placeholder="Digite para localizar..."><select id="timDhruSelect" name="product_uuid" size="7" style="width:100%;margin-top:8px"><option value="">— Desativar consulta automática —</option>${validos.map(x=>`<option value="${safeHtml(x.product_uuid)}" ${x.product_uuid===cfgUuid?'selected':''}>${safeHtml(String(x.nome_exibicao||'').trim()||dhruNomeServicoPt(x.nome))}</option>`).join('')}</select><p class="mini-help">Atual: <b>${safeHtml(atual?(String(atual.nome_exibicao||'').trim()||dhruNomeServicoPt(atual.nome)):'Não configurada')}</b></p><button class="btn green">💾 Salvar configuração</button></form></div><script>(function(){const q=document.getElementById('timDhruBusca'),sel=document.getElementById('timDhruSelect');if(!q||!sel)return;const base=Array.from(sel.options).map(o=>({v:o.value,t:o.text}));q.addEventListener('input',()=>{const z=q.value.toLowerCase(),cur=sel.value;sel.innerHTML='';base.filter(x=>!z||x.t.toLowerCase().includes(z)).forEach(x=>{const o=new Option(x.t,x.v);o.selected=x.v===cur;sel.add(o)});});})();</script>`;
+    consultasPedidosHtml=rows.map(o=>`<div class="card"><h3>🔎 Consulta Dhru — Pedido #${o.id}</h3><p><b>IMEI:</b> ${safeHtml(o.imei||o.entrada_valor||'-')}</p>${timUnlockResultadoHtml(o._timDhru)}<div style="margin-top:12px"><a class="btn gray" href="/admin/pedido/${o.id}/dhru-tim-original">Ver retorno original</a> <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/dhru-tim-refazer"><button class="btn orange" onclick="return confirm('Refazer a consulta interna deste IMEI?')">🔄 Refazer consulta</button></form></div></div>`).join('');
+  }
 
   const download = `<form id="downloadSelecionadosForm" method="post" action="/admin/servico/${servicoId}/baixar-imeis" class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <input type="hidden" name="status" value="${safeHtml(status)}">
@@ -9482,7 +9607,26 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     update();
   })();</script>`;
 
-  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${controleNota ? notaTabs : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste filtro.</div>'}${js}`));
+  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? consultaDhruCard : ''}${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${controleNota ? notaTabs : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste filtro.</div>'}${controleNota?consultasPedidosHtml:''}${js}`));
+});
+
+app.post('/admin/desbloqueio-tim/dhru-config',async(req,res)=>{
+  const uuid=String(req.body.product_uuid||'').trim();
+  if(uuid){
+    const p=await get(`SELECT d.product_uuid,d.fields_json FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE d.product_uuid=? AND COALESCE(s.ativo,0)=1`,[uuid]);
+    if(!p) return res.status(400).send(page('Configuração inválida','<h1>❌ Serviço Dhru não encontrado ou inativo.</h1>'));
+    let fs=[];try{fs=JSON.parse(p.fields_json||'[]')}catch(_){}
+    if(!fs.some(f=>String(f?.name||'').toLowerCase()==='imei')) return res.status(400).send(page('Configuração inválida','<h1>❌ Escolha uma consulta que aceite IMEI.</h1>'));
+  }
+  await setConfig('tim_unlock_dhru_product_uuid',uuid);
+  res.redirect(req.get('referer')||'/admin/servicos');
+});
+app.post('/admin/pedido/:id/dhru-tim-refazer',async(req,res)=>{try{await executarConsultaAutomaticaDesbloqueioTim(Number(req.params.id),{force:true});}catch(e){console.log('❌ Refazer DHRU TIM:',e.message)}res.redirect(req.get('referer')||'/admin/servicos');});
+app.get('/admin/pedido/:id/dhru-tim-original',async(req,res)=>{
+  const p=await get('SELECT * FROM pedidos WHERE id=?',[req.params.id]),c=await get('SELECT * FROM tim_unlock_dhru_checks WHERE pedido_id=?',[req.params.id]);
+  if(!p||!c)return res.status(404).send(page('Consulta não encontrada','<h1>❌ Consulta interna não encontrada.</h1>'));
+  const raw=String(c.resultado_original||c.feedback_json||c.response_json||c.erro||'Sem retorno ainda.');
+  res.send(page(`Consulta Dhru #${p.id}`,`<h1>🔎 Retorno original — Pedido #${p.id}</h1><div class="card"><p><b>IMEI:</b> ${safeHtml(p.imei||p.entrada_valor||'-')}</p><p><b>Status:</b> ${safeHtml(c.status||'-')}</p><pre style="white-space:pre-wrap;word-break:break-word">${safeHtml(raw)}</pre></div><a class="btn gray" href="/admin/servico/${p.servico_id}/imeis">← Voltar</a>`));
 });
 
 app.post('/admin/pedido/:id/nota-toggle', async (req, res) => {
