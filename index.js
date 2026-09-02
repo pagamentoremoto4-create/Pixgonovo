@@ -1214,6 +1214,27 @@ function notificarPainel(tipo, titulo, mensagem) {
   }
 }
 
+// Atualiza, em tempo real, somente as telas ligadas ao fluxo Bloqueio TIM.
+// Esta função era chamada pelas rotas do painel, mas não existia no arquivo.
+// O ReferenceError acontecia depois de salvar a baixa no SQLite e encerrava o
+// processo Node, fazendo o Render exibir 502 até concluir o reinício.
+function emitirAtualizacaoBloqueioTim(acao = 'atualizacao', pedidoId = null) {
+  try {
+    if (io && typeof io.emit === 'function') {
+      io.emit('bloqueio-tim-update', {
+        acao: String(acao || 'atualizacao'),
+        pedidoId: pedidoId == null ? null : Number(pedidoId),
+        at: Date.now()
+      });
+      io.emit('dashboard-update', { at: Date.now() });
+    }
+  } catch (e) {
+    // Uma falha de atualização visual nunca pode derrubar o servidor nem
+    // desfazer uma alteração que já foi gravada no banco.
+    console.log('⚠️ emitirAtualizacaoBloqueioTim:', e.message);
+  }
+}
+
 async function columnExists(table, col) {
   const cols = await all(`PRAGMA table_info(${table})`);
   return cols.some(c => c.name === col);
