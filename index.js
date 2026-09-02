@@ -792,6 +792,138 @@ function dhruEntradaLabel(product){
   if(fs.length===1) return String(fs[0].name||'Dados');
   return fs.length ? `Dados: ${fs.map(f=>f.name).join(' / ')}`.slice(0,180) : 'Dados do pedido';
 }
+
+// V175: apresentação em português no WhatsApp, preservando nomes/campos originais da API Dhru.
+function dhruCampoLabelPt(nome){
+  const raw=String(nome||'').trim();
+  const k=raw.toLowerCase().replace(/[_-]+/g,' ').replace(/\s+/g,' ').trim();
+  const mapa={
+    'imei':'IMEI','lock code':'Código de Bloqueio','unlock code':'Código de Desbloqueio',
+    'serial number':'Número de Série','serial':'Número de Série','sn':'Número de Série',
+    'email':'E-mail','e mail':'E-mail','username':'Usuário','user name':'Usuário','user':'Usuário',
+    'password':'Senha','phone number':'Número de Telefone','mobile number':'Número de Telefone',
+    'model':'Modelo','model name':'Nome do Modelo','manufacturer':'Fabricante','carrier':'Operadora',
+    'network':'Rede / Operadora','country':'País','status':'Situação','quantity':'Quantidade',
+    'order id':'Número do Pedido','reference id':'Referência do Pedido','account':'Conta',
+    'code':'Código','pin':'PIN','meid':'MEID','udid':'UDID','icloud':'iCloud','frp':'FRP'
+  };
+  return mapa[k]||raw;
+}
+function dhruCampoIconePt(nome){
+  const k=String(nome||'').toLowerCase();
+  if(k.includes('imei')||k.includes('model')) return '📱';
+  if(k.includes('lock')||k.includes('unlock')||k==='code'||k.includes('pin')) return '🔐';
+  if(k.includes('serial')||k==='sn'||k.includes('meid')||k.includes('udid')) return '🔢';
+  if(k.includes('mail')) return '📧';
+  if(k.includes('user')||k.includes('account')) return '👤';
+  if(k.includes('phone')||k.includes('mobile')) return '📞';
+  if(k.includes('country')) return '🌎';
+  if(k.includes('carrier')||k.includes('network')) return '📡';
+  return '📝';
+}
+function dhruNomeServicoPt(nome){
+  let s=String(nome||'').trim();
+  if(!s) return s;
+  const reps=[
+    [/Mi Account Lock Remove/gi,'Remoção de Bloqueio da Conta Mi'],
+    [/Account Lock Remove/gi,'Remoção de Bloqueio de Conta'],
+    [/Blacklist \/ Block Pro Checker By IMEI/gi,'Blacklist / Verificador de Bloqueio por IMEI'],
+    [/Blacklist Checker By IMEI/gi,'Consulta de Blacklist por IMEI'],
+    [/Blacklist Checker/gi,'Consulta de Blacklist'],
+    [/Carrier Check/gi,'Consulta de Operadora'],
+    [/Carrier Checker/gi,'Consulta de Operadora'],
+    [/SIM[- ]?Lock/gi,'Bloqueio de SIM'],
+    [/Unlock/gi,'Desbloqueio'],
+    [/Remove/gi,'Remoção'],
+    [/Checker/gi,'Consulta'],
+    [/Check/gi,'Consulta'],
+    [/Worldwide/gi,'Mundial'],
+    [/Brazil/gi,'Brasil'],
+    [/Clean Only/gi,'Somente Clean'],
+    [/Only Clean/gi,'Somente Clean'],
+    [/Stolen or Lost/gi,'Roubado ou Perdido'],
+    [/Lost or Stolen/gi,'Perdido ou Roubado'],
+    [/Success/gi,'Sucesso'],
+    [/Instant/gi,'Instantâneo'],
+    [/Premium/gi,'Premium'],
+    [/Warranty/gi,'Garantia'],
+    [/Activation/gi,'Ativação'],
+    [/Status/gi,'Situação'],
+    [/Country/gi,'País'],
+    [/Server/gi,'Servidor']
+  ];
+  for(const [a,b] of reps) s=s.replace(a,b);
+  return s.replace(/\s{2,}/g,' ').trim();
+}
+function dhruValorPt(valor){
+  const raw=String(valor??'').trim();
+  const k=raw.toLowerCase();
+  const mapa={
+    'blacklisted':'BLOQUEADO','clean':'LIMPO','blocked':'BLOQUEADO','unblocked':'DESBLOQUEADO',
+    'locked':'BLOQUEADO','unlocked':'DESBLOQUEADO','done':'CONCLUÍDO','completed':'CONCLUÍDO',
+    'success':'SUCESSO','processing':'EM PROCESSO','pending':'PENDENTE','rejected':'REJEITADO',
+    'failed':'FALHOU','yes':'SIM','no':'NÃO','true':'SIM','false':'NÃO','brazil':'Brasil',
+    'stolen or lost':'Roubado ou Perdido','lost or stolen':'Perdido ou Roubado'
+  };
+  return mapa[k]??raw;
+}
+function dhruChaveResultadoPt(chave){
+  const raw=String(chave||'').trim();
+  const k=raw.toLowerCase().replace(/[_-]+/g,' ').replace(/\s+/g,' ').trim();
+  const mapa={
+    'model':'Modelo','model name':'Nome do Modelo','manufacturer':'Fabricante','blacklist status':'Situação da Blacklist',
+    'general list status':'Situação Geral','blacklist records':'Registros de Blacklist','blacklisted by':'Bloqueado por',
+    'blacklisted on':'Data do Bloqueio','blacklist reason':'Motivo do Bloqueio','country':'País','carrier':'Operadora',
+    'network':'Rede / Operadora','status':'Situação','serial number':'Número de Série','serial':'Número de Série',
+    'unlock code':'Código de Desbloqueio','lock code':'Código de Bloqueio','result':'Resultado','message':'Mensagem',
+    'device is clean':'Aparelho está limpo','clean status':'Situação Clean','sim lock':'Bloqueio de SIM',
+    'purchase country':'País de Compra','activation status':'Situação da Ativação','warranty status':'Situação da Garantia'
+  };
+  return mapa[k]||dhruCampoLabelPt(raw);
+}
+function traduzirResultadoDhruPt(v){
+  const limpo=limparResultadoDhru(v);
+  if(!limpo) return '';
+  return limpo.split('\n').map(linha=>{
+    const m=linha.match(/^\s*([^:]{1,80})\s*:\s*(.*)$/);
+    if(!m) return dhruValorPt(linha);
+    return `${dhruChaveResultadoPt(m[1])}: ${dhruValorPt(m[2])}`;
+  }).join('\n').replace(/\bBlacklisted\b/gi,'BLOQUEADO').replace(/\bClean\b/gi,'LIMPO');
+}
+function dhruFieldsUsuario(product){
+  return (product?.fields||[]).filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
+}
+function dhruSerializarCampos(campos,valores){
+  if(campos.length===1) return String(valores?.[0]??'').trim();
+  return campos.map((f,i)=>`${f.name}: ${String(valores?.[i]??'').trim()}`).filter(l=>!/:\s*$/.test(l)).join('\n');
+}
+function dhruParseEntradaParaExibicao(product,entrada){
+  const fs=dhruFieldsUsuario(product);
+  const txt=String(entrada||'').trim();
+  if(!fs.length) return txt?`📝 Informação: ${txt}`:'';
+  if(fs.length===1 && !txt.includes(':')) return `${dhruCampoIconePt(fs[0].name)} ${dhruCampoLabelPt(fs[0].name)}: ${txt}`;
+  const map={};
+  for(const line of txt.split(/\r?\n/)){
+    const m=line.match(/^([^:=]+)\s*[:=]\s*(.*)$/); if(m) map[m[1].trim().toLowerCase()]=m[2].trim();
+  }
+  return fs.map(f=>{const v=map[String(f.name||'').toLowerCase()];return v?`${dhruCampoIconePt(f.name)} ${dhruCampoLabelPt(f.name)}: ${v}`:''}).filter(Boolean).join('\n') || txt;
+}
+async function dhruEntradaPedidoPt(servico,pedidoOuEntrada){
+  const p=await dhruProductForService(servico.id||servico.servico_id);
+  const entrada=typeof pedidoOuEntrada==='object'?(pedidoOuEntrada.entrada_valor||pedidoOuEntrada.imei||''):pedidoOuEntrada;
+  return dhruParseEntradaParaExibicao(p,entrada);
+}
+async function textoSaldoInsuficienteDhru(revenda,valor,servico,entradas=[]){
+  const saldo=Number(revenda?.saldo||0), falta=Math.max(0,Number(valor||0)-saldo);
+  const p=await dhruProductForService(servico.id);
+  const dados=(Array.isArray(entradas)?entradas:[entradas]).map(e=>dhruParseEntradaParaExibicao(p,e)).filter(Boolean).join('\n');
+  return `❌ Saldo insuficiente\n\n🛠 Serviço: ${dhruNomeServicoPt(servico.nome)}${dados?`\n${dados}`:''}\n\n💰 Valor: ${brl(valor)}\n💳 Saldo: ${brl(saldo)}\n💵 Falta: ${brl(falta)}\n\n1️⃣ Pagar este serviço\n2️⃣ Adicionar saldo\n3️⃣ Cancelar pedido\n\n💬 Digite o número da opção.`;
+}
+function dhruPromptCampo(f,idx,total){
+  const opcional=f?.required===false?'\n\nEste campo é opcional. Digite *pular* para continuar.':'';
+  return `${dhruCampoIconePt(f?.name)} Informe ${dhruCampoLabelPt(f?.name)}:${total>1?`\n\nCampo ${idx+1} de ${total}`:''}${opcional}`;
+}
+
 async function sincronizarProdutosDhru(){
   const payload=await dhruRequest('get','/products');
   const cats=dhruCategoriesFromPayload(payload);
@@ -859,7 +991,7 @@ async function textoEntradaDhru(servico){
   const p=await dhruProductForService(servico.id);
   if(!p) return `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`;
   const fs=(p.fields||[]).filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
-  if(fs.length<=1) return `${iconeEntradaServico(servico)} Informe o ${fs[0]?.name||labelEntradaServico(servico)}:`;
+  if(fs.length<=1) return dhruPromptCampo(fs[0]||{name:labelEntradaServico(servico)},0,1);
   return `📋 Envie os dados abaixo, *um por linha*, usando exatamente este formato:\n\n${fs.map(f=>`${f.name}: ${f.required===false?'(opcional)':'...'}`).join('\n')}\n\nExemplo:\n${fs.map(f=>`${f.name}: exemplo`).join('\n')}`;
 }
 async function executarPedidoDhru(pedidoId){
@@ -961,9 +1093,11 @@ async function processarFeedbackDhru(body){
     if(!jaFinalizado) await finalizarPedido(pedido,{notificarCliente:false});
     if(cliente && !jaFinalizado){
       const clienteAtual=await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]);
-      const resultadoLimpo=limparResultadoDhru(replay);
+      const resultadoLimpo=traduzirResultadoDhruPt(replay);
+      const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+      const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const saldoLinha=clienteAtual?`\n\n💳 Saldo: ${brl(clienteAtual.saldo||0)}`:'';
-      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${pedido.servico_nome}\n${pedido.entrada_label||'Entrada'}: ${pedido.entrada_valor||pedido.imei||'-'}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *Resultado*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
+      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
     }
   } else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
@@ -971,7 +1105,7 @@ async function processarFeedbackDhru(body){
       await run('UPDATE revendas SET saldo=saldo+?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
       await run(`UPDATE pedidos SET cobrado=0,estornado=1,status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
     } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
-    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado pelo fornecedor*\n\n🛠 ${pedido.servico_nome}${replay?`\n📄 Motivo: ${replay}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
+    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n🛠 ${dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
   }
   return {pedidoId,status,replay};
 }
@@ -1944,7 +2078,7 @@ async function listarServicosTexto(revenda) {
 `;
   for (let i = 0; i < servicos.length; i++) {
     const preco = revenda ? await precoDaRevenda(revenda.id, servicos[i].id) : Number(servicos[i].preco_padrao || 0);
-    texto += `${i + 1}️⃣ ${servicos[i].nome}
+    texto += `${i + 1}️⃣ ${servicos[i].api_provider === 'DHRU' ? dhruNomeServicoPt(servicos[i].nome) : servicos[i].nome}
 💰 ${brl(preco)}
 
 `;
@@ -3228,12 +3362,17 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[Number(opcao) - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     if (servico.api_provider === 'DHRU') {
-      const promptDhru = await textoEntradaDhru(servico);
-      const tipoDhru = normalizarTipoEntrada(servico.tipo_entrada);
-      if (tipoDhru !== 'IMEI') { await enviarTexto(from, `🛠 *${servico.nome}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id, servico.id))}\n\n${promptDhru}\n\n0️⃣ ⬅️ Voltar`); return; }
+      const pDhru=await dhruProductForService(servico.id);
+      const fsDhru=dhruFieldsUsuario(pDhru);
+      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
+      if(!simplesImei && fsDhru.length){
+        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
+        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);
+        return;
+      }
     }
+    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     if (tipoEntrada === 'IMEI') {
       await enviarTexto(from, `📱 Envie os IMEIs\n\n• Máximo 5 IMEIs\n• 1 IMEI por linha\n• Cada IMEI precisa ter 15 números\n\nExemplo:\n353625361425365\n353625361425366`);
@@ -3261,6 +3400,29 @@ ${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
     if (ia.respondeu) { await enviarTexto(from, ia.texto); return; }
     await salvarSessaoPedido(from, { etapa: 'servico_escolha' });
     await enviarTexto(from, 'Não consegui responder agora. Digite o número do serviço, *0* para voltar ou tente novamente.');
+    return;
+  }
+
+  if (sess?.etapa === 'dhru_campo') {
+    const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
+    if(!servico){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Serviço indisponível.');return;}
+    const campos=Array.isArray(sess.dhruCampos)?sess.dhruCampos:dhruFieldsUsuario(await dhruProductForService(servico.id));
+    const idx=Math.max(0,Number(sess.dhruIndice||0));
+    const campo=campos[idx];
+    if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados. Sincronize novamente a API.');return;}
+    if(String(textoOriginal||'').trim()==='0'){await apagarSessaoPedido(from);await enviarTexto(from,'Digite *menu* para voltar.');return;}
+    let valorCampo=String(textoOriginal||'').trim();
+    if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
+    if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
+    const prox=idx+1;
+    if(prox<campos.length){
+      await salvarSessaoPedido(from,{...sess,etapa:'dhru_campo',dhruCampos:campos,dhruValores:valores,dhruIndice:prox});
+      await enviarTexto(from,dhruPromptCampo(campos[prox],prox,campos.length));
+      return;
+    }
+    const serializado=dhruSerializarCampos(campos,valores);
+    await processarEntradaDhruColetadaWhatsApp(from,cliente,servico,serializado);
     return;
   }
 
@@ -4142,6 +4304,16 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[Number(opcao) - 1];
     if (!servico) { await apagarSessaoPedido(from); console.log('🔇 V121 SERVIÇO INVÁLIDO — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
+    if(servico.api_provider==='DHRU') {
+      const pDhru=await dhruProductForService(servico.id);
+      const fsDhru=dhruFieldsUsuario(pDhru);
+      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
+      if(!simplesImei && fsDhru.length){
+        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
+        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}`);
+        return;
+      }
+    }
     await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
     return;
@@ -4150,6 +4322,29 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   if (sess?.etapa === 'servico_escolha') {
     await apagarSessaoPedido(from);
     console.log('🔇 V121 MENSAGEM FORA DA ESCOLHA DE SERVIÇO — MENU CANCELADO:', numeroNorm, textoOriginal);
+    return;
+  }
+
+  if (sess?.etapa === 'dhru_campo') {
+    const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
+    if(!servico){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Serviço indisponível.');return;}
+    const campos=Array.isArray(sess.dhruCampos)?sess.dhruCampos:dhruFieldsUsuario(await dhruProductForService(servico.id));
+    const idx=Math.max(0,Number(sess.dhruIndice||0));
+    const campo=campos[idx];
+    if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados. Sincronize novamente a API.');return;}
+    if(String(textoOriginal||'').trim()==='0'){await apagarSessaoPedido(from);await enviarTexto(from,'Digite *menu* para voltar.');return;}
+    let valorCampo=String(textoOriginal||'').trim();
+    if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
+    if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
+    const prox=idx+1;
+    if(prox<campos.length){
+      await salvarSessaoPedido(from,{...sess,etapa:'dhru_campo',dhruCampos:campos,dhruValores:valores,dhruIndice:prox});
+      await enviarTexto(from,dhruPromptCampo(campos[prox],prox,campos.length));
+      return;
+    }
+    const serializado=dhruSerializarCampos(campos,valores);
+    await processarEntradaDhruColetadaWhatsApp(from,cliente,servico,serializado);
     return;
   }
 
@@ -4164,7 +4359,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const modalidadeServico = await modalidadeServicoRevenda(cliente.id, servico.id);
     if (modalidadeServico === 'PRE_PAGO' && Number((revAtual || cliente).saldo || 0) < totalPedido) {
       await salvarSessaoPedido(from, { etapa: 'saldo_insuficiente_servico', servicoId: servico.id, entradas: validacao.entradas, totalPedido });
-      await enviarTexto(from, textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
+      await enviarTexto(from, servico.api_provider==='DHRU' ? await textoSaldoInsuficienteDhru(revAtual||cliente,totalPedido,servico,validacao.entradas) : textoSaldoInsuficiente(revAtual || cliente, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome, validacao.entradas));
       return;
     }
     await apagarSessaoPedido(from);
@@ -4185,8 +4380,8 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
       : `${entradaIcone} ${entradaLabel}s:\n${criados.map(item => item.entrada).join('\n')}`;
     await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço: ${servico.nome}
-${detalhesEntradas}
+🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}
+${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoPt(servico,criados[0].entrada) : detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
@@ -4204,6 +4399,29 @@ ${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: P
   return;
 }
 
+
+
+async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entradaSerializada){
+  const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
+  const valor=await precoDaRevenda(cliente.id,servico.id);
+  const modalidade=await modalidadeServicoRevenda(cliente.id,servico.id);
+  if(modalidade==='PRE_PAGO' && Number((revAtual||cliente).saldo||0)<valor){
+    await salvarSessaoPedido(from,{etapa:'saldo_insuficiente_servico',servicoId:servico.id,entradas:[entradaSerializada],totalPedido:valor});
+    await enviarTexto(from,await textoSaldoInsuficienteDhru(revAtual||cliente,valor,servico,[entradaSerializada]));
+    return true;
+  }
+  await apagarSessaoPedido(from);
+  const prePago=modalidade==='PRE_PAGO';
+  const ins=await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado) VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, NULL, ?, 'OUTRO', 'Dados do pedido', ?, 'PENDENTE', ?)`,[cliente.id,cliente.nome,from,normalizarNumeroWhatsApp(cliente.whatsapp||jidToNumber(from)),servico.id,servico.nome,entradaSerializada,valor,prePago?1:0]);
+  if(prePago) await run('UPDATE revendas SET saldo=MAX(0,saldo-?),atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[valor,cliente.id]);
+  const pedido=await get('SELECT * FROM pedidos WHERE id=?',[ins.lastID]);
+  notificarPainel('pedido','🔔 Novo pedido WhatsApp',`${cliente.nome} - ${servico.nome}`);
+  await avisarNovoPedidoAdmins(pedido);
+  const dadosPt=await dhruEntradaPedidoPt(servico,entradaSerializada);
+  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n🛠 Serviço: ${dhruNomeServicoPt(servico.nome)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n🟡 *Status: EM PROCESSO*`,from);
+  try{await executarPedidoDhru(ins.lastID);}catch(e){console.log('❌ DHRU pedido',ins.lastID,e.message);}
+  return true;
+}
 
 function textoProdutoCampanha(p) {
   return `📱 *${p.nome_plano}*\n\n${p.descricao ? `${p.descricao}\n\n` : ''}💰 Valor: *${brl(p.preco_revenda)}*\n\n✅ Compra rápida e segura\n📦 Entrega conforme disponibilidade\n\nToque no botão abaixo para comprar.`;
@@ -4880,6 +5098,20 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
     const servico = servicos[pos - 1];
     if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
+    if(servico.api_provider==='DHRU'){
+      const pDhru=await dhruProductForService(servico.id);
+      const fsDhru=dhruFieldsUsuario(pDhru);
+      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
+      if(!simplesImei && fsDhru.length){
+        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
+        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*
+
+💰 Valor: ${brl(await precoDaRevenda(revenda.id,servico.id))}
+
+${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}`);
+        return;
+      }
+    }
     await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
     if (tipoEntrada === 'IMEI') {
@@ -4889,6 +5121,21 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     } else {
       await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
     }
+    return;
+  }
+
+  if(sess?.etapa==='dhru_campo'){
+    const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
+    if(!servico){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Serviço indisponível.');return;}
+    const campos=Array.isArray(sess.dhruCampos)?sess.dhruCampos:dhruFieldsUsuario(await dhruProductForService(servico.id));
+    const idx=Math.max(0,Number(sess.dhruIndice||0)), campo=campos[idx];
+    if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados.');return;}
+    let valorCampo=String(textoOriginal||'').trim();
+    if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
+    if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
+    if(idx+1<campos.length){await salvarSessaoPedido(from,{...sess,dhruCampos:campos,dhruValores:valores,dhruIndice:idx+1});await enviarTexto(from,dhruPromptCampo(campos[idx+1],idx+1,campos.length));return;}
+    await processarEntradaDhruColetadaWhatsApp(from,revenda,servico,dhruSerializarCampos(campos,valores));
     return;
   }
 
@@ -4911,7 +5158,7 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     const totalPedido = valor * validacao.entradas.length;
     const modalidadeServico = await modalidadeServicoRevenda(revenda.id, servico.id);
     if (modalidadeServico === 'PRE_PAGO' && Number(revenda.saldo || 0) < totalPedido) {
-      await enviarTexto(from, textoSaldoInsuficiente(revenda, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
+      await enviarTexto(from, servico.api_provider==='DHRU' ? await textoSaldoInsuficienteDhru(revenda,totalPedido,servico,validacao.entradas) : textoSaldoInsuficiente(revenda, totalPedido, validacao.entradas.length > 1 ? `${servico.nome} (${validacao.entradas.length} itens)` : servico.nome));
       return;
     }
     const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
@@ -4946,7 +5193,7 @@ Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, ponto
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n${servico.api_provider==='DHRU'?'🟡 Status: EM PROCESSO':'📍 Status: PENDENTE'}`, from);
       return;
     }
 
@@ -6002,8 +6249,8 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   const entradasTexto = criados.map(c => c.entrada).join('\n');
   await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço: ${servico.nome}
-${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}
+🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}
+${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.entrada||entradasTexto) : `${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}`}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
