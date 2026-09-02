@@ -917,7 +917,7 @@ async function textoSaldoInsuficienteDhru(revenda,valor,servico,entradas=[]){
   const saldo=Number(revenda?.saldo||0), falta=Math.max(0,Number(valor||0)-saldo);
   const p=await dhruProductForService(servico.id);
   const dados=(Array.isArray(entradas)?entradas:[entradas]).map(e=>dhruParseEntradaParaExibicao(p,e)).filter(Boolean).join('\n');
-  return `❌ Saldo insuficiente\n\n🛠 Serviço: ${dhruNomeServicoPt(servico.nome)}${dados?`\n${dados}`:''}\n\n💰 Valor: ${brl(valor)}\n💳 Saldo: ${brl(saldo)}\n💵 Falta: ${brl(falta)}\n\n1️⃣ Pagar este serviço\n2️⃣ Adicionar saldo\n3️⃣ Cancelar pedido\n\n💬 Digite o número da opção.`;
+  return `❌ Saldo insuficiente\n\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}${dados?`\n${dados}`:''}\n\n💰 Valor: ${brl(valor)}\n💳 Saldo: ${brl(saldo)}\n💵 Falta: ${brl(falta)}\n\n1️⃣ Pagar este serviço\n2️⃣ Adicionar saldo\n3️⃣ Cancelar pedido\n\n💬 Digite o número da opção.`;
 }
 function dhruPromptCampo(f,idx,total){
   const opcional=f?.required===false?'\n\nEste campo é opcional. Digite *pular* para continuar.':'';
@@ -1150,7 +1150,7 @@ async function processarFeedbackDhru(body){
       const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
       const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const saldoLinha=clienteAtual?`\n\n💳 Saldo: ${brl(clienteAtual.saldo||0)}`:'';
-      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
+      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
     }
   } else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
@@ -1158,7 +1158,8 @@ async function processarFeedbackDhru(body){
       await run('UPDATE revendas SET saldo=saldo+?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
       await run(`UPDATE pedidos SET cobrado=0,estornado=1,status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
     } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
-    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n🛠 ${dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
+    const servicoRejeitado=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n🛠 ${servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
   }
   return {pedidoId,status,replay};
 }
@@ -1306,6 +1307,13 @@ async function initDB() {
   await addColumnIfMissing('servicos_catalogo', 'api_price_mode', "TEXT DEFAULT 'MANUAL'");
   await addColumnIfMissing('servicos_catalogo', 'api_margin_pct', 'REAL');
   await addColumnIfMissing('servicos_catalogo', 'api_manual_price', 'REAL');
+  // V178: nomes comerciais editáveis para apresentação no WhatsApp.
+  await addColumnIfMissing('servicos_catalogo', 'nome_exibicao', "TEXT DEFAULT ''");
+  await run(`CREATE TABLE IF NOT EXISTS dhru_category_display (
+    category TEXT PRIMARY KEY,
+    display_name TEXT DEFAULT '',
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
   await run(`UPDATE servicos_catalogo SET api_manual_price=preco_padrao WHERE api_provider='DHRU' AND api_manual_price IS NULL`);
   await run(`CREATE TABLE IF NOT EXISTS dhru_category_pricing (
     category TEXT PRIMARY KEY,
@@ -2134,6 +2142,21 @@ async function getRevendaByMsg(msg, fallbackJid) {
   console.log('❌ REVENDA NÃO ENCONTRADA para:', numeros.join(','));
   return null;
 }
+function nomeServicoWhatsApp(servico){
+  if(!servico) return '';
+  const custom=String(servico.nome_exibicao||'').trim();
+  if(custom) return custom;
+  return String(servico.api_provider||'').toUpperCase()==='DHRU'?dhruNomeServicoPt(servico.nome):String(servico.nome||'');
+}
+async function nomeCategoriaDhruWhatsApp(categoria){
+  const original=String(categoria||'Sem categoria').trim()||'Sem categoria';
+  const row=await get(`SELECT display_name FROM dhru_category_display WHERE category=?`,[original]);
+  const custom=String(row?.display_name||'').trim();
+  return custom||categoriaWhatsAppPt(original,'DHRU');
+}
+async function nomeCategoriaLocalWhatsApp(){
+  return String(await getConfig('whatsapp_categoria_local_nome','Blacklist Brazil')).trim()||'Blacklist Brazil';
+}
 function categoriaWhatsAppPt(nome, apiProvider='') {
   const original=String(nome||'Serviços').trim()||'Serviços';
   if(String(apiProvider||'').toUpperCase()!=='DHRU') return original;
@@ -2151,10 +2174,18 @@ function categoriaWhatsAppPt(nome, apiProvider='') {
 async function categoriasServicosWhatsApp(){
   const rows=await all(`SELECT categoria,api_provider,COUNT(*) qtd FROM servicos_catalogo WHERE ativo=1 GROUP BY categoria,api_provider ORDER BY CASE WHEN api_provider='DHRU' THEN 1 ELSE 0 END,categoria COLLATE NOCASE`);
   const mapa=[];
+  const nomeLocal=await nomeCategoriaLocalWhatsApp();
   for(const r of rows){
     const nomeOriginal=String(r.categoria||'Serviços').trim()||'Serviços';
-    const nomePt=categoriaWhatsAppPt(nomeOriginal,r.api_provider);
-    mapa.push({categoria:nomeOriginal,api_provider:String(r.api_provider||''),nome:nomePt,qtd:Number(r.qtd||0)});
+    const provider=String(r.api_provider||'');
+    if(provider.toUpperCase()!=='DHRU'){
+      const existente=mapa.find(x=>String(x.api_provider||'').toUpperCase()!=='DHRU');
+      if(existente){existente.qtd+=Number(r.qtd||0);existente.categoriasOriginais.push(nomeOriginal);continue;}
+      mapa.push({categoria:nomeOriginal,categoriasOriginais:[nomeOriginal],api_provider:provider,nome:nomeLocal,qtd:Number(r.qtd||0)});
+      continue;
+    }
+    const nomePt=await nomeCategoriaDhruWhatsApp(nomeOriginal);
+    mapa.push({categoria:nomeOriginal,categoriasOriginais:[nomeOriginal],api_provider:provider,nome:nomePt,qtd:Number(r.qtd||0)});
   }
   return mapa;
 }
@@ -2166,11 +2197,21 @@ async function listarServicosTexto(revenda) {
   return texto;
 }
 async function listarServicosCategoriaTexto(revenda,cat){
-  const rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(categoria,'Serviços')=? AND COALESCE(api_provider,'')=? ORDER BY nome COLLATE NOCASE`,[cat.categoria,cat.api_provider]);
-  let texto=`📂 *${cat.nome}*\n\n`;
+  let rows=[];
+  if(String(cat.api_provider||'').toUpperCase()==='DHRU'){
+    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(categoria,'Serviços')=? AND COALESCE(api_provider,'')='DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`,[cat.categoria]);
+  }else{
+    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
+  }
+  let texto=`📂 *${cat.nome}*
+
+`;
   for(let i=0;i<rows.length;i++){
     const preco=revenda?await precoDaRevenda(revenda.id,rows[i].id):Number(rows[i].preco_padrao||0);
-    texto+=`${i+1}️⃣ ${rows[i].api_provider==='DHRU'?dhruNomeServicoPt(rows[i].nome):rows[i].nome}\n💰 ${brl(preco)}\n\n`;
+    texto+=`${i+1}️⃣ ${nomeServicoWhatsApp(rows[i])}
+💰 ${brl(preco)}
+
+`;
   }
   texto+=`0️⃣ ⬅️ Categorias`;
   return {texto,rows};
@@ -2189,7 +2230,7 @@ async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
   if(servico.api_provider==='DHRU'){
     const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
     const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
-    if(!simplesImei&&fsDhru.length){await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);return true;}
+    if(!simplesImei&&fsDhru.length){await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});await enviarTexto(from,`🛠 *${nomeServicoWhatsApp(servico)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);return true;}
   }
   await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
   const tipo=normalizarTipoEntrada(servico.tipo_entrada);
@@ -4453,7 +4494,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
       : `${entradaIcone} ${entradaLabel}s:\n${criados.map(item => item.entrada).join('\n')}`;
     await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}
+🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}
 ${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoPt(servico,criados[0].entrada) : detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
@@ -4491,7 +4532,7 @@ async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entrada
   notificarPainel('pedido','🔔 Novo pedido WhatsApp',`${cliente.nome} - ${servico.nome}`);
   await avisarNovoPedidoAdmins(pedido);
   const dadosPt=await dhruEntradaPedidoPt(servico,entradaSerializada);
-  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n🛠 Serviço: ${dhruNomeServicoPt(servico.nome)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n🟡 *Status: EM PROCESSO*`,from);
+  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n🟡 *Status: EM PROCESSO*`,from);
   try{await executarPedidoDhru(ins.lastID);}catch(e){console.log('❌ DHRU pedido',ins.lastID,e.message);}
   return true;
 }
@@ -5244,7 +5285,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n${servico.api_provider==='DHRU'?'🟡 Status: EM PROCESSO':'📍 Status: PENDENTE'}`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n${servico.api_provider==='DHRU'?'🟡 Status: EM PROCESSO':'📍 Status: PENDENTE'}`, from);
       return;
     }
 
@@ -6300,7 +6341,7 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   const entradasTexto = criados.map(c => c.entrada).join('\n');
   await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
-🛠 Serviço: ${servico.api_provider==='DHRU'?dhruNomeServicoPt(servico.nome):servico.nome}
+🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}
 ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.entrada||entradasTexto) : `${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}`}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
@@ -9609,7 +9650,10 @@ app.post('/admin/temas/personalizar', async (req,res) => { const bg=String(req.b
 
 app.get('/admin/dhru', async (req,res) => {
   const tok=await dhruToken(), base=await dhruBaseUrl(), pub=await dhruPublicBase();
-  const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo,s.api_price_mode,s.api_margin_pct,s.api_manual_price FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.nome COLLATE NOCASE`);
+  const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo,s.api_price_mode,s.api_margin_pct,s.api_manual_price,s.nome_exibicao FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.nome COLLATE NOCASE`);
+  const nomesCatRows=await all(`SELECT category,display_name FROM dhru_category_display`);
+  const nomesCat=new Map(nomesCatRows.map(x=>[String(x.category||''),String(x.display_name||'').trim()]));
+  const categoriaLocalNome=await nomeCategoriaLocalWhatsApp();
   const ultima=await getConfig('dhru_ultima_sync','Nunca');
   const precCfg=await dhruConfigPrecificacao();
   const margensRows=await all(`SELECT category,margin_pct FROM dhru_category_pricing ORDER BY category COLLATE NOCASE`);
@@ -9634,7 +9678,7 @@ app.get('/admin/dhru', async (req,res) => {
     }
   }
   const categorias=[...catMap.values()].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
-  const categoriasHtml=rows.length?`<div class="card"><h2>📂 Categorias da API (${categorias.length})</h2><p class="muted">Categorias importadas diretamente do campo <code>categories</code> da API Dhru. Abra uma categoria para escolher os serviços e definir a margem de lucro.</p><div class="grid">${categorias.map(c=>{const mc=margensCat.has(c.nome)?margensCat.get(c.nome):precCfg.margemPadrao;return `<a class="card" style="text-decoration:none;display:block" href="/admin/dhru?cat=${encodeURIComponent(c.nome)}"><h3>📁 ${safeHtml(c.nome)}</h3><p><b>${c.total}</b> produto(s)</p><p class="muted">${c.ativos} ativo(s) • ${c.total-c.ativos} inativo(s)</p><p><b>Margem:</b> ${Number(mc).toFixed(2)}%</p></a>`}).join('')}</div></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`;
+  const categoriasHtml=`<div class="card"><h2>📲 Organização do menu WhatsApp</h2><p class="muted">Você pode mudar os nomes exibidos no WhatsApp sem alterar os nomes originais usados pela API.</p><div class="card"><h3>📵 Serviços próprios</h3><form method="post" action="/admin/dhru/categoria-local-nome"><label>Nome da categoria no WhatsApp</label><input name="nome" value="${safeHtml(categoriaLocalNome)}" placeholder="Blacklist Brazil"><button class="btn green">💾 Salvar categoria</button></form><p class="mini-help">Bloqueio TIM, Desbloqueio TIM, SSP e os demais serviços próprios ficam reunidos aqui.</p></div></div>`+(rows.length?`<div class="card"><h2>📂 Categorias da API (${categorias.length})</h2><p class="muted">Abra uma categoria para escolher serviços. Você também pode mudar o nome que o cliente verá no WhatsApp.</p><div class="grid">${categorias.map(c=>{const mc=margensCat.has(c.nome)?margensCat.get(c.nome):precCfg.margemPadrao;const exib=nomesCat.get(c.nome)||categoriaWhatsAppPt(c.nome,'DHRU');return `<div class="card"><h3>📁 ${safeHtml(exib)}</h3><p class="muted">API: ${safeHtml(c.nome)}</p><p><b>${c.total}</b> produto(s) • ${c.ativos} ativo(s)</p><p><b>Margem:</b> ${Number(mc).toFixed(2)}%</p><form method="post" action="/admin/dhru/categoria-nome"><input type="hidden" name="categoria" value="${safeHtml(c.nome)}"><label>Nome no WhatsApp</label><input name="nome" value="${safeHtml(exib)}"><button class="btn green">💾 Salvar nome</button></form><p><a class="btn" href="/admin/dhru?cat=${encodeURIComponent(c.nome)}">Abrir categoria</a></p></div>`}).join('')}</div></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`);
 
   let produtosHtml='';
   if(selectedCat){
@@ -9642,8 +9686,9 @@ app.get('/admin/dhru', async (req,res) => {
     if(busca) filtrados=filtrados.filter(r=>String(r.nome||'').toLowerCase().includes(busca)||String(r.product_uuid||'').toLowerCase().includes(busca));
     const encodedCat=encodeURIComponent(selectedCat);
     const margemCategoriaAtual=margensCat.has(selectedCat)?margensCat.get(selectedCat):null;
-    const linhas=filtrados.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){};const campos=fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>dhruCampoLabelPt(f.name)).join(', ')||'—';const catsLinha=categoriasDaLinha(r);const margemServico=r.api_margin_pct!==null&&r.api_margin_pct!==undefined?Math.max(0,Number(r.api_margin_pct)||0):null;const margemCat=margensCat.has(catsLinha[0])?margensCat.get(catsLinha[0]):precCfg.margemPadrao;const margemEfetiva=margemServico!==null?margemServico:margemCat;const custoBrl=dhruCustoEmBrl(r.custo,r.currency,precCfg.usdBrl);const precoCalc=dhruPrecoAutomatico(r.custo,r.currency,margemEfetiva,precCfg.usdBrl);const modo=String(r.api_price_mode||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=r.api_manual_price!==null&&r.api_manual_price!==undefined?Number(r.api_manual_price):Number(r.preco_padrao||0);const venda=Number(r.preco_padrao||0);const lucro=custoBrl===null?null:venda-custoBrl;const abaixo=custoBrl!==null&&venda<custoBrl;return `<tr><td><input form="dhruBulk" type="checkbox" name="ids" value="${Number(r.catalogo_id)}"></td><td><b>${safeHtml(dhruNomeServicoPt(r.nome))}</b><br><small>${catsLinha.map(safeHtml).join(' • ')}</small></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}${custoBrl!==null?`<br><small>≈ ${brl(custoBrl)}</small>`:''}</td><td>${safeHtml(campos)}</td><td><form method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input type="hidden" name="voltar_cat" value="${safeHtml(selectedCat)}"><label>Modo</label><select name="modo"><option value="AUTO" ${modo==='AUTO'?'selected':''}>% Automático</option><option value="MANUAL" ${modo==='MANUAL'?'selected':''}>Preço manual</option></select><label>Margem própria % <small>(opcional)</small></label><input name="margem" value="${margemServico===null?'':margemServico}" placeholder="Usar categoria" style="width:110px"><label>Preço manual R$</label><input name="preco_manual" value="${Number(manual||0).toFixed(2)}" style="width:110px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><p class="mini-help">Margem usada: <b>${Number(margemEfetiva).toFixed(2)}%</b>${precoCalc!==null?` • Automático: <b>${brl(precoCalc)}</b>`:''}<br>Venda atual: <b>${brl(venda)}</b>${lucro!==null?` • Lucro: <b>${brl(lucro)}</b>`:''}${abaixo?`<br><b style="color:#ef4444">⚠️ Venda abaixo do custo</b>`:''}</p><button class="btn green">Salvar</button></form></td></tr>`}).join('');
-    produtosHtml=`<div class="card"><p><a class="btn gray" href="/admin/dhru">← Todas as categorias</a></p><h2>📁 ${safeHtml(selectedCat)} (${filtrados.length})</h2><div class="grid"><div class="card"><h3>💹 Margem desta categoria</h3><form method="post" action="/admin/dhru/categoria-preco"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><label>Margem %</label><input name="margem" value="${margemCategoriaAtual===null?'':margemCategoriaAtual}" placeholder="Padrão ${precCfg.margemPadrao}%"><p class="mini-help">Em branco = usar margem padrão global.</p><button class="btn green">Salvar margem da categoria</button></form></div></div><form method="get" action="/admin/dhru" class="forms-inline"><input type="hidden" name="cat" value="${safeHtml(selectedCat)}"><input name="q" value="${safeHtml(req.query.q||'')}" placeholder="Buscar produto nesta categoria"><button class="btn">🔎 Buscar</button></form><form id="dhruBulk" method="post" action="/admin/dhru/produtos/lote"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><div class="forms-inline" style="margin:12px 0"><select name="acao"><option value="ativar">✅ Ativar selecionados</option><option value="desativar">⛔ Desativar selecionados</option></select><button class="btn green">Aplicar aos marcados</button></div></form><table><tr><th>✓</th><th>Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Preço / Lucro</th></tr>${linhas||'<tr><td colspan="6">Nenhum produto encontrado.</td></tr>'}</table></div>`;
+    const linhas=filtrados.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){};const campos=fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>dhruCampoLabelPt(f.name)).join(', ')||'—';const catsLinha=categoriasDaLinha(r);const margemServico=r.api_margin_pct!==null&&r.api_margin_pct!==undefined?Math.max(0,Number(r.api_margin_pct)||0):null;const margemCat=margensCat.has(catsLinha[0])?margensCat.get(catsLinha[0]):precCfg.margemPadrao;const margemEfetiva=margemServico!==null?margemServico:margemCat;const custoBrl=dhruCustoEmBrl(r.custo,r.currency,precCfg.usdBrl);const precoCalc=dhruPrecoAutomatico(r.custo,r.currency,margemEfetiva,precCfg.usdBrl);const modo=String(r.api_price_mode||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=r.api_manual_price!==null&&r.api_manual_price!==undefined?Number(r.api_manual_price):Number(r.preco_padrao||0);const venda=Number(r.preco_padrao||0);const lucro=custoBrl===null?null:venda-custoBrl;const abaixo=custoBrl!==null&&venda<custoBrl;const nomeWhatsapp=String(r.nome_exibicao||'').trim()||dhruNomeServicoPt(r.nome);return `<tr><td><input form="dhruBulk" type="checkbox" name="ids" value="${Number(r.catalogo_id)}"></td><td><b>${safeHtml(nomeWhatsapp)}</b><br><small>API: ${safeHtml(r.nome)}</small><br><small>${catsLinha.map(safeHtml).join(' • ')}</small></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}${custoBrl!==null?`<br><small>≈ ${brl(custoBrl)}</small>`:''}</td><td>${safeHtml(campos)}</td><td><form method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input type="hidden" name="voltar_cat" value="${safeHtml(selectedCat)}"><label>Nome no WhatsApp</label><input name="nome_exibicao" value="${safeHtml(nomeWhatsapp)}"><p class="mini-help">Esse nome é só para o cliente. O produto original da API não é alterado.</p><label>Modo</label><select name="modo"><option value="AUTO" ${modo==='AUTO'?'selected':''}>% Automático</option><option value="MANUAL" ${modo==='MANUAL'?'selected':''}>Preço manual</option></select><label>Margem própria % <small>(opcional)</small></label><input name="margem" value="${margemServico===null?'':margemServico}" placeholder="Usar categoria" style="width:110px"><label>Preço manual R$</label><input name="preco_manual" value="${Number(manual||0).toFixed(2)}" style="width:110px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><p class="mini-help">Margem usada: <b>${Number(margemEfetiva).toFixed(2)}%</b>${precoCalc!==null?` • Automático: <b>${brl(precoCalc)}</b>`:''}<br>Venda atual: <b>${brl(venda)}</b>${lucro!==null?` • Lucro: <b>${brl(lucro)}</b>`:''}${abaixo?`<br><b style="color:#ef4444">⚠️ Venda abaixo do custo</b>`:''}</p><button class="btn green">Salvar</button></form></td></tr>`}).join('');
+    const selectedDisplay=nomesCat.get(selectedCat)||categoriaWhatsAppPt(selectedCat,'DHRU');
+    produtosHtml=`<div class="card"><p><a class="btn gray" href="/admin/dhru">← Todas as categorias</a></p><h2>📁 ${safeHtml(selectedDisplay)} (${filtrados.length})</h2><p class="mini-help">Categoria original da API: ${safeHtml(selectedCat)}</p><div class="grid"><div class="card"><h3>💹 Margem desta categoria</h3><form method="post" action="/admin/dhru/categoria-preco"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><label>Margem %</label><input name="margem" value="${margemCategoriaAtual===null?'':margemCategoriaAtual}" placeholder="Padrão ${precCfg.margemPadrao}%"><p class="mini-help">Em branco = usar margem padrão global.</p><button class="btn green">Salvar margem da categoria</button></form></div></div><form method="get" action="/admin/dhru" class="forms-inline"><input type="hidden" name="cat" value="${safeHtml(selectedCat)}"><input name="q" value="${safeHtml(req.query.q||'')}" placeholder="Buscar produto nesta categoria"><button class="btn">🔎 Buscar</button></form><form id="dhruBulk" method="post" action="/admin/dhru/produtos/lote"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><div class="forms-inline" style="margin:12px 0"><select name="acao"><option value="ativar">✅ Ativar selecionados</option><option value="desativar">⛔ Desativar selecionados</option></select><button class="btn green">Aplicar aos marcados</button></div></form><table><tr><th>✓</th><th>Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Preço / Lucro</th></tr>${linhas||'<tr><td colspan="6">Nenhum produto encontrado.</td></tr>'}</table></div>`;
   }
   const avisoCambio=precCfg.usdBrl<=0?`<p style="color:#f59e0b"><b>⚠️ Configure a cotação USD → BRL</b> para usar preços automáticos em produtos cobrados em dólar.</p>`:'';
   const pricingCard=`<div class="card"><h2>💰 Precificação automática</h2><form method="post" action="/admin/dhru/precos-config"><label>Margem padrão de lucro (%)</label><input name="margem_padrao" type="number" min="0" step="0.01" value="${precCfg.margemPadrao}"><label>Cotação USD → BRL</label><input name="usd_brl" type="number" min="0" step="0.0001" value="${precCfg.usdBrl}"><label>Atualizar automaticamente quando custo/cotação/margem mudar</label><select name="auto_reprice"><option value="1" ${precCfg.autoReprice?'selected':''}>Sim</option><option value="0" ${!precCfg.autoReprice?'selected':''}>Não</option></select>${avisoCambio}<p class="mini-help">Prioridade: <b>Preço manual</b> → margem própria do serviço → margem da categoria → margem padrão. Serviços antigos mantêm seus preços manuais até você mudar o modo para automático.</p><button class="btn green">💾 Salvar precificação</button></form></div>`;
@@ -9653,8 +9698,10 @@ app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseU
 app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
 app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
 app.post('/admin/dhru/precos-config',async(req,res)=>{try{const margem=Math.max(0,Number(String(req.body.margem_padrao||'0').replace(',','.'))||0);const usd=Math.max(0,Number(String(req.body.usd_brl||'0').replace(',','.'))||0);const auto=String(req.body.auto_reprice||'1')==='1';await setConfig('dhru_margem_padrao',String(margem));await setConfig('dhru_usd_brl',String(usd));await setConfig('dhru_auto_reprice',auto?'1':'0');let msg='Precificação salva';if(auto){const r=await dhruRecalcularTodosAutomaticos();msg+=` — ${r.atualizados} preço(s) automático(s) recalculado(s)`;}res.redirect('/admin/dhru?ok='+encodeURIComponent(msg));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/categoria-local-nome',async(req,res)=>{try{const nome=String(req.body.nome||'').trim().slice(0,100)||'Blacklist Brazil';await setConfig('whatsapp_categoria_local_nome',nome);res.redirect('/admin/dhru?ok='+encodeURIComponent('Categoria dos serviços próprios atualizada no WhatsApp'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/categoria-nome',async(req,res)=>{try{const cat=String(req.body.categoria||'').trim();if(!cat)throw new Error('Categoria inválida');const nome=String(req.body.nome||'').trim().slice(0,120);if(!nome)await run(`DELETE FROM dhru_category_display WHERE category=?`,[cat]);else await run(`INSERT INTO dhru_category_display(category,display_name,atualizado_em) VALUES (?,?,CURRENT_TIMESTAMP) ON CONFLICT(category) DO UPDATE SET display_name=excluded.display_name,atualizado_em=CURRENT_TIMESTAMP`,[cat,nome]);res.redirect('/admin/dhru?ok='+encodeURIComponent('Nome da categoria atualizado no WhatsApp'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/categoria-preco',async(req,res)=>{try{const cat=String(req.body.categoria||'').trim();if(!cat)throw new Error('Categoria inválida');const txt=String(req.body.margem??'').trim().replace(',','.');if(txt==='')await run(`DELETE FROM dhru_category_pricing WHERE category=?`,[cat]);else{const m=Math.max(0,Number(txt)||0);await run(`INSERT INTO dhru_category_pricing(category,margin_pct,atualizado_em) VALUES (?,?,CURRENT_TIMESTAMP) ON CONFLICT(category) DO UPDATE SET margin_pct=excluded.margin_pct,atualizado_em=CURRENT_TIMESTAMP`,[cat,m]);}const cfg=await dhruConfigPrecificacao();if(cfg.autoReprice)await dhruRecalcularTodosAutomaticos();res.redirect('/admin/dhru?cat='+encodeURIComponent(cat)+'&ok='+encodeURIComponent('Margem da categoria atualizada'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
-app.post('/admin/dhru/produto/:id',async(req,res)=>{try{const id=Number(req.params.id);const ativo=String(req.body.ativo||'0')==='1'?1:0;const modo=String(req.body.modo||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=Math.max(0,Number(String(req.body.preco_manual||'0').replace(',','.'))||0);const margemTxt=String(req.body.margem??'').trim().replace(',','.');const margem=margemTxt===''?null:Math.max(0,Number(margemTxt)||0);await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação da moeda no painel.');}const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent('Preço, margem e status atualizados'));}catch(e){const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/produto/:id',async(req,res)=>{try{const id=Number(req.params.id);const ativo=String(req.body.ativo||'0')==='1'?1:0;const modo=String(req.body.modo||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=Math.max(0,Number(String(req.body.preco_manual||'0').replace(',','.'))||0);const margemTxt=String(req.body.margem??'').trim().replace(',','.');const margem=margemTxt===''?null:Math.max(0,Number(margemTxt)||0);const nomeExibicao=String(req.body.nome_exibicao||'').trim().slice(0,180);await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=?,nome_exibicao=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,nomeExibicao,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação da moeda no painel.');}const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent('Preço, margem e status atualizados'));}catch(e){const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/produtos/lote',async(req,res)=>{try{let ids=req.body.ids||[];if(!Array.isArray(ids))ids=[ids];ids=ids.map(Number).filter(n=>Number.isInteger(n)&&n>0);const ativo=String(req.body.acao||'')==='ativar'?1:0;if(ids.length){const marks=ids.map(()=>'?').join(',');await run(`UPDATE servicos_catalogo SET ativo=? WHERE api_provider='DHRU' AND id IN (${marks})`,[ativo,...ids]);}const cat=String(req.body.categoria||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent(`${ids.length} serviço(s) ${ativo?'ativado(s)':'desativado(s)'}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
 
