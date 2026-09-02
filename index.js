@@ -2134,23 +2134,70 @@ async function getRevendaByMsg(msg, fallbackJid) {
   console.log('❌ REVENDA NÃO ENCONTRADA para:', numeros.join(','));
   return null;
 }
-async function listarServicosTexto(revenda) {
-  const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-  let texto = `🛠️ Serviços
-
-`;
-  for (let i = 0; i < servicos.length; i++) {
-    const preco = revenda ? await precoDaRevenda(revenda.id, servicos[i].id) : Number(servicos[i].preco_padrao || 0);
-    texto += `${i + 1}️⃣ ${servicos[i].api_provider === 'DHRU' ? dhruNomeServicoPt(servicos[i].nome) : servicos[i].nome}
-💰 ${brl(preco)}
-
-`;
+function categoriaWhatsAppPt(nome, apiProvider='') {
+  const original=String(nome||'Serviços').trim()||'Serviços';
+  if(String(apiProvider||'').toUpperCase()!=='DHRU') return original;
+  let x=original;
+  const regras=[
+    [/xiaomi/ig,'Xiaomi'],[/apple|iphone/ig,'Apple / iPhone'],[/samsung/ig,'Samsung'],
+    [/imei\s*(check|checker|checks|services?)/ig,'Consultas de IMEI'],[/check(er)?\s*services?/ig,'Consultas'],
+    [/unlock(ing)?/ig,'Desbloqueio'],[/lock\s*code/ig,'Código de Bloqueio'],[/services?/ig,'Serviços'],
+    [/worldwide/ig,'Mundial'],[/server/ig,'Servidor'],[/carrier/ig,'Operadora'],[/network/ig,'Rede']
+  ];
+  for(const [a,b] of regras)x=x.replace(a,b);
+  x=x.replace(/\s{2,}/g,' ').replace(/^\s+|\s+$/g,'');
+  return x||original;
+}
+async function categoriasServicosWhatsApp(){
+  const rows=await all(`SELECT categoria,api_provider,COUNT(*) qtd FROM servicos_catalogo WHERE ativo=1 GROUP BY categoria,api_provider ORDER BY CASE WHEN api_provider='DHRU' THEN 1 ELSE 0 END,categoria COLLATE NOCASE`);
+  const mapa=[];
+  for(const r of rows){
+    const nomeOriginal=String(r.categoria||'Serviços').trim()||'Serviços';
+    const nomePt=categoriaWhatsAppPt(nomeOriginal,r.api_provider);
+    mapa.push({categoria:nomeOriginal,api_provider:String(r.api_provider||''),nome:nomePt,qtd:Number(r.qtd||0)});
   }
-  texto += `0️⃣ ⬅️ Voltar
-
-💬 Digite a opção desejada.`;
+  return mapa;
+}
+async function listarServicosTexto(revenda) {
+  const cats=await categoriasServicosWhatsApp();
+  let texto=`🛠️ *SERVIÇOS*\n\nEscolha uma categoria:\n\n`;
+  for(let i=0;i<cats.length;i++) texto+=`${i+1}️⃣ ${cats[i].nome}\n`;
+  texto+=`\n0️⃣ ⬅️ Voltar\n\n💬 Digite a opção desejada.`;
   return texto;
 }
+async function listarServicosCategoriaTexto(revenda,cat){
+  const rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(categoria,'Serviços')=? AND COALESCE(api_provider,'')=? ORDER BY nome COLLATE NOCASE`,[cat.categoria,cat.api_provider]);
+  let texto=`📂 *${cat.nome}*\n\n`;
+  for(let i=0;i<rows.length;i++){
+    const preco=revenda?await precoDaRevenda(revenda.id,rows[i].id):Number(rows[i].preco_padrao||0);
+    texto+=`${i+1}️⃣ ${rows[i].api_provider==='DHRU'?dhruNomeServicoPt(rows[i].nome):rows[i].nome}\n💰 ${brl(preco)}\n\n`;
+  }
+  texto+=`0️⃣ ⬅️ Categorias`;
+  return {texto,rows};
+}
+async function abrirCategoriaServicoWhatsApp(from,cliente,opcao){
+  if(String(opcao)==='0'){await salvarSessaoPedido(from,{etapa:'menu'});await enviarTexto(from,await menuRevendaTexto(cliente));return true;}
+  const cats=await categoriasServicosWhatsApp(); const cat=cats[Number(opcao)-1];
+  if(!cat)return false;
+  await salvarSessaoPedido(from,{etapa:'servico_categoria',categoria:cat});
+  const lista=await listarServicosCategoriaTexto(cliente,cat);await enviarTexto(from,lista.texto);return true;
+}
+async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
+  const sess=await carregarSessaoPedido(from); if(!sess?.categoria)return false;
+  if(String(opcao)==='0'){await salvarSessaoPedido(from,{etapa:'servico_escolha'});await enviarTexto(from,await listarServicosTexto(cliente));return true;}
+  const lista=await listarServicosCategoriaTexto(cliente,sess.categoria); const servico=lista.rows[Number(opcao)-1]; if(!servico)return false;
+  if(servico.api_provider==='DHRU'){
+    const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
+    const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
+    if(!simplesImei&&fsDhru.length){await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);return true;}
+  }
+  await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
+  const tipo=normalizarTipoEntrada(servico.tipo_entrada);
+  if(tipo==='IMEI')await enviarTexto(from,`📱 Informe o IMEI:\n\nPode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
+  else await enviarTexto(from,`${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+  return true;
+}
+
 async function resolverJidWhatsAppEnvio(numero, socketPreferido=null) {
   const number = normalizarNumeroWhatsApp(numero);
   const sessaoBot = socketPreferido ? null : await obterSessaoBotConectada();
@@ -3422,39 +3469,12 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
-    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-    const servico = servicos[Number(opcao) - 1];
-    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    if (servico.api_provider === 'DHRU') {
-      const pDhru=await dhruProductForService(servico.id);
-      const fsDhru=dhruFieldsUsuario(pDhru);
-      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
-      if(!simplesImei && fsDhru.length){
-        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
-        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);
-        return;
-      }
-    }
-    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
-    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
-    if (tipoEntrada === 'IMEI') {
-      await enviarTexto(from, `📱 Envie os IMEIs\n\n• Máximo 5 IMEIs\n• 1 IMEI por linha\n• Cada IMEI precisa ter 15 números\n\nExemplo:\n353625361425365\n353625361425366`);
-    } else {
-      await enviarTexto(from, `╔══════════════════════╗
-      🛠 SERVIÇO ESCOLHIDO
-╚══════════════════════╝
-
-${servico.nome}
-
-💰 Valor: ${brl(await precoDaRevenda(cliente.id, servico.id))}
-
-══════════════════════
-
-${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:
-
-0️⃣ ⬅️ Voltar`);
-    }
-    return;
+    if (await abrirCategoriaServicoWhatsApp(from, cliente, opcao)) return;
+    await enviarTexto(from, '❌ Categoria inválida. Escolha uma opção da lista.'); return;
+  }
+  if (sess?.etapa === 'servico_categoria' && /^\d+$/.test(opcao)) {
+    if (await escolherServicoDaCategoriaWhatsApp(from, cliente, opcao)) return;
+    await enviarTexto(from, '❌ Serviço inválido. Escolha uma opção da categoria.'); return;
   }
 
   if (sess?.etapa === 'servico_escolha') {
@@ -4364,22 +4384,12 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
-    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-    const servico = servicos[Number(opcao) - 1];
-    if (!servico) { await apagarSessaoPedido(from); console.log('🔇 V121 SERVIÇO INVÁLIDO — MENU CANCELADO:', numeroNorm, textoOriginal); return; }
-    if(servico.api_provider==='DHRU') {
-      const pDhru=await dhruProductForService(servico.id);
-      const fsDhru=dhruFieldsUsuario(pDhru);
-      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
-      if(!simplesImei && fsDhru.length){
-        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
-        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}`);
-        return;
-      }
-    }
-    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
-    await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
-    return;
+    if (await abrirCategoriaServicoWhatsApp(from, cliente, opcao)) return;
+    await enviarTexto(from, '❌ Categoria inválida. Escolha uma opção da lista.'); return;
+  }
+  if (sess?.etapa === 'servico_categoria' && /^\d+$/.test(opcao)) {
+    if (await escolherServicoDaCategoriaWhatsApp(from, cliente, opcao)) return;
+    await enviarTexto(from, '❌ Serviço inválido. Escolha uma opção da categoria.'); return;
   }
 
   if (sess?.etapa === 'servico_escolha') {
@@ -5157,34 +5167,12 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(texto)) {
-    const pos = Number(texto);
-    const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-    const servico = servicos[pos - 1];
-    if (!servico) { await enviarTexto(from, '❌ Serviço inválido. Digite menu para ver a lista.'); return; }
-    if(servico.api_provider==='DHRU'){
-      const pDhru=await dhruProductForService(servico.id);
-      const fsDhru=dhruFieldsUsuario(pDhru);
-      const simplesImei=fsDhru.length===1 && String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
-      if(!simplesImei && fsDhru.length){
-        await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
-        await enviarTexto(from,`🛠 *${dhruNomeServicoPt(servico.nome)}*
-
-💰 Valor: ${brl(await precoDaRevenda(revenda.id,servico.id))}
-
-${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}`);
-        return;
-      }
-    }
-    await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
-    const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
-    if (tipoEntrada === 'IMEI') {
-      await enviarTexto(from, `📱 Informe o IMEI:
-
-Pode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
-    } else {
-      await enviarTexto(from, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
-    }
-    return;
+    if (await abrirCategoriaServicoWhatsApp(from, revenda, texto)) return;
+    await enviarTexto(from, '❌ Categoria inválida. Escolha uma opção da lista.'); return;
+  }
+  if (sess?.etapa === 'servico_categoria' && /^\d+$/.test(texto)) {
+    if (await escolherServicoDaCategoriaWhatsApp(from, revenda, texto)) return;
+    await enviarTexto(from, '❌ Serviço inválido. Escolha uma opção da categoria.'); return;
   }
 
   if(sess?.etapa==='dhru_campo'){
