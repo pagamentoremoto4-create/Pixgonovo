@@ -1174,11 +1174,20 @@ function limparResultadoDhru(v){
   });
   return s.replace(/\r/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
 }
-function timUnlockReference(pedidoId){ return `TIMUNLOCK:${Number(pedidoId)}`; }
-function timUnlockPedidoIdFromReference(ref){
-  const m=String(ref||'').trim().match(/^TIMUNLOCK:(\d+)$/i);
-  return m?Number(m[1]):0;
+// A Dhru aceita reference_id numérico. Reservamos a faixa 900000000+ para
+// consultas internas do Desbloqueio TIM, evitando conflito com pedidos normais.
+const TIM_UNLOCK_REF_BASE=900000000;
+function timUnlockReference(pedidoId){
+  const id=Number(pedidoId)||0;
+  return id>0?String(TIM_UNLOCK_REF_BASE+id):'';
 }
+function timUnlockPedidoIdFromReference(ref){
+  const n=Number(String(ref||'').trim());
+  if(!Number.isInteger(n)||n<=TIM_UNLOCK_REF_BASE) return 0;
+  const id=n-TIM_UNLOCK_REF_BASE;
+  return Number.isInteger(id)&&id>0?id:0;
+}
+
 function timUnlockIsDesbloqueioTim(pedido){ return normalizarNomeServico(pedido?.servico_nome||'')==='desbloqueio tim'; }
 function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return /^\d{15}$/.test(v)?v:''; }
 async function timUnlockDhruProduct(){
@@ -1258,6 +1267,17 @@ function timUnlockResultadoHtml(check){
   const ev=d.eventos.map((e,i)=>`<div style="border-top:1px solid #374151;padding-top:8px;margin-top:8px"><b>${i+1}º registro — ${e.tipo==='REMOVIDO'?'🟢 Removido':(i>0?'🔴 Bloqueado novamente':'🔴 Bloqueado')}</b><br>Operadora: ${safeHtml(e.operadora||'-')}<br>País: ${safeHtml(dhruValorPt(e.pais||'-'))}<br>Data: ${safeHtml(e.data||'-')}<br>Motivo: ${safeHtml(dhruValorPt(e.motivo||'-'))}</div>`).join('');
   const atual=d.eventos.length?(d.eventos[d.eventos.length-1].tipo==='REMOVIDO'?'🟢 FORA DA BLACKLIST':'🔴 BLACKLIST TIM'):(/blacklisted/i.test(d.status)?'🔴 BLACKLIST':'—');
   return `<b>Aparelho:</b> ${safeHtml(d.modelo||'-')}<br><b>Status Blacklist:</b> ${safeHtml(dhruValorPt(d.status||'-'))}<br><b>Lista geral:</b> ${safeHtml(dhruValorPt(d.geral||'-'))}<br><b>Registros encontrados:</b> ${safeHtml(d.registros||String(d.eventos.length))}<br><br><b>📋 Histórico de Blacklist</b>${ev||'<div class="muted">Nenhum evento estruturado.</div>'}<br><br><b>Situação atual: ${safeHtml(atual)}</b>`;
+}
+function timUnlockPedidoConsultaInline(o){
+  const c=o?._timDhru||null;
+  const colsp=10; // tabela de Desbloqueio TIM: seleção + ID + entrada + cliente + contato + valor + status + data + nota + ações
+  if(!c){
+    return `<tr class="tim-dhru-inline"><td colspan="${colsp}"><div class="card" style="margin:8px 0"><b>🔎 Consulta Dhru</b><p class="muted" style="margin:6px 0">Este pedido ainda não possui consulta interna.</p><form class="forms-inline" method="post" action="/admin/pedido/${o.id}/dhru-tim-check"><button class="btn green">🔎 CHECK</button></form></div></td></tr>`;
+  }
+  const st=String(c.status||'PENDENTE').toUpperCase();
+  const podeCheck=['REJEITADO','ERRO_ENVIO'].includes(st);
+  const acoes=`<a class="btn gray" href="/admin/pedido/${o.id}/dhru-tim-original">Ver retorno original</a> ${podeCheck?`<form class="forms-inline" method="post" action="/admin/pedido/${o.id}/dhru-tim-check"><button class="btn green">🔎 CHECK</button></form>`:`<form class="forms-inline" method="post" action="/admin/pedido/${o.id}/dhru-tim-refazer"><button class="btn orange" onclick="return confirm('Refazer a consulta interna deste IMEI?')">🔄 Refazer consulta</button></form>`}`;
+  return `<tr class="tim-dhru-inline"><td colspan="${colsp}"><div class="card" style="margin:8px 0"><b>🔎 Consulta Dhru — Pedido #${o.id}</b><p><b>IMEI:</b> ${safeHtml(o.imei||o.entrada_valor||'-')}</p>${timUnlockResultadoHtml(c)}<div style="margin-top:12px">${acoes}</div></div></td></tr>`;
 }
 
 async function processarFeedbackDhru(body){
@@ -8251,6 +8271,7 @@ function pedidoTable(rows, showServico = true, selectable = false, controleNota 
   for (const o of rows) {
     const nota = controleNota ? `<td class="nota-cell">${Number(o.nota_enviada||0) ? `<span class="nota-status enviada">✅ NOTA ENVIADA</span><small class="nota-data">${safeHtml(dateBR(o.nota_enviada_em))}</small><form class="forms-inline nota-form" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="nota-action nota-action-undo">↩️ DESMARCAR NOTA</button></form>` : `<span class="nota-status pendente">🧾 NOTA NÃO ENVIADA</span><form class="forms-inline nota-form" method="post" action="/admin/pedido/${o.id}/nota-toggle"><button class="nota-action nota-action-send">✅ NOTA ENVIADA</button></form>`}</td>` : '';
     html += `<tr>${selectable ? `<td><input class="pedido-check" type="checkbox" name="pedido_ids" value="${o.id}" form="downloadSelecionadosForm"></td>` : ''}<td>#${o.id}</td><td>${safeHtml(o.entrada_valor || o.imei || '-')}<br><span class="muted">${safeHtml(o.entrada_label || 'IMEI')}</span></td>${showServico ? `<td>${safeHtml(o.servico_nome)}</td>` : ''}<td>${safeHtml(o.revenda_nome || o.cliente_nome || '-')}</td><td>${safeHtml(o.revenda_numero || o.cliente_whatsapp || o.revenda_jid || o.cliente_jid || '-')}</td><td>${brl(o.valor)}</td><td><span class="pill">${safeHtml(o.status)}</span></td><td>${safeHtml(dateBR(o.enviado_em || o.criado_em))}</td>${nota}<td>${pedidoActions(o)}</td></tr>`;
+    if(controleNota) html += timUnlockPedidoConsultaInline(o);
   }
   html += '</table>';
   return html;
@@ -9575,14 +9596,13 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
   const tabs = `<div class="topbar"><div><a class="btn gray" href="${base}${notaFiltro ? `?notas=${encodeURIComponent(notaFiltro)}` : ''}">Todos</a><a class="btn" href="${base}?status=PENDENTE${notaQS}">🟡 Pendente (${Number(contagens?.pendentes||0)})</a><a class="btn orange" href="${base}?status=${encodeURIComponent('EM PROCESSO')}${notaQS}">🔄 Em processo (${Number(contagens?.processo||0)})</a><a class="btn green" href="${base}?status=FINALIZADO${notaQS}">✅ Finalizado (${Number(contagens?.finalizados||0)})</a></div></div>`;
   const notaTabs = controleNota ? `<div class="nota-tabs"><a class="nota-tab ${notaFiltro==='nao_enviadas'?'active-pending':''}" href="${base}?notas=nao_enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">📋</span><span>NOTAS NÃO ENVIADAS</span><b>${Number(contagensNotas?.nao_enviadas||0)}</b></a><a class="nota-tab ${notaFiltro==='enviadas'?'active-sent':''}" href="${base}?notas=enviadas${status ? `&status=${encodeURIComponent(status)}` : ''}"><span class="nota-tab-icon">✅</span><span>NOTAS ENVIADAS</span><b>${Number(contagensNotas?.enviadas||0)}</b></a></div>` : '';
 
-  let consultaDhruCard='', consultasPedidosHtml='';
+  let consultaDhruCard='';
   if(controleNota){
     const cfgUuid=String(await getConfig('tim_unlock_dhru_product_uuid','')).trim();
     const prods=await all(`SELECT d.product_uuid,d.nome,d.fields_json,s.nome_exibicao,s.ativo FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE COALESCE(s.ativo,0)=1 ORDER BY COALESCE(NULLIF(s.nome_exibicao,''),d.nome) COLLATE NOCASE`);
     const validos=prods.filter(x=>{try{const fs=JSON.parse(x.fields_json||'[]');return fs.some(f=>String(f?.name||'').toLowerCase()==='imei')}catch(_){return false}});
     const atual=validos.find(x=>x.product_uuid===cfgUuid);
     consultaDhruCard=`<div class="card"><h2>🔎 Consulta automática Dhru</h2><p class="muted">Todo novo pedido de Desbloqueio TIM consulta automaticamente o serviço Dhru escolhido. Esta informação é exclusiva do administrador.</p><form method="post" action="/admin/desbloqueio-tim/dhru-config"><label>Buscar consulta Dhru</label><input id="timDhruBusca" placeholder="Digite para localizar..."><select id="timDhruSelect" name="product_uuid" size="7" style="width:100%;margin-top:8px"><option value="">— Desativar consulta automática —</option>${validos.map(x=>`<option value="${safeHtml(x.product_uuid)}" ${x.product_uuid===cfgUuid?'selected':''}>${safeHtml(String(x.nome_exibicao||'').trim()||dhruNomeServicoPt(x.nome))}</option>`).join('')}</select><p class="mini-help">Atual: <b>${safeHtml(atual?(String(atual.nome_exibicao||'').trim()||dhruNomeServicoPt(atual.nome)):'Não configurada')}</b></p><button class="btn green">💾 Salvar configuração</button></form></div><script>(function(){const q=document.getElementById('timDhruBusca'),sel=document.getElementById('timDhruSelect');if(!q||!sel)return;const base=Array.from(sel.options).map(o=>({v:o.value,t:o.text}));q.addEventListener('input',()=>{const z=q.value.toLowerCase(),cur=sel.value;sel.innerHTML='';base.filter(x=>!z||x.t.toLowerCase().includes(z)).forEach(x=>{const o=new Option(x.t,x.v);o.selected=x.v===cur;sel.add(o)});});})();</script>`;
-    consultasPedidosHtml=rows.map(o=>`<div class="card"><h3>🔎 Consulta Dhru — Pedido #${o.id}</h3><p><b>IMEI:</b> ${safeHtml(o.imei||o.entrada_valor||'-')}</p>${timUnlockResultadoHtml(o._timDhru)}<div style="margin-top:12px"><a class="btn gray" href="/admin/pedido/${o.id}/dhru-tim-original">Ver retorno original</a> <form class="forms-inline" method="post" action="/admin/pedido/${o.id}/dhru-tim-refazer"><button class="btn orange" onclick="return confirm('Refazer a consulta interna deste IMEI?')">🔄 Refazer consulta</button></form></div></div>`).join('');
   }
 
   const download = `<form id="downloadSelecionadosForm" method="post" action="/admin/servico/${servicoId}/baixar-imeis" class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -9607,7 +9627,7 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     update();
   })();</script>`;
 
-  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? consultaDhruCard : ''}${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${controleNota ? notaTabs : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste filtro.</div>'}${controleNota?consultasPedidosHtml:''}${js}`));
+  res.send(page('Pedidos do serviço', `<h1>📋 ${safeHtml(s.nome)}</h1>${controleNota ? consultaDhruCard : ''}${controleNota ? '<div class="card"><b>🧾 Controle interno de nota</b><p class="muted">Use o botão NOTA ENVIADA apenas para seu controle. Isso não altera o status do pedido e não envia mensagem ao cliente.</p></div>' : ''}${controleNota ? notaTabs : ''}${tabs}${download}${rows.length ? pedidoTable(rows, false, true, controleNota) : '<div class="card empty">Nenhum pedido neste filtro.</div>'}${js}`));
 });
 
 app.post('/admin/desbloqueio-tim/dhru-config',async(req,res)=>{
@@ -9619,6 +9639,14 @@ app.post('/admin/desbloqueio-tim/dhru-config',async(req,res)=>{
     if(!fs.some(f=>String(f?.name||'').toLowerCase()==='imei')) return res.status(400).send(page('Configuração inválida','<h1>❌ Escolha uma consulta que aceite IMEI.</h1>'));
   }
   await setConfig('tim_unlock_dhru_product_uuid',uuid);
+  res.redirect(req.get('referer')||'/admin/servicos');
+});
+app.post('/admin/pedido/:id/dhru-tim-check',async(req,res)=>{
+  try{
+    const id=Number(req.params.id);
+    const p=await get(`SELECT p.*,s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[id]);
+    if(p&&timUnlockIsDesbloqueioTim(p)) await executarConsultaAutomaticaDesbloqueioTim(id,{force:true});
+  }catch(e){console.log('❌ CHECK DHRU TIM:',e.message)}
   res.redirect(req.get('referer')||'/admin/servicos');
 });
 app.post('/admin/pedido/:id/dhru-tim-refazer',async(req,res)=>{try{await executarConsultaAutomaticaDesbloqueioTim(Number(req.params.id),{force:true});}catch(e){console.log('❌ Refazer DHRU TIM:',e.message)}res.redirect(req.get('referer')||'/admin/servicos');});
