@@ -762,6 +762,34 @@ function dhruCategoriesFromPayload(payload){
   }
   return raw&&typeof raw==='object'?raw:{};
 }
+// V179: separação técnica da API Dhru em IMEI / Remote / File / Server Service.
+function dhruServiceType(product){
+  const vals=[product?.service_type,product?.serviceType,product?.type,product?.product_type,product?.productType,product?.group_type,product?.groupType]
+    .map(v=>String(v??'').trim().toLowerCase()).filter(Boolean);
+  const joined=vals.join(' ');
+  if(/remote/.test(joined)) return 'REMOTE_SERVICE';
+  if(/file/.test(joined)) return 'FILE_SERVICE';
+  if(/server/.test(joined)) return 'SERVER_SERVICE';
+  if(/imei/.test(joined)) return 'IMEI_SERVICE';
+  const fields=Array.isArray(product?.fields)?product.fields:[];
+  const fn=fields.map(f=>String(f?.name||'').toLowerCase()).join(' ');
+  if(/imei|meid|serial|sn\b|lock code|unlock code/.test(fn)) return 'IMEI_SERVICE';
+  if(/file|upload|attachment/.test(fn)) return 'FILE_SERVICE';
+  const text=[product?.name,product?.category,product?.group,product?.description].map(v=>String(v||'').toLowerCase()).join(' ');
+  if(/remote|teamviewer|anydesk/.test(text)) return 'REMOTE_SERVICE';
+  if(/file|firmware|upload/.test(text)) return 'FILE_SERVICE';
+  if(/server/.test(text)) return 'SERVER_SERVICE';
+  return 'IMEI_SERVICE';
+}
+function dhruServiceTypeMeta(tipo){
+  const m={
+    IMEI_SERVICE:{label:'IMEI Service',icon:'📱'},
+    REMOTE_SERVICE:{label:'Remote Service',icon:'💻'},
+    FILE_SERVICE:{label:'File Service',icon:'📁'},
+    SERVER_SERVICE:{label:'Server Service',icon:'🌐'}
+  };
+  return m[String(tipo||'').toUpperCase()]||m.IMEI_SERVICE;
+}
 function dhruCategoryNames(product,cats){
   const cids=Array.isArray(product?.cids)?product.cids.map(String):[];
   const names=cids.map(cid=>{
@@ -986,6 +1014,7 @@ async function sincronizarProdutosDhru(){
     const categorias=dhruCategoryNames(prod,cats);
     const categoria=categorias.join(' / ') || 'Sem categoria';
     const campos=dhruFieldSummary(prod);
+    const serviceType=dhruServiceType(prod);
     const descricao=`Produto sincronizado automaticamente da API Dhru. Campos: ${campos}`;
     const tipo=dhruTipoEntrada(prod), label=dhruEntradaLabel(prod);
     const existente=await get(`SELECT * FROM servicos_catalogo WHERE api_provider='DHRU' AND api_service_id=?`,[uuid]);
@@ -1002,7 +1031,7 @@ async function sincronizarProdutosDhru(){
       const precoAtualizado=(modo==='AUTO'&&precCfg.autoReprice)?dhruPrecoAutomatico(custo,currency,margemServico!==null?margemServico:margemCat,precCfg.usdBrl):null;
       await run(`UPDATE servicos_catalogo SET nome=?,tipo_entrada=?,entrada_label=?,categoria=?,descricao=?,prazo='Automático via Dhru',api_cost=?,api_auto=1${precoAtualizado!==null?',preco_padrao=?':''} WHERE id=?`,precoAtualizado!==null?[nome,tipo,label,categoria,descricao,custo,precoAtualizado,existente.id]:[nome,tipo,label,categoria,descricao,custo,existente.id]);
     }
-    await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,cids_json,categorias_json,atualizado_em) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId,JSON.stringify(cids),JSON.stringify(categorias)]);
+    await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,cids_json,categorias_json,service_type,atualizado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId,JSON.stringify(cids),JSON.stringify(categorias),serviceType]);
     sincronizados++;
   }
   await setConfig('dhru_ultima_sync',new Date().toISOString());
@@ -1354,6 +1383,7 @@ async function initDB() {
   )`);
   await addColumnIfMissing('dhru_products', 'cids_json', "TEXT DEFAULT '[]'");
   await addColumnIfMissing('dhru_products', 'categorias_json', "TEXT DEFAULT '[]'");
+  await addColumnIfMissing('dhru_products', 'service_type', "TEXT DEFAULT 'IMEI_SERVICE'");
   await run(`CREATE TABLE IF NOT EXISTS dhru_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pedido_id INTEGER UNIQUE,
@@ -2217,6 +2247,101 @@ async function listarServicosTexto(revenda) {
   texto+=`\n0️⃣ ⬅️ Voltar\n\n💬 Digite a opção desejada.`;
   return texto;
 }
+
+async function categoriaLocalWhatsAppObjeto(){
+  const cats=await categoriasServicosWhatsApp();
+  return cats.find(c=>String(c.api_provider||'').toUpperCase()!=='DHRU')||null;
+}
+async function categoriasDhruWhatsApp(){
+  const cats=await categoriasServicosWhatsApp();
+  return cats.filter(c=>String(c.api_provider||'').toUpperCase()==='DHRU');
+}
+async function listarBlacklistBrazilTexto(revenda){
+  const cat=await categoriaLocalWhatsAppObjeto();
+  const titulo=await nomeCategoriaLocalWhatsApp();
+  if(!cat)return `🚫 *${titulo}*\n\nNenhum serviço disponível no momento.\n\n0️⃣ ⬅️ Voltar`;
+  const lista=await listarServicosCategoriaTexto(revenda,cat);
+  return lista.texto.replace(/^📂 \*[^*]+\*/,`🚫 *${titulo}*`).replace('0️⃣ ⬅️ Categorias','0️⃣ ⬅️ Voltar');
+}
+async function listarServicosOnlineTexto(){
+  const cats=await categoriasDhruWhatsApp();
+  let texto=`🌐 *Serviços Online*\n\n`;
+  if(!cats.length){
+    texto+=`Nenhum serviço online ativo no momento.\n\n0️⃣ ⬅️ Voltar`;
+    return texto;
+  }
+  for(let i=0;i<cats.length;i++)texto+=`${i+1}️⃣ ${cats[i].nome}\n`;
+  texto+=`\n🔍 Para buscar um serviço, digite *buscar* seguido do nome.\nExemplo: *buscar xiaomi*\n\n0️⃣ ⬅️ Voltar`;
+  return texto;
+}
+async function buscarServicosOnlineWhatsApp(termo){
+  const q=String(termo||'').trim().toLowerCase();
+  if(!q)return [];
+  const rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')='DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
+  const achados=[];
+  for(const r of rows){
+    const nome=nomeServicoWhatsApp(r);
+    if(String(nome).toLowerCase().includes(q)||String(r.nome||'').toLowerCase().includes(q)){
+      achados.push(r);
+      if(achados.length>=20)break;
+    }
+  }
+  return achados;
+}
+async function textoBuscaServicosOnline(rows,revenda,termo){
+  let texto=`🔍 *Busca de serviços*\n\nPesquisa: ${String(termo||'').trim()}\n\n`;
+  if(!rows.length)return texto+`Nenhum serviço encontrado.\n\n0️⃣ ⬅️ Voltar`;
+  for(let i=0;i<rows.length;i++){
+    const preco=revenda?await precoDaRevenda(revenda.id,rows[i].id):Number(rows[i].preco_padrao||0);
+    texto+=`${i+1}️⃣ ${nomeServicoWhatsApp(rows[i])}\n💰 ${brl(preco)}\n\n`;
+  }
+  texto+=`0️⃣ ⬅️ Voltar`;
+  return texto;
+}
+async function iniciarServicoWhatsApp(from,cliente,servico){
+  if(!servico)return false;
+  if(servico.api_provider==='DHRU'){
+    const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
+    const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
+    if(!simplesImei&&fsDhru.length){
+      await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
+      await enviarTexto(from,`🛠 *${nomeServicoWhatsApp(servico)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);
+      return true;
+    }
+  }
+  await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
+  const tipo=normalizarTipoEntrada(servico.tipo_entrada);
+  if(tipo==='IMEI')await enviarTexto(from,`📱 Informe o IMEI:\n\nPode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
+  else await enviarTexto(from,`${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
+  return true;
+}
+async function enviarMenuHistoricoWhatsApp(from){
+  await enviarTexto(from,`📋 *Histórico*\n\n1️⃣ ⏳ Em processo\n2️⃣ ✅ Concluídos\n3️⃣ ❌ Cancelados\n4️⃣ 📚 Todos os pedidos\n\n0️⃣ ⬅️ Voltar`);
+}
+async function enviarHistoricoRevendaFiltrado(from,revenda,filtro='TODOS'){
+  let where='revenda_id=?',params=[revenda.id],titulo='Todos os pedidos';
+  if(filtro==='PROCESSO'){where+=' AND status IN ("PENDENTE","EM PROCESSO")';titulo='Em processo';}
+  else if(filtro==='FINALIZADO'){where+=' AND status="FINALIZADO"';titulo='Concluídos';}
+  else if(filtro==='CANCELADO'){where+=' AND status="CANCELADO"';titulo='Cancelados';}
+  const rows=await all(`SELECT * FROM pedidos WHERE ${where} ORDER BY id DESC LIMIT 15`,params);
+  let txt=`📋 *${titulo}*\n\n`;
+  if(!rows.length)txt+='Nenhum pedido encontrado.\n\n';
+  for(const p of rows){
+    const statusIcon=p.status==='FINALIZADO'?'✅':p.status==='CANCELADO'?'❌':p.status==='EM PROCESSO'?'🔄':'⏳';
+    txt+=`📦 Pedido #${p.id}\n🛠️ ${p.servico_nome}\n📱 ${p.imei||p.entrada_valor||'-'}\n💰 ${brl(p.valor)}\n📍 ${statusIcon} ${p.status}\n\n`;
+  }
+  txt+='0️⃣ ⬅️ Voltar';
+  await enviarTexto(from,txt.trim());
+}
+async function enviarMenuMinhaContaWhatsApp(from,revenda){
+  const atual=await get('SELECT * FROM revendas WHERE id=?',[revenda.id])||revenda;
+  await enviarTexto(from,`👤 *Minha conta*\n\n👤 Nome: ${atual.nome}\n💰 Saldo: ${brl(atual.saldo)}\n\n1️⃣ Meus dados\n2️⃣ Meus pedidos\n3️⃣ Meu PIX\n\n0️⃣ ⬅️ Voltar`);
+}
+async function enviarDadosContaWhatsApp(from,revenda){
+  const atual=await get('SELECT * FROM revendas WHERE id=?',[revenda.id])||revenda;
+  const p=await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE","EM PROCESSO")',[atual.id]);
+  await enviarTexto(from,`👤 *Meus dados*\n\n👤 Nome: ${atual.nome}\n💰 Saldo: ${brl(atual.saldo)}\n📦 Pedidos em aberto: ${Number(p?.qtd||0)}\n🏷 Perfil: REVENDA\n\n0️⃣ ⬅️ Voltar`);
+}
 async function listarServicosCategoriaTexto(revenda,cat){
   let rows=[];
   if(String(cat.api_provider||'').toUpperCase()==='DHRU'){
@@ -2246,18 +2371,23 @@ async function abrirCategoriaServicoWhatsApp(from,cliente,opcao){
 }
 async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
   const sess=await carregarSessaoPedido(from); if(!sess?.categoria)return false;
-  if(String(opcao)==='0'){await salvarSessaoPedido(from,{etapa:'servico_escolha'});await enviarTexto(from,await listarServicosTexto(cliente));return true;}
-  const lista=await listarServicosCategoriaTexto(cliente,sess.categoria); const servico=lista.rows[Number(opcao)-1]; if(!servico)return false;
-  if(servico.api_provider==='DHRU'){
-    const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
-    const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
-    if(!simplesImei&&fsDhru.length){await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});await enviarTexto(from,`🛠 *${nomeServicoWhatsApp(servico)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);return true;}
+  if(String(opcao)==='0'){
+    if(sess.origemMenu==='blacklist'){
+      await salvarSessaoPedido(from,{etapa:'menu'});
+      await enviarMenuWhatsApp(from,cliente,false,true);
+      return true;
+    }
+    if(sess.origemMenu==='online'){
+      await salvarSessaoPedido(from,{etapa:'online_categorias'});
+      await enviarTexto(from,await listarServicosOnlineTexto());
+      return true;
+    }
+    await salvarSessaoPedido(from,{etapa:'servico_escolha'});
+    await enviarTexto(from,await listarServicosTexto(cliente));
+    return true;
   }
-  await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
-  const tipo=normalizarTipoEntrada(servico.tipo_entrada);
-  if(tipo==='IMEI')await enviarTexto(from,`📱 Informe o IMEI:\n\nPode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
-  else await enviarTexto(from,`${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
-  return true;
+  const lista=await listarServicosCategoriaTexto(cliente,sess.categoria); const servico=lista.rows[Number(opcao)-1]; if(!servico)return false;
+  return await iniciarServicoWhatsApp(from,cliente,servico);
 }
 
 async function resolverJidWhatsAppEnvio(numero, socketPreferido=null) {
@@ -3685,16 +3815,18 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
   const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
 
 `;
-  return `${saudacao}💰 Saldo: ${brl(cliente?.saldo || 0)}
+  return `${saudacao}📋 *MENU PRINCIPAL*
+
+💰 Saldo: ${brl(cliente?.saldo || 0)}
 📦 Pedidos: ${Number(pendentes || 0)}
 
-1️⃣ 🛠️ Serviços
-2️⃣ 📱 Comprar eSIM
-3️⃣ 📋 Histórico
-4️⃣ 👤 Minha Conta
-5️⃣ 🧾 Cadastrar PIX
-6️⃣ 🆘 Suporte
-7️⃣ ❌ Cancelamento
+1️⃣ 🚫 *BLACKLIST BRAZIL*
+2️⃣ 🌐 *SERVIÇOS ONLINE*
+3️⃣ 📲 *COMPRAR ESIM*
+4️⃣ 📋 *HISTÓRICO*
+5️⃣ 👤 *MINHA CONTA*
+6️⃣ 💰 *ADICIONAR SALDO*
+7️⃣ 💬 *SUPORTE*
 
 💬 Digite a opção desejada.`;
 }
@@ -4157,6 +4289,12 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
 
   const sessValorPixWhatsApp = await carregarSessaoPedido(from);
   if (sessValorPixWhatsApp?.etapa === 'aguardando_valor_pix') {
+    if (opcao === '0' || lower === 'cancelar') {
+      await apagarSessaoPedido(from);
+      await salvarSessaoPedido(from, { etapa: 'menu' });
+      await enviarMenuWhatsApp(from, cliente, false, true);
+      return;
+    }
     const expirou = Date.now() - Number(sessValorPixWhatsApp.atualizado_em_ms || 0) > 5 * 60 * 1000;
     const somenteValor = /^\d+(?:[.,]\d{1,2})?$/.test(textoOriginal);
 
@@ -4189,7 +4327,8 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
 
   let sess = await carregarSessaoPedido(from);
 
-  if (opcao === '0' && sess && sess.etapa !== 'menu') {
+  const etapasComVoltarProprio = new Set(['servico_categoria','online_categorias','online_busca','historico_menu','historico_lista','conta_menu','conta_dados','suporte_menu','pix_cadastro_menu']);
+  if (opcao === '0' && sess && sess.etapa !== 'menu' && !etapasComVoltarProprio.has(sess.etapa)) {
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'menu' });
     await enviarMenuWhatsApp(from, cliente, false);
@@ -4248,18 +4387,23 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   if (sess?.etapa === 'pix_cadastro_menu') {
     const docAtual = await documentoPixCliente(cliente);
     if (opcao === '0' || lower === 'voltar') {
-      await salvarSessaoPedido(from, { etapa: 'menu' });
-      await enviarMenuWhatsApp(from, cliente, false, true);
+      if (sess.voltarPara === 'conta') {
+        await salvarSessaoPedido(from, { etapa: 'conta_menu' });
+        await enviarMenuMinhaContaWhatsApp(from, cliente);
+      } else {
+        await salvarSessaoPedido(from, { etapa: 'menu' });
+        await enviarMenuWhatsApp(from, cliente, false, true);
+      }
       return;
     }
     if (opcao === '1') {
-      await salvarSessaoPedido(from, { etapa: 'pix_documento_input' });
+      await salvarSessaoPedido(from, { etapa: 'pix_documento_input', voltarPara: sess.voltarPara || '' });
       await enviarTexto(from, `📄 ${docAtual ? 'Informe o novo' : 'Informe o'} CPF ou CNPJ que deseja vincular à PixGo.\n\nEnvie somente os números.`);
       return;
     }
     if (opcao === '2' && docAtual) {
       await run('UPDATE revendas SET pix_documento=NULL, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
-      await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' });
+      await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu', voltarPara: sess.voltarPara || '' });
       await enviarTexto(from, '✅ CPF/CNPJ removido.\n\nNos próximos pagamentos PixGo, o documento será solicitado novamente.\n\n' + await textoCadastroPix(cliente));
       return;
     }
@@ -4273,41 +4417,139 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
       return;
     }
     await run('UPDATE revendas SET pix_documento=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [documento, cliente.id]);
-    await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' });
+    await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu', voltarPara: sess.voltarPara || '' });
     await enviarTexto(from, `✅ CPF/CNPJ vinculado com sucesso.\n\n🧾 ${mascararDocumentoPix(documento)}\n\n` + await textoCadastroPix(cliente));
     return;
   }
-  if (sess?.etapa === 'conta') {
-    if (opcao === '5' || lower.includes('adicionar saldo') || lower.includes('colocar saldo')) {
-      await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
-      await enviarTexto(from, '💳 Digite somente o valor que deseja adicionar ao saldo.\n\nValor mínimo: R$ 10,00\nExemplo: 50');
+  if (sess?.etapa === 'conta_menu') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'menu'});
+      await enviarMenuWhatsApp(from,cliente,false,true);
       return;
     }
-    await apagarSessaoPedido(from);
-    console.log('🔇 V121 OPÇÃO FORA DO FLUXO CONTA — MENU CANCELADO:', numeroNorm, textoOriginal);
+    if(opcao==='1'){
+      await salvarSessaoPedido(from,{etapa:'conta_dados'});
+      await enviarDadosContaWhatsApp(from,cliente);
+      return;
+    }
+    if(opcao==='2'){
+      await salvarSessaoPedido(from,{etapa:'historico_menu',voltarPara:'conta'});
+      await enviarMenuHistoricoWhatsApp(from);
+      return;
+    }
+    if(opcao==='3'){
+      await salvarSessaoPedido(from,{etapa:'pix_cadastro_menu',voltarPara:'conta'});
+      await enviarTexto(from,await textoCadastroPix(cliente));
+      return;
+    }
+    await enviarMenuMinhaContaWhatsApp(from,cliente);
+    return;
+  }
+  if (sess?.etapa === 'conta_dados') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'conta_menu'});
+      await enviarMenuMinhaContaWhatsApp(from,cliente);
+      return;
+    }
+    await enviarDadosContaWhatsApp(from,cliente);
     return;
   }
 
-  if (sess?.etapa === 'historico') {
-    await apagarSessaoPedido(from);
-    console.log('🔇 V121 OPÇÃO FORA DO HISTÓRICO — MENU CANCELADO:', numeroNorm, textoOriginal);
+  if (sess?.etapa === 'historico_menu') {
+    if(opcao==='0'||lower==='voltar'){
+      if(sess.voltarPara==='conta'){
+        await salvarSessaoPedido(from,{etapa:'conta_menu'});
+        await enviarMenuMinhaContaWhatsApp(from,cliente);
+      }else{
+        await salvarSessaoPedido(from,{etapa:'menu'});
+        await enviarMenuWhatsApp(from,cliente,false,true);
+      }
+      return;
+    }
+    const mapaHist={'1':'PROCESSO','2':'FINALIZADO','3':'CANCELADO','4':'TODOS'};
+    const filtro=mapaHist[opcao];
+    if(filtro){
+      await salvarSessaoPedido(from,{etapa:'historico_lista',filtro,voltarPara:sess.voltarPara||''});
+      await enviarHistoricoRevendaFiltrado(from,cliente,filtro);
+      return;
+    }
+    await enviarMenuHistoricoWhatsApp(from);
+    return;
+  }
+  if (sess?.etapa === 'historico_lista') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'historico_menu',voltarPara:sess.voltarPara||''});
+      await enviarMenuHistoricoWhatsApp(from);
+      return;
+    }
+    await enviarHistoricoRevendaFiltrado(from,cliente,sess.filtro||'TODOS');
     return;
   }
 
-  if (sess?.etapa === 'suporte') {
-    if (opcao === '1' || lower.includes('atendente') || lower.includes('suporte')) {
+  if (sess?.etapa === 'suporte_menu') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'menu'});
+      await enviarMenuWhatsApp(from,cliente,false,true);
+      return;
+    }
+    const motivos={'1':'Problema com pedido','2':'Problema com pagamento','3':'Falar com suporte'};
+    const motivo=motivos[opcao];
+    if(motivo){
       await apagarSessaoPedido(from);
-      await enviarTexto(from, '👨‍💻 Sua solicitação foi encaminhada ao suporte humano. Aguarde o retorno de um atendente.');
-      notificarPainel('suporte', '🆘 Solicitação de suporte', `${cliente.nome} - +${numeroNorm}`);
+      await enviarTexto(from,`💬 *Suporte*\n\n✅ Sua solicitação foi encaminhada.\n\nAssunto: ${motivo}\n\nAguarde o retorno de um atendente.`);
+      notificarPainel('suporte','💬 Solicitação de suporte',`${cliente.nome} - ${motivo} - +${numeroNorm}`);
+      try{await avisarAdminTelegram(`💬 Solicitação de suporte\n\nCliente: ${cliente.nome}\nWhatsApp: +${numeroNorm}\nAssunto: ${motivo}`);}catch(_){}
       return;
     }
-    if (opcao === '2') {
-      await salvarSessaoPedido(from, { etapa: 'historico' });
-      await enviarHistoricoRevenda(from, cliente);
+    await enviarTexto(from,`💬 *Suporte*\n\nComo podemos ajudar?\n\n1️⃣ Problema com pedido\n2️⃣ Problema com pagamento\n3️⃣ Falar com suporte\n\n0️⃣ ⬅️ Voltar`);
+    return;
+  }
+
+  if (sess?.etapa === 'online_categorias') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'menu'});
+      await enviarMenuWhatsApp(from,cliente,false,true);
       return;
     }
-    await apagarSessaoPedido(from);
-    console.log('🔇 V121 OPÇÃO FORA DO SUPORTE — MENU CANCELADO:', numeroNorm, textoOriginal);
+    if(lower.startsWith('buscar ')){
+      const termo=textoOriginal.slice(textoOriginal.toLowerCase().indexOf('buscar')+6).trim();
+      const rows=await buscarServicosOnlineWhatsApp(termo);
+      await salvarSessaoPedido(from,{etapa:'online_busca',buscaTermo:termo,buscaIds:rows.map(r=>r.id)});
+      await enviarTexto(from,await textoBuscaServicosOnline(rows,cliente,termo));
+      return;
+    }
+    if(/^\d+$/.test(opcao)){
+      const cats=await categoriasDhruWhatsApp();
+      const cat=cats[Number(opcao)-1];
+      if(cat){
+        await salvarSessaoPedido(from,{etapa:'servico_categoria',categoria:cat,origemMenu:'online'});
+        const lista=await listarServicosCategoriaTexto(cliente,cat);
+        await enviarTexto(from,lista.texto);
+        return;
+      }
+    }
+    await enviarTexto(from,await listarServicosOnlineTexto());
+    return;
+  }
+  if (sess?.etapa === 'online_busca') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'online_categorias'});
+      await enviarTexto(from,await listarServicosOnlineTexto());
+      return;
+    }
+    if(/^\d+$/.test(opcao)){
+      const ids=Array.isArray(sess.buscaIds)?sess.buscaIds:[];
+      const id=Number(ids[Number(opcao)-1]||0);
+      if(id){
+        const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1 AND COALESCE(api_provider,\'\')=\'DHRU\'',[id]);
+        if(servico){await iniciarServicoWhatsApp(from,cliente,servico);return;}
+      }
+    }
+    const rows=[];
+    for(const id of (Array.isArray(sess.buscaIds)?sess.buscaIds:[])){
+      const r=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[id]); if(r)rows.push(r);
+    }
+    await enviarTexto(from,await textoBuscaServicosOnline(rows,cliente,sess.buscaTermo||''));
     return;
   }
 
@@ -4365,34 +4607,34 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
 
   if (sess?.etapa === 'menu') {
-    if (opcao === '1') { await salvarSessaoPedido(from, { etapa: 'servico_escolha' }); await enviarTexto(from, await listarServicosTexto(cliente)); return; }
-    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
-    if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'historico' }); await enviarHistoricoRevenda(from, cliente); return; }
-    if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'conta' }); await enviarContaRevenda(from, cliente); return; }
-    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'pix_cadastro_menu' }); await enviarTexto(from, await textoCadastroPix(cliente)); return; }
-    if (opcao === '6') { await salvarSessaoPedido(from, { etapa: 'suporte' }); await enviarTexto(from, `🆘 Suporte
-
-1️⃣ Falar com o suporte
-2️⃣ Consultar pedido
-0️⃣ ⬅️ Voltar
-
-💬 Digite a opção desejada.`); return; }
-    if (opcao === '7') {
-      await salvarSessaoPedido(from, { etapa: 'cancelamento_imeis' });
-      await enviarTexto(from, `❌ *Cancelamento*
-
-Envie de 1 até 10 IMEIs.
-
-Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizará somente os IMEIs dos seus próprios pedidos.
-
-0️⃣ ⬅️ Voltar`);
+    if (opcao === '1') {
+      const cat=await categoriaLocalWhatsAppObjeto();
+      if(!cat){await enviarTexto(from,'🚫 Blacklist Brazil\n\nNenhum serviço disponível no momento.');return;}
+      await salvarSessaoPedido(from,{etapa:'servico_categoria',categoria:cat,origemMenu:'blacklist'});
+      await enviarTexto(from,await listarBlacklistBrazilTexto(cliente));
       return;
     }
-
-    // V121: qualquer conteúdo fora das opções válidas cancela o menu sem resposta.
+    if (opcao === '2') {
+      await salvarSessaoPedido(from,{etapa:'online_categorias'});
+      await enviarTexto(from,await listarServicosOnlineTexto());
+      return;
+    }
+    if (opcao === '3') { await salvarSessaoPedido(from, { etapa: 'esim_escolha' }); await enviarListaEsim(from); return; }
+    if (opcao === '4') { await salvarSessaoPedido(from, { etapa: 'historico_menu' }); await enviarMenuHistoricoWhatsApp(from); return; }
+    if (opcao === '5') { await salvarSessaoPedido(from, { etapa: 'conta_menu' }); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
+    if (opcao === '6') {
+      await salvarSessaoPedido(from,{etapa:'aguardando_valor_pix',tipo_pix:'SALDO'});
+      await enviarTexto(from,'💰 *Adicionar saldo*\n\n💳 Saldo atual: '+brl(cliente.saldo)+'\n\nDigite somente o valor que deseja adicionar.\n\nValor mínimo: R$ 10,00\nExemplo: 50\n\n0️⃣ Cancelar');
+      return;
+    }
+    if (opcao === '7') {
+      await salvarSessaoPedido(from, { etapa: 'suporte_menu' });
+      await enviarTexto(from, `💬 *Suporte*\n\nComo podemos ajudar?\n\n1️⃣ Problema com pedido\n2️⃣ Problema com pagamento\n3️⃣ Falar com suporte\n\n0️⃣ ⬅️ Voltar`);
+      return;
+    }
     await apagarSessaoPedido(from);
     encerrarSessaoIAWhatsApp(numeroNorm, true);
-    console.log('🔇 V121 OPÇÃO FORA DO MENU — MENU CANCELADO:', numeroNorm, textoOriginal);
+    console.log('🔇 V180 OPÇÃO FORA DO MENU — MENU CANCELADO:', numeroNorm, textoOriginal);
     return;
   }
 
@@ -5670,39 +5912,7 @@ Para começar, digite:
 🏢 CentralUnlocker`;
 }
 async function mensagemTutorialRevenda() {
-  return `📚 *TUTORIAL RÁPIDO*
-
-Digite:
-
-*menu*
-
-Você verá:
-
-1️⃣ Serviços
-2️⃣ Comprar eSIM
-3️⃣ Histórico
-4️⃣ Conta
-
-🔹 *Solicitar serviço*
-menu → 1 Serviços → escolha o serviço → envie o IMEI, Lock Code ou a informação solicitada
-
-📦 Para serviço tipo IMEI, pode enviar vários IMEIs de uma vez, um por linha
-
-🔹 *Ver histórico*
-menu → 2 Histórico
-
-🔹 *Ver conta*
-menu → 3 Conta
-
-🔹 *Gerar PIX*
-Digite:
-
-*pagar valor*
-
-Exemplo:
-*pagar 100*
-
-🏢 CentralUnlocker`;
+  return `📚 *TUTORIAL RÁPIDO*\n\nDigite:\n\n*menu*\n\nVocê verá:\n\n1️⃣ Blacklist Brazil\n2️⃣ Serviços Online\n3️⃣ Comprar eSIM\n4️⃣ Histórico\n5️⃣ Minha Conta\n6️⃣ Adicionar Saldo\n7️⃣ Suporte\n\n🔹 *Solicitar Blacklist Brazil*\nmenu → 1 Blacklist Brazil → escolha o serviço → envie a informação solicitada\n\n🔹 *Solicitar serviço da API*\nmenu → 2 Serviços Online → escolha a categoria → escolha o serviço → envie IMEI, Lock Code ou a informação solicitada\n\n🔹 *Ver histórico*\nmenu → 4 Histórico\n\n🔹 *Ver conta*\nmenu → 5 Minha Conta\n\n🔹 *Adicionar saldo*\nmenu → 6 Adicionar Saldo\n\n🏢 CentralUnlocker`;
 }
 function destinoRevenda(revenda) {
   if (!revenda) return '';
@@ -8373,7 +8583,7 @@ Digite:
 
 menu
 
-2️⃣ Comprar eSIM
+3️⃣ Comprar eSIM
 
 🏢 Centralunlocker`;
         const r = await enviarMensagemRevendas({ texto: aviso });
@@ -9682,6 +9892,9 @@ app.get('/admin/dhru', async (req,res) => {
   const prefix=await dhruApiPrefix();
   const detected=base?`${base}/${prefix}`:'';
   const selectedCat=String(req.query.cat||'').trim();
+  const selectedType=String(req.query.tipo||'').trim().toUpperCase();
+  const tiposValidos=['IMEI_SERVICE','REMOTE_SERVICE','FILE_SERVICE','SERVER_SERVICE'];
+  const tipoAtual=tiposValidos.includes(selectedType)?selectedType:'';
   const busca=String(req.query.q||'').trim().toLowerCase();
   const aviso=req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:'';
 
@@ -9691,29 +9904,31 @@ app.get('/admin/dhru', async (req,res) => {
     if(!Array.isArray(cs)||!cs.length) cs=String(r.categoria||'Sem categoria').split(' / ').map(x=>x.trim()).filter(Boolean);
     return [...new Set(cs.length?cs:['Sem categoria'])];
   }
+  const rowsTipo=tipoAtual?rows.filter(r=>String(r.service_type||'IMEI_SERVICE').toUpperCase()===tipoAtual):rows;
   const catMap=new Map();
-  for(const r of rows){
+  for(const r of rowsTipo){
     for(const c of categoriasDaLinha(r)){
       if(!catMap.has(c)) catMap.set(c,{nome:c,total:0,ativos:0});
       const x=catMap.get(c); x.total++; if(Number(r.ativo)) x.ativos++;
     }
   }
   const categorias=[...catMap.values()].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
-  const categoriasHtml=`<div class="card"><h2>📲 Organização do menu WhatsApp</h2><p class="muted">Você pode mudar os nomes exibidos no WhatsApp sem alterar os nomes originais usados pela API.</p><div class="card"><h3>📵 Serviços próprios</h3><form method="post" action="/admin/dhru/categoria-local-nome"><label>Nome da categoria no WhatsApp</label><input name="nome" value="${safeHtml(categoriaLocalNome)}" placeholder="Blacklist Brazil"><button class="btn green">💾 Salvar categoria</button></form><p class="mini-help">Bloqueio TIM, Desbloqueio TIM, SSP e os demais serviços próprios ficam reunidos aqui.</p></div></div>`+(rows.length?`<div class="card"><h2>📂 Categorias da API (${categorias.length})</h2><p class="muted">Abra uma categoria para escolher serviços. Você também pode mudar o nome que o cliente verá no WhatsApp.</p><div class="grid">${categorias.map(c=>{const mc=margensCat.has(c.nome)?margensCat.get(c.nome):precCfg.margemPadrao;const exib=nomesCat.get(c.nome)||categoriaWhatsAppPt(c.nome,'DHRU');return `<div class="card"><h3>📁 ${safeHtml(exib)}</h3><p class="muted">API: ${safeHtml(c.nome)}</p><p><b>${c.total}</b> produto(s) • ${c.ativos} ativo(s)</p><p><b>Margem:</b> ${Number(mc).toFixed(2)}%</p><form method="post" action="/admin/dhru/categoria-nome"><input type="hidden" name="categoria" value="${safeHtml(c.nome)}"><label>Nome no WhatsApp</label><input name="nome" value="${safeHtml(exib)}"><button class="btn green">💾 Salvar nome</button></form><p><a class="btn" href="/admin/dhru?cat=${encodeURIComponent(c.nome)}">Abrir categoria</a></p></div>`}).join('')}</div></div>`:`<div class="card empty">Nenhum produto sincronizado.</div>`);
+  const tiposHtml=`<div class="card"><h2>🧩 Tipos de serviço da API Dhru</h2><p class="muted">Primeiro escolha o tipo técnico da Dhru. Depois você verá as categorias e os produtos daquele tipo.</p><div class="grid">${['IMEI_SERVICE','REMOTE_SERVICE','FILE_SERVICE','SERVER_SERVICE'].map(t=>{const m=dhruServiceTypeMeta(t);const rr=rows.filter(r=>String(r.service_type||'IMEI_SERVICE').toUpperCase()===t);const ativos=rr.filter(r=>Number(r.ativo)).length;return `<div class="card"><h3>${m.icon} ${m.label}</h3><p><b>${rr.length}</b> produto(s) • ${ativos} ativo(s)</p><p><a class="btn" href="/admin/dhru?tipo=${encodeURIComponent(t)}">Abrir ${m.label}</a></p></div>`}).join('')}</div></div>`;
+  const categoriasHtml=`<div class="card"><h2>📲 Organização do menu WhatsApp</h2><p class="muted">Você pode mudar os nomes exibidos no WhatsApp sem alterar os nomes originais usados pela API.</p><div class="card"><h3>📵 Serviços próprios</h3><form method="post" action="/admin/dhru/categoria-local-nome"><label>Nome da categoria no WhatsApp</label><input name="nome" value="${safeHtml(categoriaLocalNome)}" placeholder="Blacklist Brazil"><button class="btn green">💾 Salvar categoria</button></form><p class="mini-help">Bloqueio TIM, Desbloqueio TIM, SSP e os demais serviços próprios ficam reunidos aqui.</p></div></div>`+(rowsTipo.length?`<div class="card"><p><a class="btn gray" href="/admin/dhru">← Tipos da API</a></p><h2>${tipoAtual?dhruServiceTypeMeta(tipoAtual).icon+' '+dhruServiceTypeMeta(tipoAtual).label:'📂 Categorias da API'} — Categorias (${categorias.length})</h2><p class="muted">Abra uma categoria para escolher serviços. Você também pode mudar o nome que o cliente verá no WhatsApp.</p><div class="grid">${categorias.map(c=>{const mc=margensCat.has(c.nome)?margensCat.get(c.nome):precCfg.margemPadrao;const exib=nomesCat.get(c.nome)||categoriaWhatsAppPt(c.nome,'DHRU');return `<div class="card"><h3>📁 ${safeHtml(exib)}</h3><p class="muted">API: ${safeHtml(c.nome)}</p><p><b>${c.total}</b> produto(s) • ${c.ativos} ativo(s)</p><p><b>Margem:</b> ${Number(mc).toFixed(2)}%</p><form method="post" action="/admin/dhru/categoria-nome"><input type="hidden" name="categoria" value="${safeHtml(c.nome)}"><label>Nome no WhatsApp</label><input name="nome" value="${safeHtml(exib)}"><button class="btn green">💾 Salvar nome</button></form><p><a class="btn" href="/admin/dhru?tipo=${encodeURIComponent(tipoAtual)}&cat=${encodeURIComponent(c.nome)}">Abrir categoria</a></p></div>`}).join('')}</div></div>`:`<div class="card empty">Nenhum produto sincronizado neste tipo.</div>`);
 
   let produtosHtml='';
   if(selectedCat){
-    let filtrados=rows.filter(r=>categoriasDaLinha(r).includes(selectedCat));
+    let filtrados=rowsTipo.filter(r=>categoriasDaLinha(r).includes(selectedCat));
     if(busca) filtrados=filtrados.filter(r=>String(r.nome||'').toLowerCase().includes(busca)||String(r.product_uuid||'').toLowerCase().includes(busca));
     const encodedCat=encodeURIComponent(selectedCat);
     const margemCategoriaAtual=margensCat.has(selectedCat)?margensCat.get(selectedCat):null;
-    const linhas=filtrados.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){};const campos=fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>dhruCampoLabelPt(f.name)).join(', ')||'—';const catsLinha=categoriasDaLinha(r);const margemServico=r.api_margin_pct!==null&&r.api_margin_pct!==undefined?Math.max(0,Number(r.api_margin_pct)||0):null;const margemCat=margensCat.has(catsLinha[0])?margensCat.get(catsLinha[0]):precCfg.margemPadrao;const margemEfetiva=margemServico!==null?margemServico:margemCat;const custoBrl=dhruCustoEmBrl(r.custo,r.currency,precCfg.usdBrl);const precoCalc=dhruPrecoAutomatico(r.custo,r.currency,margemEfetiva,precCfg.usdBrl);const modo=String(r.api_price_mode||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=r.api_manual_price!==null&&r.api_manual_price!==undefined?Number(r.api_manual_price):Number(r.preco_padrao||0);const venda=Number(r.preco_padrao||0);const lucro=custoBrl===null?null:venda-custoBrl;const abaixo=custoBrl!==null&&venda<custoBrl;const nomeWhatsapp=String(r.nome_exibicao||'').trim()||dhruNomeServicoPt(r.nome);return `<tr><td><input form="dhruBulk" type="checkbox" name="ids" value="${Number(r.catalogo_id)}"></td><td><b>${safeHtml(nomeWhatsapp)}</b><br><small>API: ${safeHtml(r.nome)}</small><br><small>${catsLinha.map(safeHtml).join(' • ')}</small></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}${custoBrl!==null?`<br><small>≈ ${brl(custoBrl)}</small>`:''}</td><td>${safeHtml(campos)}</td><td><form method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input type="hidden" name="voltar_cat" value="${safeHtml(selectedCat)}"><label>Nome no WhatsApp</label><input name="nome_exibicao" value="${safeHtml(nomeWhatsapp)}"><p class="mini-help">Esse nome é só para o cliente. O produto original da API não é alterado.</p><label>Modo</label><select name="modo"><option value="AUTO" ${modo==='AUTO'?'selected':''}>% Automático</option><option value="MANUAL" ${modo==='MANUAL'?'selected':''}>Preço manual</option></select><label>Margem própria % <small>(opcional)</small></label><input name="margem" value="${margemServico===null?'':margemServico}" placeholder="Usar categoria" style="width:110px"><label>Preço manual R$</label><input name="preco_manual" value="${Number(manual||0).toFixed(2)}" style="width:110px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><p class="mini-help">Margem usada: <b>${Number(margemEfetiva).toFixed(2)}%</b>${precoCalc!==null?` • Automático: <b>${brl(precoCalc)}</b>`:''}<br>Venda atual: <b>${brl(venda)}</b>${lucro!==null?` • Lucro: <b>${brl(lucro)}</b>`:''}${abaixo?`<br><b style="color:#ef4444">⚠️ Venda abaixo do custo</b>`:''}</p><button class="btn green">Salvar</button></form></td></tr>`}).join('');
+    const linhas=filtrados.map(r=>{let fs=[];try{fs=JSON.parse(r.fields_json||'[]')}catch(_){};const campos=fs.filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f.name||'').toLowerCase())).map(f=>dhruCampoLabelPt(f.name)).join(', ')||'—';const catsLinha=categoriasDaLinha(r);const margemServico=r.api_margin_pct!==null&&r.api_margin_pct!==undefined?Math.max(0,Number(r.api_margin_pct)||0):null;const margemCat=margensCat.has(catsLinha[0])?margensCat.get(catsLinha[0]):precCfg.margemPadrao;const margemEfetiva=margemServico!==null?margemServico:margemCat;const custoBrl=dhruCustoEmBrl(r.custo,r.currency,precCfg.usdBrl);const precoCalc=dhruPrecoAutomatico(r.custo,r.currency,margemEfetiva,precCfg.usdBrl);const modo=String(r.api_price_mode||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=r.api_manual_price!==null&&r.api_manual_price!==undefined?Number(r.api_manual_price):Number(r.preco_padrao||0);const venda=Number(r.preco_padrao||0);const lucro=custoBrl===null?null:venda-custoBrl;const abaixo=custoBrl!==null&&venda<custoBrl;const nomeWhatsapp=String(r.nome_exibicao||'').trim()||dhruNomeServicoPt(r.nome);return `<tr><td><input form="dhruBulk" type="checkbox" name="ids" value="${Number(r.catalogo_id)}"></td><td><b>${safeHtml(nomeWhatsapp)}</b><br><small>API: ${safeHtml(r.nome)}</small><br><small>${catsLinha.map(safeHtml).join(' • ')}</small></td><td><code>${safeHtml(r.product_uuid)}</code></td><td>${safeHtml(r.currency||'')} ${Number(r.custo||0).toFixed(2)}${custoBrl!==null?`<br><small>≈ ${brl(custoBrl)}</small>`:''}</td><td>${safeHtml(campos)}</td><td><form method="post" action="/admin/dhru/produto/${r.catalogo_id}"><input type="hidden" name="voltar_cat" value="${safeHtml(selectedCat)}"><input type="hidden" name="voltar_tipo" value="${safeHtml(tipoAtual)}"><label>Nome no WhatsApp</label><input name="nome_exibicao" value="${safeHtml(nomeWhatsapp)}"><p class="mini-help">Esse nome é só para o cliente. O produto original da API não é alterado.</p><label>Modo</label><select name="modo"><option value="AUTO" ${modo==='AUTO'?'selected':''}>% Automático</option><option value="MANUAL" ${modo==='MANUAL'?'selected':''}>Preço manual</option></select><label>Margem própria % <small>(opcional)</small></label><input name="margem" value="${margemServico===null?'':margemServico}" placeholder="Usar categoria" style="width:110px"><label>Preço manual R$</label><input name="preco_manual" value="${Number(manual||0).toFixed(2)}" style="width:110px"><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><p class="mini-help">Margem usada: <b>${Number(margemEfetiva).toFixed(2)}%</b>${precoCalc!==null?` • Automático: <b>${brl(precoCalc)}</b>`:''}<br>Venda atual: <b>${brl(venda)}</b>${lucro!==null?` • Lucro: <b>${brl(lucro)}</b>`:''}${abaixo?`<br><b style="color:#ef4444">⚠️ Venda abaixo do custo</b>`:''}</p><button class="btn green">Salvar</button></form></td></tr>`}).join('');
     const selectedDisplay=nomesCat.get(selectedCat)||categoriaWhatsAppPt(selectedCat,'DHRU');
-    produtosHtml=`<div class="card"><p><a class="btn gray" href="/admin/dhru">← Todas as categorias</a></p><h2>📁 ${safeHtml(selectedDisplay)} (${filtrados.length})</h2><p class="mini-help">Categoria original da API: ${safeHtml(selectedCat)}</p><div class="grid"><div class="card"><h3>💹 Margem desta categoria</h3><form method="post" action="/admin/dhru/categoria-preco"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><label>Margem %</label><input name="margem" value="${margemCategoriaAtual===null?'':margemCategoriaAtual}" placeholder="Padrão ${precCfg.margemPadrao}%"><p class="mini-help">Em branco = usar margem padrão global.</p><button class="btn green">Salvar margem da categoria</button></form></div></div><form method="get" action="/admin/dhru" class="forms-inline"><input type="hidden" name="cat" value="${safeHtml(selectedCat)}"><input name="q" value="${safeHtml(req.query.q||'')}" placeholder="Buscar produto nesta categoria"><button class="btn">🔎 Buscar</button></form><form id="dhruBulk" method="post" action="/admin/dhru/produtos/lote"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><div class="forms-inline" style="margin:12px 0"><select name="acao"><option value="ativar">✅ Ativar selecionados</option><option value="desativar">⛔ Desativar selecionados</option></select><button class="btn green">Aplicar aos marcados</button></div></form><table><tr><th>✓</th><th>Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Preço / Lucro</th></tr>${linhas||'<tr><td colspan="6">Nenhum produto encontrado.</td></tr>'}</table></div>`;
+    produtosHtml=`<div class="card"><p><a class="btn gray" href="/admin/dhru?tipo=${encodeURIComponent(tipoAtual)}">← Todas as categorias</a></p><h2>📁 ${safeHtml(selectedDisplay)} (${filtrados.length})</h2><p class="mini-help">Categoria original da API: ${safeHtml(selectedCat)}</p><div class="grid"><div class="card"><h3>💹 Margem desta categoria</h3><form method="post" action="/admin/dhru/categoria-preco"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><label>Margem %</label><input name="margem" value="${margemCategoriaAtual===null?'':margemCategoriaAtual}" placeholder="Padrão ${precCfg.margemPadrao}%"><p class="mini-help">Em branco = usar margem padrão global.</p><button class="btn green">Salvar margem da categoria</button></form></div></div><form method="get" action="/admin/dhru" class="forms-inline"><input type="hidden" name="cat" value="${safeHtml(selectedCat)}"><input type="hidden" name="tipo" value="${safeHtml(tipoAtual)}"><input name="q" value="${safeHtml(req.query.q||'')}" placeholder="Buscar produto nesta categoria"><button class="btn">🔎 Buscar</button></form><form id="dhruBulk" method="post" action="/admin/dhru/produtos/lote"><input type="hidden" name="categoria" value="${safeHtml(selectedCat)}"><input type="hidden" name="tipo" value="${safeHtml(tipoAtual)}"><div class="forms-inline" style="margin:12px 0"><select name="acao"><option value="ativar">✅ Ativar selecionados</option><option value="desativar">⛔ Desativar selecionados</option></select><button class="btn green">Aplicar aos marcados</button></div></form><table><tr><th>✓</th><th>Produto</th><th>UUID</th><th>Custo</th><th>Campos</th><th>Preço / Lucro</th></tr>${linhas||'<tr><td colspan="6">Nenhum produto encontrado.</td></tr>'}</table></div>`;
   }
   const avisoCambio=precCfg.usdBrl<=0?`<p style="color:#f59e0b"><b>⚠️ Configure a cotação USD → BRL</b> para usar preços automáticos em produtos cobrados em dólar.</p>`:'';
   const pricingCard=`<div class="card"><h2>💰 Precificação automática</h2><form method="post" action="/admin/dhru/precos-config"><label>Margem padrão de lucro (%)</label><input name="margem_padrao" type="number" min="0" step="0.01" value="${precCfg.margemPadrao}"><label>Cotação USD → BRL</label><input name="usd_brl" type="number" min="0" step="0.0001" value="${precCfg.usdBrl}"><label>Atualizar automaticamente quando custo/cotação/margem mudar</label><select name="auto_reprice"><option value="1" ${precCfg.autoReprice?'selected':''}>Sim</option><option value="0" ${!precCfg.autoReprice?'selected':''}>Não</option></select>${avisoCambio}<p class="mini-help">Prioridade: <b>Preço manual</b> → margem própria do serviço → margem da categoria → margem padrão. Serviços antigos mantêm seus preços manuais até você mudar o modo para automático.</p><button class="btn green">💾 Salvar precificação</button></form></div>`;
-  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, categorias oficiais, produtos, pedidos automáticos, retorno por feedback URL e controle de lucro.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><p><b>Produtos:</b> ${rows.length} &nbsp; <b>Categorias oficiais:</b> ${categorias.length}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar produtos e categorias</button></form><p class="mini-help">As categorias vêm diretamente da API. A sincronização atualiza custos e, se habilitado, recalcula os serviços em modo automático.</p></div>${pricingCard}</div>${selectedCat?produtosHtml:categoriasHtml}`));
+  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, categorias oficiais, produtos, pedidos automáticos, retorno por feedback URL e controle de lucro.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><p><b>Produtos:</b> ${rows.length} &nbsp; <b>Categorias oficiais:</b> ${categorias.length}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar produtos e categorias</button></form><p class="mini-help">As categorias vêm diretamente da API. A sincronização atualiza custos e, se habilitado, recalcula os serviços em modo automático.</p></div>${pricingCard}</div>${selectedCat?produtosHtml:(tipoAtual?categoriasHtml:tiposHtml)}`));
 });
 app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','api/reseller/v1');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
@@ -9722,8 +9937,8 @@ app.post('/admin/dhru/precos-config',async(req,res)=>{try{const margem=Math.max(
 app.post('/admin/dhru/categoria-local-nome',async(req,res)=>{try{const nome=String(req.body.nome||'').trim().slice(0,100)||'Blacklist Brazil';await setConfig('whatsapp_categoria_local_nome',nome);res.redirect('/admin/dhru?ok='+encodeURIComponent('Categoria dos serviços próprios atualizada no WhatsApp'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/categoria-nome',async(req,res)=>{try{const cat=String(req.body.categoria||'').trim();if(!cat)throw new Error('Categoria inválida');const nome=String(req.body.nome||'').trim().slice(0,120);if(!nome)await run(`DELETE FROM dhru_category_display WHERE category=?`,[cat]);else await run(`INSERT INTO dhru_category_display(category,display_name,atualizado_em) VALUES (?,?,CURRENT_TIMESTAMP) ON CONFLICT(category) DO UPDATE SET display_name=excluded.display_name,atualizado_em=CURRENT_TIMESTAMP`,[cat,nome]);res.redirect('/admin/dhru?ok='+encodeURIComponent('Nome da categoria atualizado no WhatsApp'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/categoria-preco',async(req,res)=>{try{const cat=String(req.body.categoria||'').trim();if(!cat)throw new Error('Categoria inválida');const txt=String(req.body.margem??'').trim().replace(',','.');if(txt==='')await run(`DELETE FROM dhru_category_pricing WHERE category=?`,[cat]);else{const m=Math.max(0,Number(txt)||0);await run(`INSERT INTO dhru_category_pricing(category,margin_pct,atualizado_em) VALUES (?,?,CURRENT_TIMESTAMP) ON CONFLICT(category) DO UPDATE SET margin_pct=excluded.margin_pct,atualizado_em=CURRENT_TIMESTAMP`,[cat,m]);}const cfg=await dhruConfigPrecificacao();if(cfg.autoReprice)await dhruRecalcularTodosAutomaticos();res.redirect('/admin/dhru?cat='+encodeURIComponent(cat)+'&ok='+encodeURIComponent('Margem da categoria atualizada'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
-app.post('/admin/dhru/produto/:id',async(req,res)=>{try{const id=Number(req.params.id);const ativo=String(req.body.ativo||'0')==='1'?1:0;const modo=String(req.body.modo||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=Math.max(0,Number(String(req.body.preco_manual||'0').replace(',','.'))||0);const margemTxt=String(req.body.margem??'').trim().replace(',','.');const margem=margemTxt===''?null:Math.max(0,Number(margemTxt)||0);const nomeExibicao=String(req.body.nome_exibicao||'').trim().slice(0,180);await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=?,nome_exibicao=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,nomeExibicao,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação da moeda no painel.');}const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent('Preço, margem e status atualizados'));}catch(e){const cat=String(req.body.voltar_cat||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'erro='+encodeURIComponent(e.message));}});
-app.post('/admin/dhru/produtos/lote',async(req,res)=>{try{let ids=req.body.ids||[];if(!Array.isArray(ids))ids=[ids];ids=ids.map(Number).filter(n=>Number.isInteger(n)&&n>0);const ativo=String(req.body.acao||'')==='ativar'?1:0;if(ids.length){const marks=ids.map(()=>'?').join(',');await run(`UPDATE servicos_catalogo SET ativo=? WHERE api_provider='DHRU' AND id IN (${marks})`,[ativo,...ids]);}const cat=String(req.body.categoria||'').trim();res.redirect('/admin/dhru?'+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent(`${ids.length} serviço(s) ${ativo?'ativado(s)':'desativado(s)'}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/produto/:id',async(req,res)=>{try{const id=Number(req.params.id);const ativo=String(req.body.ativo||'0')==='1'?1:0;const modo=String(req.body.modo||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=Math.max(0,Number(String(req.body.preco_manual||'0').replace(',','.'))||0);const margemTxt=String(req.body.margem??'').trim().replace(',','.');const margem=margemTxt===''?null:Math.max(0,Number(margemTxt)||0);const nomeExibicao=String(req.body.nome_exibicao||'').trim().slice(0,180);await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=?,nome_exibicao=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,nomeExibicao,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação da moeda no painel.');}const cat=String(req.body.voltar_cat||'').trim();const tipo=String(req.body.voltar_tipo||'').trim();res.redirect('/admin/dhru?'+(tipo?'tipo='+encodeURIComponent(tipo)+'&':'')+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent('Preço, margem e status atualizados'));}catch(e){const cat=String(req.body.voltar_cat||'').trim();const tipo=String(req.body.voltar_tipo||'').trim();res.redirect('/admin/dhru?'+(tipo?'tipo='+encodeURIComponent(tipo)+'&':'')+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/produtos/lote',async(req,res)=>{try{let ids=req.body.ids||[];if(!Array.isArray(ids))ids=[ids];ids=ids.map(Number).filter(n=>Number.isInteger(n)&&n>0);const ativo=String(req.body.acao||'')==='ativar'?1:0;if(ids.length){const marks=ids.map(()=>'?').join(',');await run(`UPDATE servicos_catalogo SET ativo=? WHERE api_provider='DHRU' AND id IN (${marks})`,[ativo,...ids]);}const cat=String(req.body.categoria||'').trim();const tipo=String(req.body.tipo||'').trim();res.redirect('/admin/dhru?'+(tipo?'tipo='+encodeURIComponent(tipo)+'&':'')+(cat?'cat='+encodeURIComponent(cat)+'&':'')+'ok='+encodeURIComponent(`${ids.length} serviço(s) ${ativo?'ativado(s)':'desativado(s)'}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
 
 app.get('/admin/config', async (req, res) => {
