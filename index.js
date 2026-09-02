@@ -878,6 +878,15 @@ function dhruNomeServicoPt(nome){
     [/Activation/gi,'Ativação'],
     [/Status/gi,'Situação'],
     [/Country/gi,'País'],
+    [/Phone/gi,'Telefone'],
+    [/Account/gi,'Conta'],
+    [/Remove/gi,'Remoção'],
+    [/Lost/gi,'Perdido'],
+    [/Stolen/gi,'Roubado'],
+    [/Blacklist/gi,'Blacklist'],
+    [/Network/gi,'Rede'],
+    [/Carrier/gi,'Operadora'],
+    [/Service/gi,'Serviço'],
     [/Server/gi,'Servidor']
   ];
   for(const [a,b] of reps) s=s.replace(a,b);
@@ -1021,15 +1030,21 @@ async function sincronizarProdutosDhru(){
     const margemCat=margensCat.has(categorias[0]||'')?margensCat.get(categorias[0]||''):precCfg.margemPadrao;
     const precoAuto=dhruPrecoAutomatico(custo,currency,margemCat,precCfg.usdBrl);
     let catalogoId=existente?.id||null;
+    const nomePt=dhruNomeServicoPt(nome);
     if(!existente){
-      const ins=await run(`INSERT INTO servicos_catalogo (nome,preco_padrao,tipo_entrada,entrada_label,categoria,descricao,prazo,ativo,api_provider,api_service_id,api_cost,api_auto,api_price_mode,api_margin_pct,api_manual_price)
-        VALUES (?,?,?,?,?,?,'Automático via Dhru',0,'DHRU',?,?,1,'AUTO',NULL,NULL)`,[nome,precoAuto===null?0:precoAuto,tipo,label,categoria,descricao,uuid,custo]);
+      const ins=await run(`INSERT INTO servicos_catalogo (nome,preco_padrao,tipo_entrada,entrada_label,categoria,descricao,prazo,ativo,api_provider,api_service_id,api_cost,api_auto,api_price_mode,api_margin_pct,api_manual_price,nome_exibicao)
+        VALUES (?,?,?,?,?,?,'Automático via Dhru',0,'DHRU',?,?,1,'AUTO',NULL,NULL,?)`,[nome,precoAuto===null?0:precoAuto,tipo,label,categoria,descricao,uuid,custo,nomePt]);
       catalogoId=ins.lastID; novos++;
     } else {
       const modo=String(existente.api_price_mode||'MANUAL').toUpperCase();
       const margemServico=existente.api_margin_pct!==null&&existente.api_margin_pct!==undefined?Math.max(0,Number(existente.api_margin_pct)||0):null;
       const precoAtualizado=(modo==='AUTO'&&precCfg.autoReprice)?dhruPrecoAutomatico(custo,currency,margemServico!==null?margemServico:margemCat,precCfg.usdBrl):null;
-      await run(`UPDATE servicos_catalogo SET nome=?,tipo_entrada=?,entrada_label=?,categoria=?,descricao=?,prazo='Automático via Dhru',api_cost=?,api_auto=1${precoAtualizado!==null?',preco_padrao=?':''} WHERE id=?`,precoAtualizado!==null?[nome,tipo,label,categoria,descricao,custo,precoAtualizado,existente.id]:[nome,tipo,label,categoria,descricao,custo,existente.id]);
+      await run(`UPDATE servicos_catalogo SET nome=?,tipo_entrada=?,entrada_label=?,categoria=?,descricao=?,prazo='Automático via Dhru',api_cost=?,api_auto=1,nome_exibicao=CASE WHEN TRIM(COALESCE(nome_exibicao,''))='' THEN ? ELSE nome_exibicao END${precoAtualizado!==null?',preco_padrao=?':''} WHERE id=?`,precoAtualizado!==null?[nome,tipo,label,categoria,descricao,custo,nomePt,precoAtualizado,existente.id]:[nome,tipo,label,categoria,descricao,custo,nomePt,existente.id]);
+    }
+    // V181: categorias novas já nascem com apresentação em português, sem sobrescrever edição manual.
+    for(const catOriginal of categorias){
+      const catPt=categoriaWhatsAppPt(catOriginal,'DHRU');
+      await run(`INSERT OR IGNORE INTO dhru_category_display(category,display_name,atualizado_em) VALUES (?,?,CURRENT_TIMESTAMP)`,[catOriginal,catPt]);
     }
     await run(`INSERT OR REPLACE INTO dhru_products (product_uuid,nome,categoria,custo,currency,fields_json,raw_json,catalogo_id,cids_json,categorias_json,service_type,atualizado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,[uuid,nome,categoria,custo,currency,JSON.stringify(prod.fields||[]),JSON.stringify(prod),catalogoId,JSON.stringify(cids),JSON.stringify(categorias),serviceType]);
     sincronizados++;
@@ -2213,10 +2228,12 @@ function categoriaWhatsAppPt(nome, apiProvider='') {
   if(String(apiProvider||'').toUpperCase()!=='DHRU') return original;
   let x=original;
   const regras=[
-    [/xiaomi/ig,'Xiaomi'],[/apple|iphone/ig,'Apple / iPhone'],[/samsung/ig,'Samsung'],
-    [/imei\s*(check|checker|checks|services?)/ig,'Consultas de IMEI'],[/check(er)?\s*services?/ig,'Consultas'],
-    [/unlock(ing)?/ig,'Desbloqueio'],[/lock\s*code/ig,'Código de Bloqueio'],[/services?/ig,'Serviços'],
-    [/worldwide/ig,'Mundial'],[/server/ig,'Servidor'],[/carrier/ig,'Operadora'],[/network/ig,'Rede']
+    [/xiaomi/ig,'Xiaomi'],[/apple|iphone/ig,'Apple / iPhone'],[/samsung/ig,'Samsung'],[/huawei/ig,'Huawei'],[/motorola/ig,'Motorola'],
+    [/imei\s*(check|checker|checks|services?)/ig,'Consultas de IMEI'],[/imei\s*service(s)?/ig,'Serviços IMEI'],[/check(er)?\s*services?/ig,'Consultas'],
+    [/remote\s*service(s)?/ig,'Serviços Remotos'],[/file\s*service(s)?/ig,'Serviços de Arquivo'],[/server\s*service(s)?/ig,'Serviços de Servidor'],
+    [/unlock(ing)?/ig,'Desbloqueio'],[/lock\s*code/ig,'Código de Bloqueio'],[/account/ig,'Conta'],[/repair/ig,'Reparo'],
+    [/activation/ig,'Ativação'],[/warranty/ig,'Garantia'],[/blacklist/ig,'Blacklist'],[/services?/ig,'Serviços'],
+    [/worldwide/ig,'Mundial'],[/brazil/ig,'Brasil'],[/server/ig,'Servidor'],[/carrier/ig,'Operadora'],[/network/ig,'Rede'],[/clean/ig,'Clean']
   ];
   for(const [a,b] of regras)x=x.replace(a,b);
   x=x.replace(/\s{2,}/g,' ').replace(/^\s+|\s+$/g,'');
@@ -9879,6 +9896,29 @@ app.get('/admin/temas/preview/:id', async (req,res) => {
 app.post('/admin/temas/aplicar', async (req,res) => { const theme=String(req.body.theme||''); if(TEMAS_PAINEL[theme]){PAINEL_TEMA=theme;await setConfig('painel_tema',theme);notificarPainel('tema','🎨 Tema alterado',TEMAS_PAINEL[theme].nome);} res.redirect('/admin/temas?ok='+encodeURIComponent('Tema aplicado e salvo')); });
 app.post('/admin/temas/personalizar', async (req,res) => { const bg=String(req.body.bg_mode||'soft'); PAINEL_BG_MODE=['strong','soft','none'].includes(bg)?bg:'soft'; PAINEL_EFEITOS=String(req.body.efeitos||'1')==='1'; await setConfig('painel_bg_mode',PAINEL_BG_MODE); await setConfig('painel_efeitos',PAINEL_EFEITOS?'1':'0'); res.redirect('/admin/temas?ok='+encodeURIComponent('Personalização salva')); });
 
+// V181: limpeza completa do catálogo importado por APIs, preservando pedidos/histórico e serviços próprios.
+async function limparCatalogoApis(){
+  const apiRows=await all(`SELECT id,api_provider FROM servicos_catalogo WHERE TRIM(COALESCE(api_provider,''))<>''`);
+  const ids=apiRows.map(x=>Number(x.id)).filter(Boolean);
+  await run('BEGIN TRANSACTION');
+  try{
+    await run(`DELETE FROM dhru_products`);
+    await run(`DELETE FROM dhru_category_display`);
+    await run(`DELETE FROM dhru_category_pricing`);
+    // Não apaga dhru_orders nem pedidos: histórico fica preservado.
+    if(ids.length){
+      const marks=ids.map(()=>'?').join(',');
+      await run(`DELETE FROM servicos_catalogo WHERE id IN (${marks})`,ids);
+    }
+    await setConfig('dhru_ultima_sync','Nunca');
+    await run('COMMIT');
+    return {removidos:ids.length};
+  }catch(e){
+    try{await run('ROLLBACK')}catch(_){}
+    throw e;
+  }
+}
+
 app.get('/admin/dhru', async (req,res) => {
   const tok=await dhruToken(), base=await dhruBaseUrl(), pub=await dhruPublicBase();
   const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo,s.api_price_mode,s.api_margin_pct,s.api_manual_price,s.nome_exibicao FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.nome COLLATE NOCASE`);
@@ -9928,8 +9968,60 @@ app.get('/admin/dhru', async (req,res) => {
   }
   const avisoCambio=precCfg.usdBrl<=0?`<p style="color:#f59e0b"><b>⚠️ Configure a cotação USD → BRL</b> para usar preços automáticos em produtos cobrados em dólar.</p>`:'';
   const pricingCard=`<div class="card"><h2>💰 Precificação automática</h2><form method="post" action="/admin/dhru/precos-config"><label>Margem padrão de lucro (%)</label><input name="margem_padrao" type="number" min="0" step="0.01" value="${precCfg.margemPadrao}"><label>Cotação USD → BRL</label><input name="usd_brl" type="number" min="0" step="0.0001" value="${precCfg.usdBrl}"><label>Atualizar automaticamente quando custo/cotação/margem mudar</label><select name="auto_reprice"><option value="1" ${precCfg.autoReprice?'selected':''}>Sim</option><option value="0" ${!precCfg.autoReprice?'selected':''}>Não</option></select>${avisoCambio}<p class="mini-help">Prioridade: <b>Preço manual</b> → margem própria do serviço → margem da categoria → margem padrão. Serviços antigos mantêm seus preços manuais até você mudar o modo para automático.</p><button class="btn green">💾 Salvar precificação</button></form></div>`;
-  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, categorias oficiais, produtos, pedidos automáticos, retorno por feedback URL e controle de lucro.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><p><b>Produtos:</b> ${rows.length} &nbsp; <b>Categorias oficiais:</b> ${categorias.length}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar produtos e categorias</button></form><p class="mini-help">As categorias vêm diretamente da API. A sincronização atualiza custos e, se habilitado, recalcula os serviços em modo automático.</p></div>${pricingCard}</div>${selectedCat?produtosHtml:(tipoAtual?categoriasHtml:tiposHtml)}`));
+  const buscaGlobalCard=`<div class="card"><h2>🔎 Buscar serviços</h2><p class="muted">Pesquise instantaneamente em todos os serviços IMEI, Remote, File e Server.</p><p><a class="btn" href="/admin/dhru/buscar">🔎 Abrir busca instantânea</a></p></div>`;
+  const limpezaCard=`<div class="card"><h2>🗑️ Limpeza total das APIs</h2><p class="muted">Remove do catálogo e do painel todos os serviços importados por API, inclusive resíduos de integrações antigas. Seus serviços próprios e o histórico de pedidos são preservados.</p><form method="post" action="/admin/dhru/limpar-api" onsubmit="return confirm('Confirma a limpeza total dos serviços importados por API? O histórico de pedidos será preservado.');"><label>Digite <b>APAGAR API</b> para confirmar</label><input name="confirmacao" autocomplete="off" placeholder="APAGAR API"><button class="btn red">🗑️ Apagar todos os serviços da API</button></form></div>`;
+  res.send(page('API Dhru',`<div class="hero"><h1>🔄 Dhru Reseller API</h1><p>Integração exclusiva: conta, categorias oficiais, produtos, pedidos automáticos, retorno por feedback URL e controle de lucro.</p></div>${aviso}<div class="grid"><div class="card"><h2>🔐 Conexão</h2><form method="post" action="/admin/dhru/config"><label>URL base da API</label><input name="base_url" value="${safeHtml(base)}" placeholder="https://api.seu-fornecedor.com" required><label>Bearer Token</label><input type="password" name="token" placeholder="${tok?'Deixe vazio para manter o token atual':'Cole o token'}"><p><b>Token:</b> ${safeHtml(dhruMask(tok))}</p><label>URL pública deste bot</label><input name="public_base_url" value="${safeHtml(pub)}" placeholder="https://seu-app.onrender.com"><p class="mini-help">Necessária para o Dhru avisar automaticamente quando o pedido for concluído ou rejeitado.</p><button class="btn green">💾 Salvar configuração</button></form></div><div class="card"><h2>🧪 Teste e sincronização</h2><p><b>Última sincronização:</b> ${safeHtml(ultima)}</p><p><b>Endpoint:</b> <code>${safeHtml(detected||'Ainda não testado')}</code></p><p><b>Produtos:</b> ${rows.length} &nbsp; <b>Categorias oficiais:</b> ${categorias.length}</p><form class="forms-inline" method="post" action="/admin/dhru/testar"><button class="btn">🧪 Testar API oficial</button></form> <form class="forms-inline" method="post" action="/admin/dhru/sincronizar"><button class="btn green">🔄 Sincronizar produtos e categorias</button></form><p class="mini-help">As categorias vêm diretamente da API. A sincronização atualiza custos e, se habilitado, recalcula os serviços em modo automático.</p></div>${pricingCard}${buscaGlobalCard}${limpezaCard}</div>${selectedCat?produtosHtml:(tipoAtual?categoriasHtml:tiposHtml)}`));
 });
+
+// V181: busca instantânea em todos os produtos sincronizados.
+app.get('/admin/dhru/buscar',async(req,res)=>{
+  const tipos=['','IMEI_SERVICE','REMOTE_SERVICE','FILE_SERVICE','SERVER_SERVICE'];
+  const tiposOptions=tipos.map(t=>`<option value="${t}">${t?dhruServiceTypeMeta(t).label:'Todos os tipos'}</option>`).join('');
+  const content=`<div class="hero"><h1>🔎 Buscar serviços da API</h1><p>Comece a digitar e os serviços correspondentes aparecem automaticamente.</p></div>
+  <div class="card"><p><a class="btn gray" href="/admin/dhru">← Voltar para API Dhru</a></p>
+  <div class="grid"><div><label>Buscar</label><input id="dhruLiveQ" placeholder="Ex.: Xiaomi, bloqueio, iCloud, carrier..." autocomplete="off"></div>
+  <div><label>Tipo</label><select id="dhruLiveTipo">${tiposOptions}</select></div>
+  <div><label>Status</label><select id="dhruLiveStatus"><option value="">Todos</option><option value="1">Ativos</option><option value="0">Inativos</option></select></div></div>
+  <p class="mini-help">A busca considera nome em português, nome original da API, categoria, UUID e tipo.</p>
+  <div id="dhruLiveInfo" class="muted">Digite para pesquisar.</div><div id="dhruLiveResults"></div></div>
+  <script>
+  (function(){
+    var q=document.getElementById('dhruLiveQ'), tipo=document.getElementById('dhruLiveTipo'), status=document.getElementById('dhruLiveStatus');
+    var out=document.getElementById('dhruLiveResults'), info=document.getElementById('dhruLiveInfo'), timer=0, seq=0;
+    function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+    function renderItem(x){
+      var modoAuto=x.modo==='AUTO'?' selected':''; var modoManual=x.modo==='MANUAL'?' selected':'';
+      var ativo1=x.ativo?' selected':''; var ativo0=!x.ativo?' selected':'';
+      return '<div class="card">'+
+        '<h3>'+esc(x.nome_pt)+'</h3><p class="muted">API: '+esc(x.nome_original)+'</p>'+
+        '<p><b>Tipo:</b> '+esc(x.tipo_label)+' &nbsp; <b>Status:</b> '+(x.ativo?'✅ Ativo':'⛔ Inativo')+'<br><b>Categoria:</b> '+esc(x.categoria_pt)+'<br><b>Custo:</b> '+esc(x.currency)+' '+Number(x.custo||0).toFixed(2)+' &nbsp; <b>Venda:</b> R$ '+Number(x.preco||0).toFixed(2).replace('.',',')+'</p>'+
+        '<form method="post" action="/admin/dhru/buscar/salvar/'+encodeURIComponent(x.catalogo_id)+'">'+
+        '<label>Nome no WhatsApp</label><input name="nome_exibicao" value="'+esc(x.nome_pt)+'">'+
+        '<div class="grid"><div><label>Modo de preço</label><select name="modo"><option value="AUTO"'+modoAuto+'>% Automático</option><option value="MANUAL"'+modoManual+'>Preço manual</option></select></div>'+
+        '<div><label>Margem própria %</label><input name="margem" value="'+esc(x.margem)+'" placeholder="Usar categoria"></div>'+
+        '<div><label>Preço manual R$</label><input name="preco_manual" value="'+Number(x.manual||0).toFixed(2)+'"></div>'+
+        '<div><label>Status</label><select name="ativo"><option value="1"'+ativo1+'>Ativo</option><option value="0"'+ativo0+'>Inativo</option></select></div></div>'+
+        '<button class="btn green">💾 Salvar serviço</button> <a class="btn gray" href="/admin/dhru?tipo='+encodeURIComponent(x.service_type)+'&cat='+encodeURIComponent(x.categoria_original)+'">Abrir categoria</a></form></div>';
+    }
+    function runSearch(){
+      clearTimeout(timer); timer=setTimeout(async function(){
+        var my=++seq; var p=new URLSearchParams({q:q.value,tipo:tipo.value,status:status.value}); info.textContent='Buscando...';
+        try{var r=await fetch('/admin/dhru/buscar-json?'+p.toString()); var d=await r.json(); if(my!==seq)return; if(!d.ok)throw new Error(d.error||'Falha');
+          info.textContent=d.total+' resultado(s)'+(d.limitado?' — mostrando os primeiros '+d.items.length:'');
+          out.innerHTML=d.items.map(renderItem).join('')||'<div class="card empty">Nenhum serviço encontrado.</div>';
+        }catch(e){info.textContent='Erro: '+e.message;out.innerHTML='';}
+      },120);
+    }
+    q.addEventListener('input',runSearch); tipo.addEventListener('change',runSearch); status.addEventListener('change',runSearch); runSearch();
+  })();
+  </script>`;
+  res.send(page('Buscar serviços API',content));
+});
+app.get('/admin/dhru/buscar-json',async(req,res)=>{try{const q=String(req.query.q||'').trim().toLowerCase();const tipo=String(req.query.tipo||'').trim().toUpperCase();const status=String(req.query.status??'').trim();const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo,s.api_price_mode,s.api_margin_pct,s.api_manual_price,s.nome_exibicao FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE s.api_provider='DHRU' ORDER BY COALESCE(NULLIF(s.nome_exibicao,''),d.nome) COLLATE NOCASE`);const nomesCatRows=await all(`SELECT category,display_name FROM dhru_category_display`);const nomesCat=new Map(nomesCatRows.map(x=>[String(x.category||''),String(x.display_name||'')]));const encontrados=[];for(const r of rows){if(tipo&&String(r.service_type||'IMEI_SERVICE').toUpperCase()!==tipo)continue;if(status!==''&&Number(r.ativo)!==Number(status))continue;let cats=[];try{cats=JSON.parse(r.categorias_json||'[]')}catch(_){};if(!Array.isArray(cats)||!cats.length)cats=[String(r.categoria||'Sem categoria')];const nomePt=String(r.nome_exibicao||'').trim()||dhruNomeServicoPt(r.nome);const catsPt=cats.map(c=>nomesCat.get(String(c))||categoriaWhatsAppPt(c,'DHRU'));const hay=[r.nome,nomePt,r.product_uuid,r.service_type,...cats,...catsPt].join(' ').toLowerCase();if(q&&!hay.includes(q))continue;const cat0=cats[0]||'Sem categoria';encontrados.push({catalogo_id:r.catalogo_id,nome_pt:nomePt,nome_original:r.nome,product_uuid:r.product_uuid,service_type:String(r.service_type||'IMEI_SERVICE'),tipo_label:dhruServiceTypeMeta(r.service_type||'IMEI_SERVICE').label,categoria_original:cat0,categoria_pt:catsPt.join(' / '),custo:Number(r.custo||0),currency:r.currency||'',preco:Number(r.preco_padrao||0),ativo:Number(r.ativo)===1,modo:String(r.api_price_mode||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL',margem:r.api_margin_pct===null||r.api_margin_pct===undefined?'':Number(r.api_margin_pct),manual:r.api_manual_price===null||r.api_manual_price===undefined?Number(r.preco_padrao||0):Number(r.api_manual_price)});}
+  const total=encontrados.length,items=encontrados.slice(0,100);res.json({ok:true,total,limitado:total>items.length,items});}catch(e){res.status(500).json({ok:false,error:e.message});}});
+app.post('/admin/dhru/buscar/salvar/:id',async(req,res)=>{try{const id=Number(req.params.id);const ativo=String(req.body.ativo||'0')==='1'?1:0;const modo=String(req.body.modo||'MANUAL').toUpperCase()==='AUTO'?'AUTO':'MANUAL';const manual=Math.max(0,Number(String(req.body.preco_manual||'0').replace(',','.'))||0);const margemTxt=String(req.body.margem??'').trim().replace(',','.');const margem=margemTxt===''?null:Math.max(0,Number(margemTxt)||0);const nomeExibicao=String(req.body.nome_exibicao||'').trim().slice(0,180);await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=?,nome_exibicao=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,nomeExibicao,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação.');}res.redirect('/admin/dhru/buscar');}catch(e){res.redirect('/admin/dhru/buscar?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/dhru/limpar-api',async(req,res)=>{try{if(String(req.body.confirmacao||'').trim().toUpperCase()!=='APAGAR API')throw new Error('Confirmação inválida. Digite APAGAR API.');const r=await limparCatalogoApis();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Limpeza concluída: ${r.removidos} serviço(s) importado(s) removido(s). Agora sincronize novamente.`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
+
 app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','api/reseller/v1');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
 app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
