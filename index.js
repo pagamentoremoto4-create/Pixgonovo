@@ -1431,7 +1431,34 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'ultimo_acesso', 'TEXT');
   await addColumnIfMissing('revendas', 'bot_ativo', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('revendas', 'perfil_bot', "TEXT DEFAULT 'NORMAL'");
+  await addColumnIfMissing('revendas', 'senha_hash_web', 'TEXT');
   await run("UPDATE revendas SET perfil_bot='NORMAL' WHERE perfil_bot IS NULL OR TRIM(perfil_bot)='' OR UPPER(TRIM(perfil_bot))='VIP'");
+
+  // V170 — acesso do cliente pelo site usando a mesma conta cadastrada no bot.
+  await run(`CREATE TABLE IF NOT EXISTS cliente_codigos_acesso (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    revenda_id INTEGER NOT NULL,
+    canal TEXT NOT NULL,
+    codigo_hash TEXT NOT NULL,
+    expira_em INTEGER NOT NULL,
+    tentativas INTEGER DEFAULT 0,
+    usado INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_cliente_codigos_revenda
+    ON cliente_codigos_acesso(revenda_id, canal, usado, expira_em)`);
+  await run(`CREATE TABLE IF NOT EXISTS cliente_sessoes_web (
+    token_hash TEXT PRIMARY KEY,
+    revenda_id INTEGER NOT NULL,
+    csrf_token TEXT NOT NULL,
+    expira_em INTEGER NOT NULL,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    ultimo_acesso TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_cliente_sessoes_revenda
+    ON cliente_sessoes_web(revenda_id, expira_em)`);
+  await run('DELETE FROM cliente_codigos_acesso WHERE usado=1 OR expira_em < ?', [Date.now()]);
+  await run('DELETE FROM cliente_sessoes_web WHERE expira_em < ?', [Date.now()]);
 
   await run(`CREATE TABLE IF NOT EXISTS whatsapp_vinculos (
     codigo TEXT PRIMARY KEY,
@@ -2055,57 +2082,64 @@ function getClienteToken(req) {
   const m = cookie.match(/(?:^|; )cliente_token=([^;]+)/);
   return m ? decodeURIComponent(m[1]) : '';
 }
+function clienteSegredo(finalidade='sessao') {
+  return crypto.createHash('sha256').update(String(ADMIN_PANEL_PASS || 'centralunlocker') + `|cliente-web-v170|${finalidade}`).digest();
+}
+function clienteHash(valor, finalidade='sessao') {
+  return crypto.createHmac('sha256', clienteSegredo(finalidade)).update(String(valor || '')).digest('hex');
+}
+function hashSenhaCliente(senha, saltExistente='') {
+  const salt = saltExistente || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(senha || ''), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+function validarSenhaCliente(senha, salvo) {
+  try {
+    const [salt, hashHex] = String(salvo || '').split(':');
+    if (!salt || !hashHex) return false;
+    const atual = crypto.scryptSync(String(senha || ''), salt, 64);
+    const esperado = Buffer.from(hashHex, 'hex');
+    return esperado.length === atual.length && crypto.timingSafeEqual(esperado, atual);
+  } catch (_) { return false; }
+}
+function clienteCookieSeguro(req) {
+  return req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+}
+async function criarSessaoClienteWeb(req, res, revendaId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = clienteHash(token, 'sessao');
+  const csrf = crypto.randomBytes(24).toString('hex');
+  const expira = Date.now() + (7 * 24 * 60 * 60 * 1000);
+  await run('DELETE FROM cliente_sessoes_web WHERE expira_em < ? OR revenda_id=?', [Date.now(), revendaId]);
+  await run('INSERT INTO cliente_sessoes_web(token_hash,revenda_id,csrf_token,expira_em) VALUES(?,?,?,?)', [tokenHash, revendaId, csrf, expira]);
+  const secure = clienteCookieSeguro(req) ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `cliente_token=${encodeURIComponent(token)}; Path=/cliente; HttpOnly; SameSite=Lax; Max-Age=${7*24*60*60}${secure}`);
+  return csrf;
+}
 async function clienteAuth(req, res, next) {
   const token = getClienteToken(req);
-  const id = clienteSessoes.get(token);
-  if (!id) return res.redirect('/cliente');
-  const cliente = await get('SELECT * FROM revendas WHERE id=? AND status != "BLOQUEADA"', [id]);
+  if (!token) return res.redirect('/cliente?erro='+encodeURIComponent('Entre para continuar.'));
+  const sessao = await get('SELECT * FROM cliente_sessoes_web WHERE token_hash=? AND expira_em>?', [clienteHash(token, 'sessao'), Date.now()]);
+  if (!sessao) return res.redirect('/cliente?erro='+encodeURIComponent('Sua sessão expirou. Entre novamente.'));
+  const cliente = await get(`SELECT * FROM revendas WHERE id=? AND status='ATIVA' AND COALESCE(bot_ativo,0)=1`, [sessao.revenda_id]);
   if (!cliente) return res.redirect('/cliente?sair=1');
+  await run('UPDATE cliente_sessoes_web SET ultimo_acesso=CURRENT_TIMESTAMP WHERE token_hash=?', [sessao.token_hash]);
   req.cliente = cliente;
+  req.clienteSessao = sessao;
+  req.clienteCsrf = sessao.csrf_token;
+  next();
+}
+function clienteCsrf(req, res, next) {
+  const recebido = String(req.body?._csrf || req.headers['x-csrf-token'] || '');
+  const esperado = String(req.clienteCsrf || '');
+  const a = Buffer.from(recebido); const b = Buffer.from(esperado);
+  if (!recebido || a.length !== b.length || !crypto.timingSafeEqual(a,b)) return res.status(403).send(clientePage('Acesso negado', '<div class="cu-card"><h1>Solicitação expirada</h1><p>Atualize a página e tente novamente.</p><a class="cu-btn" href="/cliente/dashboard">Voltar</a></div>', req.cliente));
   next();
 }
 function clientePage(title, body, cliente=null) {
-  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
-  body{margin:0;background:#020617;color:#e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:14px}.wrap{max-width:1100px;margin:0 auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}.brand{font-weight:900;color:#00ff66;font-size:19px}.card{background:#07111f;border:1px solid rgba(255,255,255,.1);border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 8px 28px rgba(0,0,0,.3)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.btn{display:inline-block;background:#111827;color:white;border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:9px 12px;text-decoration:none;font-weight:800;cursor:pointer}.btn.green{background:linear-gradient(135deg,#00ff66,#28d7ff);color:#020617}.btn.red{background:#7f1d1d}input,select,textarea{width:100%;box-sizing:border-box;border-radius:12px;background:#020617;color:#fff;border:1px solid rgba(255,255,255,.15);padding:12px;margin:6px 0 12px}table{width:100%;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left}.pill{padding:5px 9px;border-radius:999px;background:#0f172a;border:1px solid rgba(255,255,255,.12)}.muted{color:#94a3b8}.menu{display:flex;gap:8px;flex-wrap:wrap}.hero{background:radial-gradient(circle at top right,#064e3b,transparent 30%),linear-gradient(135deg,#06111f,#020617);border:1px solid rgba(0,255,102,.25);border-radius:22px;padding:22px}h1,h2{margin-top:0}.imei-list{display:grid;gap:10px;margin:8px 0 12px}.imei-row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:center}.imei-label{color:#94a3b8;font-weight:800;font-size:12px}.imei-field{width:15ch!important;max-width:100%;font-family:Consolas,monospace;font-size:20px;letter-spacing:2px;text-align:center;padding:11px 10px!important;border-radius:10px!important}.imei-field.ok{border-color:#22c55e!important;box-shadow:0 0 0 3px rgba(34,197,94,.12)}.imei-field.bad{border-color:#ef4444!important}.imei-help{font-size:12px;color:#94a3b8;margin-top:-6px;margin-bottom:12px}.mini-btn{background:#111827;color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:9px 12px;font-weight:800;cursor:pointer}.imei-textarea{font-family:Consolas,monospace;font-size:18px;line-height:1.7;letter-spacing:1px;resize:vertical;min-height:170px}.imei-counter{font-size:12px;color:#94a3b8;margin-top:-6px;margin-bottom:8px}.imei-textarea.ok{border-color:#22c55e!important;box-shadow:0 0 0 3px rgba(34,197,94,.12)}.imei-textarea.bad{border-color:#ef4444!important}@media(max-width:700px){.top{display:block}.menu .btn{display:block;width:100%;box-sizing:border-box;margin:6px 0}table{font-size:13px;display:block;overflow-x:auto}.imei-field{font-size:18px}}
-  </style><script>
-  function limparImeiTexto(el){
-    let linhas = String(el.value || '').split(/\r?\n/);
-    let limpas = [];
-    for (const linha of linhas) {
-      const nums = String(linha || '').replace(/\D/g, '').slice(0, 15);
-      if (nums || limpas.length) limpas.push(nums);
-      if (limpas.length >= 5) break;
-    }
-    // Evita criar muitas linhas vazias, mas mantém a digitação natural.
-    el.value = limpas.join('\n');
-    atualizarContadorImeis(el);
-  }
-  function atualizarContadorImeis(el){
-    if(!el) return;
-    const form = el.closest('form');
-    const linhas = String(el.value || '').split(/\r?\n/).map(x => x.replace(/\D/g,'')).filter(Boolean);
-    const counter = form ? form.querySelector('.imei-counter') : null;
-    const validos = linhas.filter(x => x.length === 15).length;
-    if(counter) counter.textContent = 'IMEIs: '+linhas.length+'/5 · válidos: '+validos;
-    el.classList.remove('ok','bad');
-    if(linhas.length && linhas.every(x => x.length === 15)) el.classList.add('ok');
-    else if(linhas.length) el.classList.add('bad');
-  }
-  function validarFormularioImei(form){
-    const campo = form.querySelector('.imei-textarea');
-    if(!campo) return true;
-    limparImeiTexto(campo);
-    const valores = String(campo.value || '').split(/\r?\n/).map(x => x.replace(/\D/g,'')).filter(Boolean);
-    if(valores.length < 1){ alert('Digite pelo menos 1 IMEI.'); return false; }
-    if(valores.length > 5){ alert('Limite máximo de 5 IMEIs.'); return false; }
-    const repetidos = valores.filter((v,i,a)=>a.indexOf(v)!==i);
-    if(repetidos.length){ alert('Não envie IMEI repetido no mesmo pedido: '+repetidos[0]); return false; }
-    const ruim = valores.find(v => v.length !== 15);
-    if(ruim){ alert('Cada linha precisa ter exatamente 15 números. Corrija: '+ruim); return false; }
-    campo.value = valores.join('\n');
-    return true;
-  }
-  </script></head><body><div class="wrap"><div class="top"><div class="brand">CentralUnlocker</div>${cliente?`<div class="menu"><a class="btn" href="/cliente/dashboard">🏠 Início</a><a class="btn" href="/cliente/servicos">1️⃣ Serviços</a><a class="btn" href="/cliente/esim">2️⃣ Comprar eSIM</a><a class="btn" href="/cliente/historico">3️⃣ Histórico</a><a class="btn" href="/cliente/conta">4️⃣ Conta</a><a class="btn green" href="/cliente/pagamentos">💳 Pagar</a><a class="btn red" href="/cliente/logout">Sair</a></div>`:''}</div>${body}</div></body></html>`;
+  const nav = cliente ? `<aside class="cu-sidebar" id="cuSidebar"><a class="cu-brand" href="/cliente/dashboard"><span>⌾</span><b>Central<em>Unlocker</em></b></a><nav><a href="/cliente/dashboard">⌂ <span>Início</span></a><a href="/cliente/servicos">◇ <span>Serviços</span></a><a href="/cliente/esim">▣ <span>Comprar eSIM</span></a><a href="/cliente/historico">▤ <span>Histórico</span></a><a href="/cliente/conta">◎ <span>Minha conta</span></a><a href="/cliente/pagamentos">＋ <span>Adicionar saldo</span></a><a href="/cliente/suporte">◉ <span>Suporte</span></a></nav><div class="cu-online"><i></i> Sistema online</div></aside>` : '';
+  const topo = cliente ? `<header class="cu-top"><button type="button" id="cuMenu" aria-label="Abrir menu">☰</button><div><small>CONTA CONECTADA</small><b>${safeHtml(cliente.nome || 'Cliente')}</b></div><div class="cu-balance"><small>Saldo</small><strong>${brl(cliente.saldo || 0)}</strong></div><a href="/cliente/logout">Sair</a></header>` : '';
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#020b12"><title>${safeHtml(title)} · CentralUnlocker</title><link rel="stylesheet" href="/cliente-site.css"></head><body class="${cliente?'cu-authenticated':'cu-login-page'}"><div class="cu-grid-bg" aria-hidden="true"></div>${nav}<div class="cu-main">${topo}<main class="cu-content">${body}</main></div><div class="cu-toast" id="cuToast" role="status" aria-live="polite"></div><script src="/cliente-site.js"></script></body></html>`;
 }
 
 function clienteEntradaHtml(s) {
@@ -8153,12 +8187,119 @@ app.get('/webhook/pixgo', (req, res) => res.status(200).json({ ok: true, webhook
 
 
 // =========================
-// SITE DO CLIENTE REMOVIDO
+// SITE DO CLIENTE — V170
 // =========================
-// O cliente agora solicita tudo pelo Telegram.
-// Mantemos esta rota apenas para evitar 404 e orientar quem tentar acessar.
-app.get('/cliente', (req, res) => {
-  res.send(adminPage('Cliente via Telegram', `<div class="card"><h1>🤖 Atendimento pelo Telegram</h1><p>O painel do cliente foi removido.</p><p>Agora os clientes solicitam serviços, compram eSIM, consultam histórico, veem conta e geram PIX diretamente pelo bot do Telegram.</p><p>Digite <b>/start</b> ou <b>/menu</b> no bot.</p></div>`));
+function clienteRedirect(res, rota, tipo, mensagem) {
+  const q = new URLSearchParams(); q.set(tipo, String(mensagem || ''));
+  return res.redirect(`${rota}?${q.toString()}`);
+}
+function clienteAviso(req) {
+  if (req.query.erro) return `<div class="cu-alert error">${safeHtml(String(req.query.erro).slice(0,300))}</div>`;
+  if (req.query.ok) return `<div class="cu-alert ok">${safeHtml(String(req.query.ok).slice(0,300))}</div>`;
+  return '';
+}
+function clienteDestinoPrincipal(c) {
+  const wa = normalizarNumeroWhatsApp(c?.whatsapp || c?.revenda_numero || '');
+  return wa ? `wa:${wa}` : tgJid(c?.telegram_id);
+}
+async function clientePorNumero(numero) {
+  const vars = variantesNumero(numero);
+  if (!vars.length) return null;
+  const marks = vars.map(()=>'?').join(',');
+  return get(`SELECT * FROM revendas WHERE status='ATIVA' AND COALESCE(bot_ativo,0)=1 AND (whatsapp IN (${marks}) OR REPLACE(REPLACE(REPLACE(COALESCE(whatsapp,''),'+',''),' ',''),'-','') IN (${marks})) ORDER BY id DESC LIMIT 1`, [...vars,...vars]);
+}
+async function criarCodigoCliente(cliente, canal) {
+  const recentes = await get(`SELECT COUNT(*) qtd FROM cliente_codigos_acesso WHERE revenda_id=? AND canal=? AND usado=0 AND criado_em>=datetime('now','-10 minutes')`, [cliente.id, canal]);
+  if (Number(recentes?.qtd || 0) >= 3) return { ok:false, erro:'Aguarde alguns minutos antes de solicitar outro código.' };
+  const codigo = String(crypto.randomInt(100000,1000000));
+  await run('UPDATE cliente_codigos_acesso SET usado=1 WHERE revenda_id=? AND canal=? AND usado=0', [cliente.id, canal]);
+  await run('INSERT INTO cliente_codigos_acesso(revenda_id,canal,codigo_hash,expira_em) VALUES(?,?,?,?)', [cliente.id, canal, clienteHash(codigo,'otp'), Date.now()+300000]);
+  return { ok:true, codigo };
+}
+async function validarCodigoCliente(cliente, canal, codigo) {
+  const row = await get('SELECT * FROM cliente_codigos_acesso WHERE revenda_id=? AND canal=? AND usado=0 ORDER BY id DESC LIMIT 1', [cliente.id, canal]);
+  if (!row || Number(row.expira_em)<Date.now() || Number(row.tentativas)>=5) return false;
+  const recebido=Buffer.from(clienteHash(String(codigo||'').trim(),'otp')); const esperado=Buffer.from(String(row.codigo_hash||''));
+  const valido=recebido.length===esperado.length && crypto.timingSafeEqual(recebido,esperado);
+  await run(`UPDATE cliente_codigos_acesso SET tentativas=tentativas+1, usado=? WHERE id=?`, [valido?1:0,row.id]);
+  return valido;
+}
+function clienteLoginHtml(req) {
+  const canal=String(req.query.canal||'senha').toLowerCase();
+  const numero=safeHtml(String(req.query.numero||''));
+  return `<section class="cu-login"><div class="cu-login-art"><img src="/img/hacker-metalico-site.png" alt="CentralUnlocker"><div class="cu-login-copy"><h1>Central<em>Unlocker</em></h1><p>Serviços de desbloqueio com acompanhamento em tempo real.</p></div></div><div class="cu-login-panel"><div class="cu-login-box"><small class="cu-muted">ÁREA DO CLIENTE</small><h2>Acesse sua conta</h2><p class="cu-muted">Use a mesma conta cadastrada no bot.</p>${clienteAviso(req)}
+  <div class="cu-auth-tabs"><button type="button" data-auth-tab="senha" class="${canal==='senha'?'active':''}">Usuário e senha</button><button type="button" data-auth-tab="whatsapp" class="${canal==='whatsapp'?'active':''}">WhatsApp</button><button type="button" data-auth-tab="telegram" class="${canal==='telegram'?'active':''}">Telegram</button></div>
+  <form id="auth-senha" class="cu-auth-form ${canal==='senha'?'active':''}" method="post" action="/cliente/login/senha"><label>Usuário</label><input name="login" autocomplete="username" required><label>Senha</label><input type="password" name="senha" autocomplete="current-password" required><button class="cu-btn primary" style="width:100%;margin-top:15px">Entrar</button></form>
+  ${['whatsapp','telegram'].map(c=>`<form id="auth-${c}" class="cu-auth-form ${canal===c?'active':''}" method="post" action="/cliente/login/${req.query.codigo?'verificar':'codigo'}"><input type="hidden" name="canal" value="${c.toUpperCase()}"><label>Número do WhatsApp cadastrado</label><input name="numero" value="${numero}" inputmode="tel" placeholder="55 + DDD + número" required>${req.query.codigo?'<label>Código de 6 dígitos</label><input name="codigo" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required>':''}<button class="cu-btn primary" style="width:100%;margin-top:15px">${req.query.codigo?'Validar código':'Receber código'}</button></form>`).join('')}
+  <div class="cu-note">O código só é enviado se a conta estiver ativa e autorizada no bot. Ele expira em 5 minutos.</div></div></div></section>`;
+}
+
+app.get('/cliente', async (req,res)=>{
+  if (req.query.erro || req.query.sair) {
+    res.setHeader('Set-Cookie','cliente_token=; Path=/cliente; HttpOnly; SameSite=Lax; Max-Age=0');
+    return res.send(clientePage('Login', clienteLoginHtml(req)));
+  }
+  if (getClienteToken(req)) return clienteAuth(req,res,()=>res.redirect('/cliente/dashboard'));
+  res.send(clientePage('Login', clienteLoginHtml(req)));
+});
+app.post('/cliente/login/senha', async (req,res)=>{
+  const login=String(req.body.login||'').trim().slice(0,80), senha=String(req.body.senha||'');
+  const c=await get(`SELECT * FROM revendas WHERE login=? AND status='ATIVA' AND COALESCE(bot_ativo,0)=1`,[login]);
+  let ok=false;
+  if(c?.senha_hash_web) ok=validarSenhaCliente(senha,c.senha_hash_web);
+  else if(c?.senha){ const a=Buffer.from(senha),b=Buffer.from(String(c.senha));ok=a.length===b.length&&crypto.timingSafeEqual(a,b);if(ok)await run('UPDATE revendas SET senha_hash_web=? WHERE id=?',[hashSenhaCliente(senha),c.id]); }
+  if(!ok) return clienteRedirect(res,'/cliente','erro','Usuário ou senha inválidos, ou conta não autorizada.');
+  await criarSessaoClienteWeb(req,res,c.id); res.redirect('/cliente/dashboard');
+});
+app.post('/cliente/login/codigo', async (req,res)=>{
+  const canal=String(req.body.canal||'').toUpperCase(), numero=String(req.body.numero||'').slice(0,30);
+  if(!['WHATSAPP','TELEGRAM'].includes(canal)) return clienteRedirect(res,'/cliente','erro','Canal inválido.');
+  const c=await clientePorNumero(numero); let enviado=false;
+  if(c && (canal!=='TELEGRAM'||c.telegram_id)) {
+    const gerado=await criarCodigoCliente(c,canal);
+    if(!gerado.ok) return res.redirect(`/cliente?canal=${canal.toLowerCase()}&erro=${encodeURIComponent(gerado.erro)}`);
+    const destino=canal==='WHATSAPP'?`wa:${normalizarNumeroWhatsApp(c.whatsapp)}`:tgJid(c.telegram_id);
+    try{await enviarTexto(destino,`🔐 *Código de acesso — CentralUnlocker*\n\nSeu código é: *${gerado.codigo}*\n\nVálido por 5 minutos. Não compartilhe este código.`);enviado=true;}catch(_){await run('UPDATE cliente_codigos_acesso SET usado=1 WHERE revenda_id=? AND canal=?',[c.id,canal]);}
+  }
+  if(c&&!enviado) return clienteRedirect(res,'/cliente','erro','Não foi possível enviar o código agora. Verifique se o bot está conectado.');
+  const q=new URLSearchParams({canal:canal.toLowerCase(),numero,codigo:'1',ok:'Se a conta estiver autorizada, o código foi enviado.'});res.redirect('/cliente?'+q.toString());
+});
+app.post('/cliente/login/verificar', async (req,res)=>{
+  const canal=String(req.body.canal||'').toUpperCase(), c=await clientePorNumero(req.body.numero);
+  if(!c||!await validarCodigoCliente(c,canal,req.body.codigo)) return clienteRedirect(res,`/cliente?canal=${canal.toLowerCase()}&numero=${encodeURIComponent(String(req.body.numero||''))}&codigo=1`,'erro','Código inválido ou expirado.');
+  await criarSessaoClienteWeb(req,res,c.id);res.redirect('/cliente/dashboard');
+});
+app.get('/cliente/logout', async (req,res)=>{const t=getClienteToken(req);if(t)await run('DELETE FROM cliente_sessoes_web WHERE token_hash=?',[clienteHash(t,'sessao')]);res.setHeader('Set-Cookie','cliente_token=; Path=/cliente; HttpOnly; SameSite=Lax; Max-Age=0');res.redirect('/cliente');});
+
+app.get('/cliente/dashboard', clienteAuth, async (req,res)=>{
+  const rows=await all('SELECT UPPER(status) status,COUNT(*) qtd FROM pedidos WHERE revenda_id=? GROUP BY UPPER(status)',[req.cliente.id]);const n={TOTAL:0,PENDENTE:0,'EM PROCESSO':0,FINALIZADO:0};for(const x of rows){n.TOTAL+=Number(x.qtd||0);if(n[x.status]!==undefined)n[x.status]=Number(x.qtd||0)}
+  const ultimos=await all('SELECT * FROM pedidos WHERE revenda_id=? ORDER BY id DESC LIMIT 6',[req.cliente.id]);
+  const linhas=ultimos.map(p=>`<tr><td>#${p.id}</td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-badge ${String(p.status||'').replace(/ /g,'-')}">${safeHtml(p.status)}</span></td><td>${dateBR(p.criado_em)}</td></tr>`).join('')||'<tr><td colspan="4" class="cu-empty">Nenhum pedido ainda.</td></tr>';
+  res.send(clientePage('Início',`<div class="cu-card cu-hero"><div><small class="cu-muted">CENTRAL DE SERVIÇOS</small><h1>Olá, <b>${safeHtml(req.cliente.nome)}</b></h1><p>Acompanhe seus pedidos e solicite novos serviços no mesmo sistema usado pelos bots.</p><div class="cu-actions" style="margin-top:16px"><a class="cu-btn primary" href="/cliente/servicos">Novo serviço</a><a class="cu-btn" href="/cliente/historico">Ver histórico</a></div></div><div><small class="cu-muted">SALDO DISPONÍVEL</small><h1 style="color:var(--green)">${brl(req.cliente.saldo||0)}</h1></div></div><div class="cu-grid"><div class="cu-card cu-stat"><span>Total</span><strong>${n.TOTAL}</strong></div><div class="cu-card cu-stat"><span>Pendentes</span><strong>${n.PENDENTE}</strong></div><div class="cu-card cu-stat"><span>Em processo</span><strong>${n['EM PROCESSO']}</strong></div><div class="cu-card cu-stat green"><span>Finalizados</span><strong>${n.FINALIZADO}</strong></div></div><div class="cu-card"><h2>Últimos pedidos</h2><div class="cu-table-wrap"><table class="cu-table"><tr><th>ID</th><th>Serviço</th><th>Status</th><th>Data</th></tr>${linhas}</table></div></div>`,req.cliente));
+});
+
+app.get('/cliente/servicos', clienteAuth, async (req,res)=>{
+  const ss=await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY categoria,nome');for(const s of ss)s.preco=await precoDaRevenda(req.cliente.id,s.id);
+  const cards=ss.map(s=>`<article class="cu-card cu-service"><small class="cu-muted">${safeHtml(s.categoria||'SERVIÇO')}</small><h3>${safeHtml(s.nome_exibicao||s.nome)}</h3><p class="cu-muted">${safeHtml(s.descricao||'Consulte o prazo e envie os dados para análise.')}</p><p>${safeHtml(s.prazo?`Prazo: ${s.prazo}`:'')}</p><div class="cu-service-price">${brl(s.preco)}</div><a class="cu-btn primary" href="/cliente/servico/${s.id}">Solicitar</a></article>`).join('')||'<div class="cu-card cu-empty">Nenhum serviço disponível.</div>';
+  res.send(clientePage('Serviços',`<h1>Serviços disponíveis</h1><p class="cu-muted">Os preços e modalidades são os mesmos configurados para sua conta no bot.</p><div class="cu-services">${cards}</div>`,req.cliente));
+});
+app.get('/cliente/servico/:id', clienteAuth, async (req,res)=>{
+  const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);if(!s)return clienteRedirect(res,'/cliente/servicos','erro','Serviço indisponível.');const preco=await precoDaRevenda(req.cliente.id,s.id);
+  res.send(clientePage(s.nome,`<a href="/cliente/servicos">← Voltar</a><div class="cu-card"><small class="cu-muted">${safeHtml(s.categoria||'SERVIÇO')}</small><h1>${safeHtml(s.nome_exibicao||s.nome)}</h1>${clienteAviso(req)}<p>${safeHtml(s.descricao||'')}</p><h2 style="color:var(--green)">${brl(preco)} <small class="cu-muted">por item</small></h2><form method="post" action="/cliente/servico/${s.id}"><input type="hidden" name="_csrf" value="${req.clienteCsrf}">${clienteEntradaHtml(s)}<button class="cu-btn primary" style="margin-top:16px">Confirmar solicitação</button></form></div>`,req.cliente));
+});
+app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
+  const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);if(!s)return clienteRedirect(res,'/cliente/servicos','erro','Serviço indisponível.');
+  const val=validarEntradaServico(s,req.body.entrada);if(!val.ok)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',val.erro);
+  const preco=await precoDaRevenda(req.cliente.id,s.id), modalidade=await modalidadeServicoRevenda(req.cliente.id,s.id), total=preco*val.entradas.length, atual=await get('SELECT * FROM revendas WHERE id=?',[req.cliente.id]);
+  if(modalidade==='PRE_PAGO'&&Number(atual.saldo||0)<total)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',`Saldo insuficiente. Necessário: ${brl(total)}.`);
+  const destino=clienteDestinoPrincipal(atual), tipo=normalizarTipoEntrada(s.tipo_entrada), lote=val.entradas.length>1?`SITE-${Date.now()}`:null, criados=[], duplicados=[];
+  for(const entrada of val.entradas){if(tipo==='IMEI'&&await get('SELECT id FROM pedidos WHERE imei=? AND servico_id=? AND status IN ("PENDENTE","EM PROCESSO")',[entrada,s.id])){duplicados.push(entrada);continue;}const ins=await run(`INSERT INTO pedidos (tipo,revenda_id,revenda_nome,revenda_jid,revenda_numero,servico_id,servico_nome,imei,entrada_valor,tipo_entrada,entrada_label,lote_id,valor,status,cobrado) VALUES ('REVENDA',?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE',?)`,[atual.id,atual.nome,destino,normalizarNumeroWhatsApp(atual.whatsapp),s.id,s.nome,tipo==='IMEI'?entrada:null,entrada,tipo,labelEntradaServico(s),lote,preco,modalidade==='PRE_PAGO'?1:0]);criados.push({id:ins.lastID,entrada});}
+  if(modalidade==='PRE_PAGO'&&criados.length)await run('UPDATE revendas SET saldo=MAX(0,saldo-?),atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[preco*criados.length,atual.id]);
+  if(!criados.length)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro','Nenhum pedido novo foi criado; os itens já estão em andamento.');
+  notificarPainel('pedido','🌐 Novo pedido pelo site',`${atual.nome} - ${s.nome}`);if(criados.length===1)await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?',[criados[0].id]));else await avisarNovoLoteAdmins(atual,s,criados.length,preco*criados.length);
+  await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}`,destino);
+  if(s.api_provider==='DHRU')for(const p of criados){try{await executarPedidoDhru(p.id)}catch(e){console.log('❌ DHRU site',p.id,e.message)}}
+  clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.`);
 });
 
 app.post('/webhook/mercadopago', async (req, res) => {
@@ -8170,6 +8311,45 @@ app.post('/webhook/mercadopago', async (req, res) => {
     if (p && p.status !== 'completed') verificarPagamento(paymentId, p.revenda_id, p.cliente_jid || p.revenda_jid, p.valor, p.tipo_pagamento || 'SALDO', p.contexto_json, 'mercadopago');
   } catch (e) { console.log('⚠️ WEBHOOK MERCADO PAGO:', e.message); }
 });
+
+app.get('/cliente/esim', clienteAuth, async (req,res)=>{
+  const planos=await planosEsimDisponiveis(req.cliente.id);
+  const cards=planos.map(p=>`<article class="cu-card cu-service"><small class="cu-muted">eSIM DIGITAL · ${Number(p.qtd||0)} em estoque</small><h3>${safeHtml(p.nome_plano)}</h3><div class="cu-service-price">${brl(p.preco_revenda)}</div><form method="post" action="/cliente/esim/${p.id}"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><label>Aparelho</label><select name="dispositivo"><option value="IPHONE">iPhone</option><option value="ANDROID">Android</option></select><button class="cu-btn primary" style="width:100%;margin-top:12px">Comprar eSIM</button></form></article>`).join('')||'<div class="cu-card cu-empty">Nenhum plano disponível agora.</div>';
+  res.send(clientePage('Comprar eSIM',`<h1>Comprar eSIM</h1>${clienteAviso(req)}<p class="cu-muted">A entrega usa o mesmo estoque e os mesmos avisos do bot.</p><div class="cu-services">${cards}</div>`,req.cliente));
+});
+app.post('/cliente/esim/:id', clienteAuth, clienteCsrf, async (req,res)=>{
+  const planos=await planosEsimDisponiveis(req.cliente.id), plano=planos.find(x=>Number(x.id)===Number(req.params.id));
+  if(!plano)return clienteRedirect(res,'/cliente/esim','erro','Plano indisponível.');
+  const dispositivo=['IPHONE','ANDROID'].includes(String(req.body.dispositivo||'').toUpperCase())?String(req.body.dispositivo).toUpperCase():'ANDROID';
+  try{await entregarEsimRevenda(clienteDestinoPrincipal(req.cliente),req.cliente,plano,dispositivo);clienteRedirect(res,'/cliente/historico','ok','Solicitação de eSIM processada. Confira o histórico e suas mensagens.');}catch(e){console.log('❌ eSIM site:',e.message);clienteRedirect(res,'/cliente/esim','erro','Não foi possível concluir agora. Nenhum novo pedido deve ser reenviado sem conferir o histórico.');}
+});
+
+app.get('/cliente/historico', clienteAuth, async (req,res)=>{
+  const filtros=v158FiltrosHistorico(req), base=v158WhereHistoricoCliente(req.cliente.id,filtros);
+  const pedidos=await all(`SELECT p.*,COALESCE((SELECT cancelamento_permitido FROM servicos_catalogo s WHERE s.id=p.servico_id),0) cancelamento_permitido FROM pedidos p WHERE ${base.sql} ORDER BY p.id DESC LIMIT 1000`,base.params);
+  const cr=await all('SELECT UPPER(status) status,COUNT(*) qtd FROM pedidos WHERE revenda_id=? GROUP BY UPPER(status)',[req.cliente.id]);const cont={TODOS:0,PENDENTE:0,'EM PROCESSO':0,FINALIZADO:0,CANCELADO:0};for(const x of cr){cont.TODOS+=Number(x.qtd||0);if(cont[x.status]!==undefined)cont[x.status]=Number(x.qtd||0)}
+  const baseQ=new URLSearchParams();if(filtros.busca)baseQ.set('busca',filtros.busca);if(filtros.periodo&&filtros.periodo!=='todos')baseQ.set('periodo',filtros.periodo);const href=st=>{const q=new URLSearchParams(baseQ);if(st)q.set('status',st);return '/cliente/historico?'+q.toString()};
+  const tabs=[['','Todos'],['PENDENTE','Pendentes'],['EM PROCESSO','Em processo'],['FINALIZADO','Finalizados'],['CANCELADO','Cancelados']].map(([st,n])=>`<a class="cu-tab ${(filtros.status||'')===st?'active':''}" href="${href(st)}">${n} (${cont[st||'TODOS']})</a>`).join('');
+  const linhas=pedidos.map(p=>{const valor=safeHtml(p.imei||p.entrada_valor||'-'),st=String(p.status||'').toUpperCase(),cancel=st==='PENDENTE'&&Number(p.cancelamento_permitido)?`<form method="post" action="/cliente/pedido/${p.id}/cancelar" style="display:inline"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><button class="cu-btn danger small" data-confirm="Deseja cancelar o pedido #${p.id}?">Cancelar</button></form>`:'';return `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-code">${valor}</span></td><td>${brl(p.valor||0)}</td><td><span class="cu-badge ${st.replace(/ /g,'-')}">${safeHtml(st)}</span></td><td>${dateBR(p.criado_em)}</td><td><a class="cu-btn small" href="/cliente/pedido/${p.id}/resultado">Baixar</a> ${cancel}</td></tr>`}).join('')||'<tr><td colspan="7" class="cu-empty">Nenhum pedido encontrado.</td></tr>';
+  const exportQ=new URLSearchParams(req.query);exportQ.delete('formato');const copiar=pedidos.map(p=>String(p.imei||p.entrada_valor||'').trim()).filter(Boolean).join('\n');
+  res.send(clientePage('Histórico',`<h1>Histórico de pedidos</h1>${clienteAviso(req)}<div class="cu-tabs">${tabs}</div><div class="cu-card"><form class="cu-filter"><div><label>Buscar pedido, IMEI ou serviço</label><input name="busca" value="${safeHtml(filtros.busca)}"></div><div><label>Período</label><select name="periodo"><option value="todos">Todos</option><option value="hoje" ${filtros.periodo==='hoje'?'selected':''}>Hoje</option><option value="7" ${filtros.periodo==='7'?'selected':''}>7 dias</option><option value="30" ${filtros.periodo==='30'?'selected':''}>30 dias</option></select></div>${filtros.status?`<input type="hidden" name="status" value="${safeHtml(filtros.status)}">`:''}<button class="cu-btn primary">Filtrar</button></form><div class="cu-actions" style="margin-top:14px"><button type="button" class="cu-btn" data-copy="#cuImeis">Copiar IMEIs</button><a class="cu-btn" href="/cliente/historico/export?formato=txt&${exportQ}">Baixar TXT</a><a class="cu-btn" href="/cliente/historico/export?formato=csv&${exportQ}">Baixar CSV</a></div><textarea id="cuImeis" hidden>${safeHtml(copiar)}</textarea></div><div class="cu-card cu-table-wrap"><table class="cu-table"><tr><th>ID</th><th>Serviço</th><th>IMEI/entrada</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>${linhas}</table></div>`,req.cliente));
+});
+app.get('/cliente/historico/export', clienteAuth, async (req,res)=>{
+  const f=v158FiltrosHistorico(req),base=v158WhereHistoricoCliente(req.cliente.id,f),ps=await all(`SELECT id,servico_nome,imei,entrada_valor,valor,status,criado_em FROM pedidos WHERE ${base.sql} ORDER BY id`,base.params),formato=String(req.query.formato||'txt').toLowerCase();
+  res.setHeader('Content-Disposition',`attachment; filename="historico-centralunlocker.${formato==='csv'?'csv':'txt'}"`);
+  if(formato==='csv'){res.type('text/csv');return res.send('\ufeff'+['ID,Servico,IMEI_Entrada,Valor,Status,Data',...ps.map(p=>[p.id,p.servico_nome,p.imei||p.entrada_valor,Number(p.valor||0).toFixed(2),p.status,p.criado_em].map(v158CsvCampo).join(','))].join('\r\n'))}res.type('text/plain');res.send(ps.map(p=>p.imei||p.entrada_valor||'').filter(Boolean).join('\n'));
+});
+app.get('/cliente/pedido/:id/resultado', clienteAuth, async (req,res)=>{
+  const p=await get(`SELECT p.*,d.resultado dhru_resultado,d.erro dhru_erro,t.resultado_original tim_resultado FROM pedidos p LEFT JOIN dhru_orders d ON d.pedido_id=p.id LEFT JOIN tim_unlock_dhru_checks t ON t.pedido_id=p.id WHERE p.id=? AND p.revenda_id=?`,[req.params.id,req.cliente.id]);if(!p)return res.status(404).send('Pedido não encontrado.');
+  const txt=[`Pedido #${p.id}`,`Serviço: ${p.servico_nome||'-'}`,`Entrada: ${p.imei||p.entrada_valor||'-'}`,`Status: ${p.status||'-'}`,`Data: ${p.criado_em||'-'}`,`Valor: ${brl(p.valor||0)}`,p.dhru_resultado||p.tim_resultado||p.dhru_erro?'':null,p.dhru_resultado||p.tim_resultado||p.dhru_erro||'Resultado ainda não disponível.'].filter(x=>x!==null).join('\n');res.type('text/plain');res.setHeader('Content-Disposition',`attachment; filename="pedido-${p.id}.txt"`);res.send(txt);
+});
+app.post('/cliente/pedido/:id/cancelar', clienteAuth, clienteCsrf, async (req,res)=>{
+  const p=await get(`SELECT p.*,COALESCE(s.cancelamento_permitido,0) permitido FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=? AND p.revenda_id=?`,[req.params.id,req.cliente.id]);if(!p||p.status!=='PENDENTE'||!Number(p.permitido))return clienteRedirect(res,'/cliente/historico','erro','Este pedido não pode ser cancelado pelo site.');await cancelarPedidoComEstorno(p.id,'Cancelado pelo cliente no site');clienteRedirect(res,'/cliente/historico','ok',`Pedido #${p.id} cancelado.`);
+});
+
+app.get('/cliente/conta', clienteAuth, async (req,res)=>res.send(clientePage('Minha conta',`<h1>Minha conta</h1><div class="cu-grid"><div class="cu-card"><small class="cu-muted">CLIENTE</small><h2>${safeHtml(req.cliente.nome)}</h2><p>Usuário: <b>${safeHtml(req.cliente.login||'-')}</b></p><p>WhatsApp: <b>${safeHtml(req.cliente.whatsapp?`+${req.cliente.whatsapp}`:'Não vinculado')}</b></p><p>Telegram: <b>${safeHtml(req.cliente.telegram_id?'Vinculado':'Não vinculado')}</b></p></div><div class="cu-card"><small class="cu-muted">SALDO</small><h1 style="color:var(--green)">${brl(req.cliente.saldo||0)}</h1><a class="cu-btn primary" href="/cliente/pagamentos">Adicionar saldo</a></div></div>`,req.cliente)));
+app.get('/cliente/pagamentos', clienteAuth, async (req,res)=>res.send(clientePage('Adicionar saldo',`<h1>Adicionar saldo</h1>${clienteAviso(req)}<div class="cu-card"><h2>Pagamento via PIX</h2><p>Para gerar e acompanhar um PIX com segurança, use a opção <b>Adicionar saldo</b> no mesmo bot em que sua conta está cadastrada.</p><p class="cu-muted">O saldo atualizado aparecerá automaticamente aqui e será usado também nos pedidos feitos pelo site.</p><div class="cu-actions"><a class="cu-btn primary" href="/cliente/dashboard">Atualizar saldo</a><a class="cu-btn" href="/cliente/suporte">Preciso de ajuda</a></div></div>`,req.cliente)));
+app.get('/cliente/suporte', clienteAuth, async (req,res)=>{res.send(clientePage('Suporte',`<h1>Suporte</h1><div class="cu-card"><h2>Fale com a CentralUnlocker</h2><p>Abra o bot já vinculado à sua conta e escolha a opção <b>8 — Suporte</b>. Assim a equipe recebe seus dados e o histórico correto.</p><a class="cu-btn primary" href="/cliente/dashboard">Voltar ao início</a></div>`,req.cliente));});
 
 app.get('/cliente/*', (req, res) => res.redirect('/cliente'));
 
