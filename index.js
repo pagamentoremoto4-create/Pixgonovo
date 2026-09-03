@@ -3977,7 +3977,8 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 4️⃣ 📋 *HISTÓRICO*
 5️⃣ 👤 *MINHA CONTA*
 6️⃣ 💰 *ADICIONAR SALDO*
-7️⃣ 💬 *SUPORTE*
+7️⃣ ❌ *CANCELAMENTO*
+8️⃣ 💬 *SUPORTE*
 
 💬 Digite a opção desejada.`;
 }
@@ -4779,6 +4780,17 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
       return;
     }
     if (opcao === '7') {
+      await salvarSessaoPedido(from, { etapa: 'cancelamento_imeis' });
+      await enviarTexto(from, `❌ *Cancelamento*
+
+Envie de 1 até 10 IMEIs.
+
+Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizará somente os IMEIs dos seus próprios pedidos.
+
+0️⃣ ⬅️ Voltar`);
+      return;
+    }
+    if (opcao === '8') {
       await salvarSessaoPedido(from, { etapa: 'suporte_menu' });
       await enviarTexto(from, `💬 *Suporte*\n\nComo podemos ajudar?\n\n1️⃣ Problema com pedido\n2️⃣ Problema com pagamento\n3️⃣ Falar com suporte\n\n0️⃣ ⬅️ Voltar`);
       return;
@@ -6063,7 +6075,7 @@ Para começar, digite:
 🏢 CentralUnlocker`;
 }
 async function mensagemTutorialRevenda() {
-  return `📚 *TUTORIAL RÁPIDO*\n\nDigite:\n\n*menu*\n\nVocê verá:\n\n1️⃣ Blacklist Brazil\n2️⃣ Serviços Online\n3️⃣ Comprar eSIM\n4️⃣ Histórico\n5️⃣ Minha Conta\n6️⃣ Adicionar Saldo\n7️⃣ Suporte\n\n🔹 *Solicitar Blacklist Brazil*\nmenu → 1 Blacklist Brazil → escolha o serviço → envie a informação solicitada\n\n🔹 *Solicitar serviço da API*\nmenu → 2 Serviços Online → escolha a categoria → escolha o serviço → envie IMEI, Lock Code ou a informação solicitada\n\n🔹 *Ver histórico*\nmenu → 4 Histórico\n\n🔹 *Ver conta*\nmenu → 5 Minha Conta\n\n🔹 *Adicionar saldo*\nmenu → 6 Adicionar Saldo\n\n🏢 CentralUnlocker`;
+  return `📚 *TUTORIAL RÁPIDO*\n\nDigite:\n\n*menu*\n\nVocê verá:\n\n1️⃣ Blacklist Brazil\n2️⃣ Serviços Online\n3️⃣ Comprar eSIM\n4️⃣ Histórico\n5️⃣ Minha Conta\n6️⃣ Adicionar Saldo\n7️⃣ Cancelamento\n8️⃣ Suporte\n\n🔹 *Solicitar Blacklist Brazil*\nmenu → 1 Blacklist Brazil → escolha o serviço → envie a informação solicitada\n\n🔹 *Solicitar serviço da API*\nmenu → 2 Serviços Online → escolha a categoria → escolha o serviço → envie IMEI, Lock Code ou a informação solicitada\n\n🔹 *Ver histórico*\nmenu → 4 Histórico\n\n🔹 *Ver conta*\nmenu → 5 Minha Conta\n\n🔹 *Adicionar saldo*\nmenu → 6 Adicionar Saldo\n\n🔹 *Cancelar pedido pendente*\nmenu → 7 Cancelamento → envie de 1 a 10 IMEIs\n\n🏢 CentralUnlocker`;
 }
 function destinoRevenda(revenda) {
   if (!revenda) return '';
