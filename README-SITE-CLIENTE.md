@@ -4,6 +4,8 @@ Esta versão adiciona a área navegável do cliente sem separar os dados dos bot
 
 O visual aprovado do portal — menu lateral, hacker metálico, celular de conexão segura, cartão de login e faixa de acompanhamento — fica embutido no `index.js`, evitando tela sem formatação caso o provedor de hospedagem não publique corretamente os arquivos estáticos.
 
+A imagem aprovada do hacker metálico também está embutida no `index.js` e é entregue pela rota `/cliente-hacker.png`, sem depender da pasta `public` no Render.
+
 ## Acesso
 
 - Usuário e senha já cadastrados na conta do cliente.
