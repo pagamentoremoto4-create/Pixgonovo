@@ -2,6 +2,8 @@
 
 Esta versão adiciona a área navegável do cliente sem separar os dados dos bots.
 
+O visual do login fica embutido no `index.js`, evitando tela sem formatação caso o provedor de hospedagem não publique corretamente os arquivos estáticos.
+
 ## Acesso
 
 - Usuário e senha já cadastrados na conta do cliente.
