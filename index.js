@@ -350,6 +350,147 @@ function caminhoArquivoEsim(arquivoQr) {
   return path.join(ESIM_DIR, path.basename(String(arquivoQr)));
 }
 
+
+// ============================================================
+// ESTOQUE eSIM COMPARTILHADO — Pix Go é a fonte central.
+// Toda configuração operacional fica no próprio painel.
+// ============================================================
+async function sharedEsimSettings(req=null) {
+  const ativo = (await getConfig('shared_esim_ativo', '0')) === '1';
+  const apiKey = String(await getConfig('shared_esim_api_key', '')).trim();
+  const reservationMinutes = Math.max(2, Math.min(120, Number(await getConfig('shared_esim_reservation_minutes', '15')) || 15));
+  const publicUrlCfg = String(await getConfig('shared_esim_public_url', '')).trim().replace(/\/$/, '');
+  const detectedUrl = req ? `${req.protocol}://${req.get('host')}` : '';
+  return { ativo, apiKey, reservationMinutes, publicUrl: publicUrlCfg || BASE_URL || detectedUrl };
+}
+
+async function sharedEsimAuthorized(req) {
+  const cfg = await sharedEsimSettings(req);
+  if (!cfg.ativo || !cfg.apiKey) return false;
+  const supplied = String(req.get('x-shared-esim-key') || req.body?.api_key || req.query?.api_key || '').trim();
+  if (!supplied || supplied.length !== cfg.apiKey.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(cfg.apiKey)); }
+  catch (_) { return false; }
+}
+
+async function liberarReservasEsimExpiradas() {
+  const cfg = await sharedEsimSettings();
+  await run(`UPDATE esim_estoque
+    SET status='DISPONIVEL', reserva_token=NULL, reservado_por=NULL, reservado_em=NULL,
+        shared_source=NULL, shared_order_id=NULL, shared_customer=NULL
+    WHERE status='RESERVADO'
+      AND reservado_em IS NOT NULL
+      AND datetime(reservado_em) <= datetime('now', ?)` , [`-${cfg.reservationMinutes} minutes`]);
+}
+
+async function sharedEsimPublicItem(req, item) {
+  if (!item) return null;
+  const cfg = await sharedEsimSettings(req);
+  const base = cfg.publicUrl || `${req.protocol}://${req.get('host')}`;
+  const arquivo = item.arquivo_qr ? path.basename(String(item.arquivo_qr)) : '';
+  return {
+    id: item.id,
+    plano: item.nome_plano,
+    image_url: arquivo ? `${base}/esim/${encodeURIComponent(arquivo)}` : '',
+    lpa_completo: item.lpa_completo || '',
+    smdp: item.smdp || '',
+    codigo_ativacao: item.codigo_ativacao || '',
+    codigo_confirmacao: item.codigo_confirmacao || ''
+  };
+}
+
+app.get('/api/shared-esim/health', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  const cfg = await sharedEsimSettings(req);
+  res.json({ ok:true, service:'shared-esim', role:'central-stock', reservation_minutes:cfg.reservationMinutes });
+});
+
+app.get('/api/shared-esim/plans', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  try {
+    await liberarReservasEsimExpiradas();
+    const rows = await all(`SELECT p.nome_plano,
+      SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END) disponiveis,
+      SUM(CASE WHEN e.status='RESERVADO' THEN 1 ELSE 0 END) reservados
+      FROM esim_planos p LEFT JOIN esim_estoque e ON TRIM(e.nome_plano)=TRIM(p.nome_plano) COLLATE NOCASE
+      WHERE p.ativo=1 GROUP BY p.nome_plano ORDER BY p.nome_plano ASC`);
+    res.json({ok:true, plans:rows.map(r=>({name:r.nome_plano, available:Number(r.disponiveis||0), reserved:Number(r.reservados||0)}))});
+  } catch(e) { res.status(500).json({ok:false,error:e.message}); }
+});
+
+app.get('/api/shared-esim/stock', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  try {
+    await liberarReservasEsimExpiradas();
+    const plano = String(req.query.plan || '').trim();
+    if (!plano) return res.status(400).json({ ok:false, error:'plan_required' });
+    const row = await get(`SELECT COUNT(*) qtd FROM esim_estoque
+      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE`, [plano]);
+    res.json({ ok:true, plan:plano, available:Number(row?.qtd || 0) });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.post('/api/shared-esim/reserve', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  const plano = String(req.body?.plan || '').trim();
+  const source = String(req.body?.source || 'EXTERNAL').trim().slice(0,80);
+  const orderId = String(req.body?.order_id || '').trim().slice(0,120);
+  const customer = String(req.body?.customer || '').trim().slice(0,180);
+  if (!plano) return res.status(400).json({ ok:false, error:'plan_required' });
+  const token = crypto.randomBytes(24).toString('hex');
+  try {
+    await liberarReservasEsimExpiradas();
+    await run('BEGIN IMMEDIATE');
+    let item = await get(`SELECT * FROM esim_estoque
+      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE
+      ORDER BY id ASC LIMIT 1`, [plano]);
+    if (!item) { await run('ROLLBACK'); return res.status(409).json({ ok:false, error:'out_of_stock' }); }
+    item = await garantirDadosAtivacaoEsim(item);
+    if (!item?.arquivo_qr) { await run('ROLLBACK'); return res.status(422).json({ ok:false, error:'invalid_esim_item' }); }
+    const upd = await run(`UPDATE esim_estoque
+      SET status='RESERVADO', reserva_token=?, reservado_por=?, reservado_em=CURRENT_TIMESTAMP,
+          shared_source=?, shared_order_id=?, shared_customer=?
+      WHERE id=? AND status='DISPONIVEL'`, [token, source, source, orderId, customer, item.id]);
+    if (upd.changes !== 1) { await run('ROLLBACK'); return res.status(409).json({ ok:false, error:'reservation_conflict' }); }
+    await run('COMMIT');
+    const cfg = await sharedEsimSettings(req);
+    res.json({ ok:true, token, item:await sharedEsimPublicItem(req, item), expires_minutes:cfg.reservationMinutes });
+  } catch (e) {
+    try { await run('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+app.post('/api/shared-esim/confirm', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  const token = String(req.body?.token || '').trim();
+  const orderId = String(req.body?.order_id || '').trim().slice(0,120);
+  if (!token) return res.status(400).json({ ok:false, error:'token_required' });
+  try {
+    const row = await get(`SELECT * FROM esim_estoque WHERE reserva_token=? LIMIT 1`, [token]);
+    if (!row) return res.status(404).json({ ok:false, error:'reservation_not_found' });
+    if (row.status === 'VENDIDO') return res.json({ ok:true, already_confirmed:true, id:row.id });
+    if (row.status !== 'RESERVADO') return res.status(409).json({ ok:false, error:'reservation_not_active' });
+    await run(`UPDATE esim_estoque SET status='VENDIDO', vendido_em=CURRENT_TIMESTAMP,
+      shared_order_id=COALESCE(NULLIF(?,''),shared_order_id), reserva_token=NULL
+      WHERE id=? AND status='RESERVADO'`, [orderId, row.id]);
+    res.json({ ok:true, id:row.id });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.post('/api/shared-esim/release', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  const token = String(req.body?.token || '').trim();
+  if (!token) return res.status(400).json({ ok:false, error:'token_required' });
+  try {
+    const upd = await run(`UPDATE esim_estoque
+      SET status='DISPONIVEL', reserva_token=NULL, reservado_por=NULL, reservado_em=NULL,
+          shared_source=NULL, shared_order_id=NULL, shared_customer=NULL
+      WHERE reserva_token=? AND status='RESERVADO'`, [token]);
+    res.json({ ok:true, released:upd.changes === 1 });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
 function normalizarNumeroWhatsApp(v) {
   let d = onlyDigits(v);
   // remove zeros na frente
@@ -1740,6 +1881,13 @@ async function initDB() {
   await addColumnIfMissing('esim_estoque', 'codigo_confirmacao', 'TEXT');
   await addColumnIfMissing('esim_estoque', 'lpa_hash', 'TEXT');
   await addColumnIfMissing('esim_estoque', 'dispositivo_entrega', 'TEXT');
+  // Estoque compartilhado entre os bots (VTEST-SHARED-ESIM).
+  await addColumnIfMissing('esim_estoque', 'reserva_token', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'reservado_por', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'reservado_em', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'shared_source', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'shared_order_id', 'TEXT');
+  await addColumnIfMissing('esim_estoque', 'shared_customer', 'TEXT');
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_esim_estoque_lpa_hash ON esim_estoque(lpa_hash) WHERE lpa_hash IS NOT NULL`);
 
   // Catálogo de planos eSIM: permite vender manualmente mesmo sem QR disponível no estoque.
@@ -2165,7 +2313,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -8691,6 +8839,45 @@ app.post('/admin/mensagens', uploadEsim.single('imagem'), async (req, res) => {
   }
   res.redirect('/admin/mensagens');
 });
+
+app.get('/admin/esim-compartilhado', async (req,res)=>{
+  await liberarReservasEsimExpiradas();
+  let cfg=await sharedEsimSettings(req);
+  let key=cfg.apiKey;
+  if(!key){ key=crypto.randomBytes(32).toString('hex'); await setConfig('shared_esim_api_key',key); cfg=await sharedEsimSettings(req); }
+  const resumo=await get(`SELECT
+    SUM(CASE WHEN status='DISPONIVEL' THEN 1 ELSE 0 END) disponiveis,
+    SUM(CASE WHEN status='RESERVADO' THEN 1 ELSE 0 END) reservados,
+    SUM(CASE WHEN status='VENDIDO' AND shared_source IS NOT NULL THEN 1 ELSE 0 END) vendidos_externos
+    FROM esim_estoque`);
+  const bots=await all(`SELECT shared_source fonte,
+    SUM(CASE WHEN status='RESERVADO' THEN 1 ELSE 0 END) reservados,
+    SUM(CASE WHEN status='VENDIDO' THEN 1 ELSE 0 END) vendidos,
+    MAX(COALESCE(vendido_em,reservado_em)) ultima_atividade
+    FROM esim_estoque WHERE shared_source IS NOT NULL AND TRIM(shared_source)!=''
+    GROUP BY shared_source ORDER BY ultima_atividade DESC`);
+  const botRows=bots.length?bots.map(b=>`<tr><td><b>${safeHtml(b.fonte)}</b></td><td>${Number(b.reservados||0)}</td><td>${Number(b.vendidos||0)}</td><td>${safeHtml(b.ultima_atividade||'-')}</td></tr>`).join(''):'<tr><td colspan="4" class="muted">Nenhum bot externo utilizou o estoque ainda.</td></tr>';
+  const msg=req.query.ok?`<div class="card" style="border-color:#22c55e">✅ ${safeHtml(req.query.ok)}</div>`:req.query.erro?`<div class="card" style="border-color:#ef4444">❌ ${safeHtml(req.query.erro)}</div>`:'';
+  const body=`<h1>🔗 Estoque eSIM compartilhado</h1>${msg}
+  <div class="grid"><div class="card"><div class="muted">Status</div><h2>${cfg.ativo?'🟢 ATIVO':'🔴 DESATIVADO'}</h2></div><div class="card"><div class="muted">Disponíveis</div><h2>${Number(resumo?.disponiveis||0)}</h2></div><div class="card"><div class="muted">Reservados</div><h2>${Number(resumo?.reservados||0)}</h2></div><div class="card"><div class="muted">Vendas externas</div><h2>${Number(resumo?.vendidos_externos||0)}</h2></div></div>
+  <div class="card"><h2>⚙️ Configuração do servidor central</h2><p class="muted">O Pix Go é o dono do estoque. Copie a URL e a chave abaixo para conectar o Telegram eSIM pelo painel dele.</p><form method="post" action="/admin/esim-compartilhado/salvar"><label>Compartilhamento</label><select name="ativo"><option value="1" ${cfg.ativo?'selected':''}>Ativado</option><option value="0" ${!cfg.ativo?'selected':''}>Desativado</option></select><label>URL pública do Pix Go</label><input name="public_url" value="${safeHtml(cfg.publicUrl||'')}" placeholder="https://seu-pixgo.onrender.com"><label>Tempo de reserva (minutos)</label><input type="number" min="2" max="120" name="reservation_minutes" value="${cfg.reservationMinutes}"><label>Chave de conexão</label><input readonly value="${safeHtml(key)}" onclick="this.select()"><button class="btn green">💾 Salvar configuração</button></form><form method="post" action="/admin/esim-compartilhado/nova-chave" style="margin-top:10px"><button class="btn orange" onclick="return confirm('Gerar uma nova chave? O Telegram eSIM precisará ser atualizado no painel dele.')">🔑 Gerar nova chave</button></form></div>
+  <div class="card"><h2>🤖 Bots que já utilizaram o estoque</h2><div style="overflow:auto"><table><tr><th>Bot</th><th>Reservados</th><th>Vendidos</th><th>Última atividade</th></tr>${botRows}</table></div></div>
+  <div class="card"><h3>Como conectar</h3><p>1. Ative o compartilhamento acima.<br>2. No painel do Telegram eSIM, abra <b>Estoque compartilhado</b>.<br>3. Cole a URL pública do Pix Go e a chave.<br>4. Clique em <b>Testar conexão</b> e depois faça o mapeamento dos planos.</p></div>`;
+  res.send(page('Estoque compartilhado',body));
+});
+
+app.post('/admin/esim-compartilhado/salvar', async(req,res)=>{
+  try{
+    const ativo=String(req.body.ativo||'0')==='1'?'1':'0';
+    const url=String(req.body.public_url||'').trim().replace(/\/$/,'');
+    if(url && !/^https?:\/\//i.test(url)) throw new Error('URL pública inválida');
+    const minutos=Math.max(2,Math.min(120,Number(req.body.reservation_minutes||15)||15));
+    await setConfig('shared_esim_ativo',ativo); await setConfig('shared_esim_public_url',url); await setConfig('shared_esim_reservation_minutes',String(minutos));
+    if(!(await getConfig('shared_esim_api_key',''))) await setConfig('shared_esim_api_key',crypto.randomBytes(32).toString('hex'));
+    res.redirect('/admin/esim-compartilhado?ok='+encodeURIComponent('Configuração salva no painel.'));
+  }catch(e){res.redirect('/admin/esim-compartilhado?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/esim-compartilhado/nova-chave', async(req,res)=>{await setConfig('shared_esim_api_key',crypto.randomBytes(32).toString('hex'));res.redirect('/admin/esim-compartilhado?ok='+encodeURIComponent('Nova chave gerada. Atualize o Telegram eSIM.'));});
 
 app.get('/admin/esim', async (req, res) => {
   const planos = await all(`
