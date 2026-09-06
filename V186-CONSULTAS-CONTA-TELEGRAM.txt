@@ -1,0 +1,16 @@
+V186 — CONSULTAS POR ASSINATURA VIA CONTA TELEGRAM
+
+- Substitui o envio da consulta pelo bot BotFather pela conta pessoal do Telegram (MTProto/GramJS).
+- Configuração feita pelo painel: API ID, API Hash e telefone.
+- Login pelo painel: solicitar código, informar código e, se necessário, senha 2FA.
+- A StringSession fica criptografada na tabela configs e reconecta após reinício.
+- Nenhuma variável nova no Render é necessária.
+- A consulta enviada no WhatsApp é replicada pela conta Telegram para o grupo configurado.
+- A resposta do Yan Buscas é capturada, validada com a consulta ativa e transformada em PDF.
+- PDF é enviado no grupo WhatsApp, marcando o cliente que iniciou a consulta.
+- Grupo WhatsApp fica bloqueado durante o processamento e é liberado após entrega ou erro/timeout.
+- URL temporária aceita somente https://api.yanbuscas.com/temp/...
+
+DEPENDÊNCIA NOVA
+- telegram (GramJS) ^2.26.22
+- package-lock.json foi removido desta entrega para o npm instalar a nova dependência no próximo deploy.

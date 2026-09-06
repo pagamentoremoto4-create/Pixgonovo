@@ -19,6 +19,8 @@ try { jsQR = require('jsqr'); } catch (e) { console.log('⚠️ jsqr não instal
 let TelegramBot = null;
 let tgBot = null; // Instância global: o painel pode consultar com segurança durante a inicialização.
 try { TelegramBot = require('node-telegram-bot-api'); } catch (e) { console.log('⚠️ node-telegram-bot-api não instalado ainda.'); }
+let TelegramClient = null, StringSession = null, NewMessage = null;
+try { ({ TelegramClient } = require('telegram')); ({ StringSession } = require('telegram/sessions')); ({ NewMessage } = require('telegram/events')); } catch (e) { console.log('⚠️ GramJS (pacote telegram) não instalado ainda. Consultas via conta Telegram ficarão indisponíveis.'); }
 
 // Telegram + WhatsApp: conexão direta via QR Code usando Baileys; webhook Evolution mantido apenas como compatibilidade opcional.
 
@@ -8300,14 +8302,16 @@ async function desconectarWhatsApp() {
 }
 
 
-// ===== V184 — CONSULTAS POR ASSINATURA =====
-let consultaTelegramBot = null;
-let consultaTelegramTokenAtual = '';
+// ===== V186 — CONSULTAS POR ASSINATURA VIA CONTA TELEGRAM (MTProto/GramJS) =====
+let consultaTelegramCliente = null;
+let consultaTelegramContaConectada = false;
+let consultaTelegramLogin = null;
+let consultaTelegramHandlerInstalado = false;
 let consultaEmMemoria = null;
 let consultaTimeoutTimer = null;
 const CONSULTA_TMP_DIR = path.join(DATA_DIR, 'consultas-temp');
 
-function consultaTokenMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)}${t.slice(-5)}` : 'Não configurado'; }
+function consultaSegredoMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)}${t.slice(-5)}` : 'Não configurado'; }
 async function consultaObterSocketWhatsApp(grupo=''){
   const candidatos=[];
   if(consultaEmMemoria?.socket) candidatos.push(consultaEmMemoria.socket);
@@ -8318,12 +8322,19 @@ async function consultaObterSocketWhatsApp(grupo=''){
   for(const sock of unicos){ try{ await sock.groupMetadata(grupo); return sock; }catch(_){} }
   return null;
 }
-async function consultaTelegramToken(){ return dhruDecrypt(await getConfig('consulta_tg_token_enc','')); }
 async function consultaAtivaConfig(){ return (await getConfig('consulta_ativa','0')) === '1'; }
+async function consultaTelegramCredenciais(){
+  return {
+    apiId:Number(await getConfig('consulta_tg_api_id','0'))||0,
+    apiHash:dhruDecrypt(await getConfig('consulta_tg_api_hash_enc','')),
+    telefone:String(await getConfig('consulta_tg_telefone','')).trim(),
+    sessao:dhruDecrypt(await getConfig('consulta_tg_user_session_enc',''))
+  };
+}
 function consultaExtrairDadoDoComando(texto){
   const t=String(texto||'').trim();
   const m=t.match(/(?:\b\d{11}\b|\b\d{14}\b|\b\d{15}\b)/);
-  return m ? m[0] : t.slice(0,120);
+  return m ? m[0] : t.replace(/^\/[a-z0-9_]+\s*/i,'').trim().slice(0,120) || t.slice(0,120);
 }
 function consultaExtrairLinkTelegram(texto){
   const m=String(texto||'').match(/https:\/\/api\.yanbuscas\.com\/temp\/[^\s<>]+/i);
@@ -8333,15 +8344,100 @@ function consultaExtrairDadoTelegram(texto){
   const m=String(texto||'').match(/Dados da consulta:\s*([^\n\r]+)/i);
   return m ? m[1].trim() : '';
 }
+function consultaNormalizarCorrelacao(v){ return String(v||'').trim().toLowerCase().replace(/\s+/g,' '); }
+async function consultaTelegramEncerrarCliente(){
+  if(consultaTelegramCliente){ try{ await consultaTelegramCliente.disconnect(); }catch(_){} }
+  consultaTelegramCliente=null; consultaTelegramContaConectada=false; consultaTelegramHandlerInstalado=false;
+}
+async function consultaTelegramResolverGrupo(grupo){
+  if(!consultaTelegramCliente || !consultaTelegramContaConectada) throw new Error('Conta Telegram não conectada.');
+  const alvo=String(grupo||'').trim(); if(!alvo) throw new Error('Grupo Telegram não configurado.');
+  try{
+    const dialogs=await consultaTelegramCliente.getDialogs({limit:200});
+    for(const d of dialogs||[]){
+      const ids=[d?.id,d?.entity?.id].filter(x=>x!==undefined&&x!==null).map(x=>String(x));
+      if(ids.includes(alvo) || (alvo.startsWith('-100') && ids.includes(alvo.slice(4)))) return d.entity;
+    }
+  }catch(e){ console.log('⚠️ V186 LISTAR DIÁLOGOS TELEGRAM:',e.message); }
+  try { return await consultaTelegramCliente.getEntity(BigInt(alvo)); } catch(_){}
+  throw new Error('Grupo Telegram não encontrado na conta conectada. Abra/entre no grupo e tente novamente.');
+}
+async function consultaTelegramInstalarHandler(){
+  if(!consultaTelegramCliente || consultaTelegramHandlerInstalado || !NewMessage) return;
+  consultaTelegramCliente.addEventHandler(async(event)=>{
+    try{
+      if(!consultaEmMemoria) return;
+      const msg=event?.message; if(!msg) return;
+      const grupo=await getConfig('consulta_tg_grupo','');
+      const eventChat=String(event?.chatId ?? msg?.chatId ?? '');
+      let pertence=false;
+      if(eventChat===String(grupo)) pertence=true;
+      if(!pertence && String(grupo).startsWith('-100') && eventChat===String(grupo).slice(4)) pertence=true;
+      if(!pertence){
+        try{ const chat=await event.getChat(); const cid=String(chat?.id||''); pertence=cid===String(grupo)|| (String(grupo).startsWith('-100')&&cid===String(grupo).slice(4)); }catch(_){}
+      }
+      if(!pertence) return;
+      const texto=String(msg?.message||msg?.text||'');
+      if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) return;
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+    }catch(e){ console.log('❌ V186 RESPOSTA TELEGRAM:',e.message); }
+  },new NewMessage({}));
+  consultaTelegramHandlerInstalado=true;
+}
+async function consultaTelegramConectarSalva(force=false){
+  if(!TelegramClient||!StringSession) return false;
+  const c=await consultaTelegramCredenciais();
+  if(!c.apiId||!c.apiHash||!c.sessao) return false;
+  if(consultaTelegramCliente&&consultaTelegramContaConectada&&!force) return true;
+  if(force) await consultaTelegramEncerrarCliente();
+  try{
+    const client=new TelegramClient(new StringSession(c.sessao),c.apiId,c.apiHash,{connectionRetries:5});
+    await client.connect();
+    if(!(await client.checkAuthorization())){ try{await client.disconnect()}catch(_){}; return false; }
+    consultaTelegramCliente=client; consultaTelegramContaConectada=true; consultaTelegramHandlerInstalado=false;
+    await consultaTelegramInstalarHandler();
+    try{ const me=await client.getMe(); console.log('✅ V186 CONTA TELEGRAM CONECTADA:',me?.username||me?.firstName||me?.id?.toString?.()||'usuário'); }catch(_){ console.log('✅ V186 CONTA TELEGRAM CONECTADA'); }
+    return true;
+  }catch(e){ console.log('❌ V186 CONECTAR CONTA TELEGRAM:',e.message); consultaTelegramContaConectada=false; return false; }
+}
+async function consultaTelegramIniciarLogin(){
+  if(!TelegramClient||!StringSession) throw new Error('Pacote telegram (GramJS) não instalado. Faça o deploy desta versão com npm install.');
+  const c=await consultaTelegramCredenciais();
+  if(!c.apiId||!c.apiHash||!c.telefone) throw new Error('Preencha API ID, API Hash e telefone e salve antes de enviar o código.');
+  if(consultaTelegramLogin?.client){ try{await consultaTelegramLogin.client.disconnect()}catch(_){} }
+  await consultaTelegramEncerrarCliente();
+  const client=new TelegramClient(new StringSession(''),c.apiId,c.apiHash,{connectionRetries:5});
+  const login={client,fase:'CONECTANDO',erro:'',codeResolve:null,passwordResolve:null,iniciado:Date.now()};
+  consultaTelegramLogin=login;
+  (async()=>{
+    try{
+      await client.start({
+        phoneNumber:async()=>c.telefone,
+        phoneCode:async()=>{ login.fase='AGUARDANDO_CODIGO'; return await new Promise(resolve=>{login.codeResolve=resolve;}); },
+        password:async(hint)=>{ login.fase='AGUARDANDO_SENHA'; login.hint=String(hint||''); return await new Promise(resolve=>{login.passwordResolve=resolve;}); },
+        onError:async(err)=>{ login.erro=String(err?.message||err||'Erro de autenticação'); console.log('⚠️ V186 LOGIN TELEGRAM:',login.erro); return false; }
+      });
+      const sessao=client.session.save();
+      await setConfig('consulta_tg_user_session_enc',dhruEncrypt(sessao));
+      consultaTelegramCliente=client; consultaTelegramContaConectada=true; consultaTelegramHandlerInstalado=false;
+      await consultaTelegramInstalarHandler();
+      login.fase='CONECTADO'; login.codeResolve=null; login.passwordResolve=null; login.erro='';
+      console.log('✅ V186 AUTENTICAÇÃO DA CONTA TELEGRAM CONCLUÍDA');
+    }catch(e){ login.fase='ERRO'; login.erro=String(e?.message||e); try{await client.disconnect()}catch(_){}; console.log('❌ V186 LOGIN CONTA TELEGRAM:',login.erro); }
+  })();
+  // aguarda apenas até o callback de código ser solicitado, sem prender a requisição do painel
+  for(let i=0;i<40;i++){ if(['AGUARDANDO_CODIGO','AGUARDANDO_SENHA','CONECTADO','ERRO'].includes(login.fase)) break; await new Promise(r=>setTimeout(r,250)); }
+  return login.fase;
+}
 async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   const grupo=await getConfig('consulta_wa_grupo','');
   try {
     const sock=await consultaObterSocketWhatsApp(grupo);
     if(grupo && sock){
       await sock.groupSettingUpdate(grupo,'not_announcement');
-      await sock.sendMessage(grupo,{text: motivo==='erro' ? '🟢 Grupo liberado. A consulta anterior não pôde ser concluída.' : '🟢 Grupo liberado para a próxima consulta.'});
+      if(motivo==='erro') await sock.sendMessage(grupo,{text:'🟢 Grupo liberado. A consulta anterior não pôde ser concluída.'});
     }
-  } catch(e){ console.log('⚠️ V184 LIBERAR GRUPO:',e.message); }
+  } catch(e){ console.log('⚠️ V186 LIBERAR GRUPO:',e.message); }
   if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
   consultaEmMemoria=null;
 }
@@ -8351,37 +8447,20 @@ async function consultaFalhar(id,erro){
   try{
     const c=await get('SELECT * FROM consultas_assinatura WHERE id=?',[id]);
     const sock=await consultaObterSocketWhatsApp(c?.grupo_whatsapp||'');
-    if(c?.cliente_jid && sock) await sock.sendMessage(c.cliente_jid,{text:'❌ Não foi possível concluir sua consulta. O grupo será liberado para uma nova tentativa.'});
+    if(c?.grupo_whatsapp && sock){
+      const numero=jidToNumber(c.cliente_jid)||String(c.cliente_jid||'').split('@')[0];
+      await sock.sendMessage(c.grupo_whatsapp,{text:`❌ @${numero}, não foi possível concluir sua consulta. O grupo será liberado para uma nova tentativa.`,mentions:[c.cliente_jid]});
+    }
   }catch(_){}
   await consultaGrupoWhatsAppLiberar('erro');
 }
-async function consultaIniciarTelegramBot(force=false){
-  if(!TelegramBot) return false;
-  const token=await consultaTelegramToken();
-  if(!token){
-    if(consultaTelegramBot){ try{ await consultaTelegramBot.stopPolling(); }catch(_){} consultaTelegramBot=null; consultaTelegramTokenAtual=''; }
-    return false;
-  }
-  if(consultaTelegramBot && consultaTelegramTokenAtual===token && !force) return true;
-  if(consultaTelegramBot){ try{ await consultaTelegramBot.stopPolling(); }catch(_){} consultaTelegramBot=null; }
-  const bot=new TelegramBot(token,{polling:true});
-  consultaTelegramBot=bot; consultaTelegramTokenAtual=token;
-  bot.on('polling_error',e=>console.log('❌ V184 TELEGRAM POLLING:',e?.message||e));
-  bot.on('message',msg=>consultaTratarRespostaTelegram(msg).catch(e=>console.log('❌ V184 RESPOSTA TG:',e.message)));
-  console.log('✅ V184 BOT TELEGRAM DE CONSULTAS INICIADO');
-  return true;
-}
-async function consultaTratarRespostaTelegram(msg){
+async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
   if(!consultaEmMemoria) return;
-  const grupo=await getConfig('consulta_tg_grupo','');
-  if(!grupo || String(msg?.chat?.id)!==String(grupo)) return;
-  const texto=msg?.text||msg?.caption||'';
-  if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
   if(!link) return;
   const ativo=consultaEmMemoria;
-  if(dado && ativo.dado_consulta && String(dado).trim()!==String(ativo.dado_consulta).trim()) return;
-  await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,String(msg.message_id||''),ativo.id]);
+  if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
+  await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,messageId,ativo.id]);
   try{
     const dados=await consultaLerPagina(link);
     const pdf=await consultaGerarPdf(dados,ativo);
@@ -8392,9 +8471,7 @@ async function consultaTratarRespostaTelegram(msg){
     const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
     const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
     await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-      document:buffer,
-      mimetype:'application/pdf',
-      fileName:`consulta-${ativo.id}.pdf`,
+      document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
       caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
       mentions:[ativo.cliente_jid]
     });
@@ -8408,7 +8485,9 @@ function consultaDecodificarHtml(txt){
   return String(txt||'').replace(/&(nbsp|amp|lt|gt|quot|apos);|&#39;/gi,m=>mapa[m.toLowerCase()]||m).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCharCode(parseInt(n,16)));
 }
 async function consultaLerPagina(url){
-  const r=await axios.get(url,{timeout:45000,headers:{'User-Agent':'Mozilla/5.0 CentralUnlocker/1.0'},maxContentLength:8*1024*1024,responseType:'text'});
+  const u=new URL(String(url));
+  if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
+  const r=await axios.get(u.toString(),{timeout:45000,headers:{'User-Agent':'Mozilla/5.0 CentralUnlocker/1.0'},maxContentLength:8*1024*1024,responseType:'text',maxRedirects:2});
   let html=String(r.data||'');
   const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'Resultado da consulta';
   html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi,' ');
@@ -8421,7 +8500,7 @@ async function consultaLerPagina(url){
     if(!linhas.includes(limpa)) linhas.push(limpa);
   }
   if(!linhas.length) throw new Error('A página de resultado não retornou conteúdo legível.');
-  return {titulo:consultaDecodificarHtml(title.replace(/<[^>]+>/g,' ')).trim(),linhas,url};
+  return {titulo:consultaDecodificarHtml(title.replace(/<[^>]+>/g,' ')).trim(),linhas,url:u.toString()};
 }
 function consultaPdfEscapeLatin1(s){
   return Buffer.from(String(s||'').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,' '),'latin1').toString('latin1');
@@ -8460,15 +8539,11 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(msg?.key?.fromMe) return true;
   const participante=melhorJidCliente(msg,msg?.key?.participant||'');
   if(!participante) return true;
-  if(consultaEmMemoria){
-    try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){}
-    return true;
-  }
-  const cmd=String(texto||'').trim();
-  if(!cmd) return true;
+  if(consultaEmMemoria){ try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){} return true; }
+  const cmd=String(texto||'').trim(); if(!cmd) return true;
   const tgGrupo=await getConfig('consulta_tg_grupo','');
-  if(!tgGrupo) { await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
-  if(!(await consultaIniciarTelegramBot())) { await socketAtual.sendMessage(grupo,{text:'⚠️ Bot do Telegram de consultas ainda não está conectado.'}); return true; }
+  if(!tgGrupo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
+  if(!(await consultaTelegramConectarSalva())){ await socketAtual.sendMessage(grupo,{text:'⚠️ Conta Telegram de consultas ainda não está conectada. O administrador precisa autenticá-la no painel.'}); return true; }
   const dado=consultaExtrairDadoDoComando(cmd);
   const r=await run(`INSERT INTO consultas_assinatura(cliente_jid,cliente_nome,grupo_whatsapp,comando,dado_consulta,status) VALUES(?,?,?,?,?,'ENVIANDO_TELEGRAM')`,[participante,msg?.pushName||'Cliente',grupo,cmd,dado]);
   const id=r.lastID;
@@ -8476,8 +8551,9 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   try{
     await socketAtual.groupSettingUpdate(grupo,'announcement');
     await socketAtual.sendMessage(grupo,{text:'🔒 Consulta em processamento. O grupo será liberado assim que o resultado for entregue.'});
-    const enviado=await consultaTelegramBot.sendMessage(tgGrupo,cmd);
-    await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado.message_id||''),id]);
+    const entidade=await consultaTelegramResolverGrupo(tgGrupo);
+    const enviado=await consultaTelegramCliente.sendMessage(entidade,{message:cmd});
+    await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
     consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
@@ -8494,22 +8570,54 @@ async function consultaRecuperarEstado(){
   try{
     const antigo=await get(`SELECT * FROM consultas_assinatura WHERE status NOT IN ('FINALIZADA','ERRO') ORDER BY id DESC LIMIT 1`);
     if(antigo){ await run(`UPDATE consultas_assinatura SET status='ERRO',erro='Servidor reiniciado durante a consulta',finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[antigo.id]); }
-    await consultaIniciarTelegramBot();
-  }catch(e){console.log('⚠️ V184 RECUPERAÇÃO:',e.message)}
+    await consultaTelegramConectarSalva();
+  }catch(e){console.log('⚠️ V186 RECUPERAÇÃO:',e.message)}
+}
+function consultaLoginStatus(){
+  if(consultaTelegramContaConectada) return 'CONECTADO';
+  if(consultaTelegramLogin?.fase) return consultaTelegramLogin.fase;
+  return 'DESCONECTADO';
 }
 
 app.get('/admin/consultas-assinatura', async (req,res)=>{
-  const ativa=await consultaAtivaConfig(), token=await consultaTelegramToken(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','180');
+  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','180');
+  const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
   const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
-  const rows=hist.map(c=>`<tr><td>#${c.id}</td><td>${safeHtml(c.cliente_nome||'-')}</td><td>${safeHtml(c.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(c.status||'-')}</span></td><td>${safeHtml(c.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
-  const statusBot=consultaTelegramBot?'CONECTADO':'DESCONECTADO', statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
-  res.send(page('Consultas por assinatura',`<h1>🔎 Consultas por assinatura</h1><p class="muted">Configure aqui o fluxo WhatsApp → Telegram → PDF. Nenhuma variável nova no Render é necessária.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
-  <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo configurado: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Telegram Consultas</h3><p><b>${statusBot}</b></p><small>Token: ${safeHtml(consultaTokenMask(token))}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
-  <div class="card"><h2>⚙️ Configuração</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>Token do bot Telegram de consultas</label><input type="password" name="telegram_token" placeholder="${safeHtml(consultaTokenMask(token))}"><small>Deixe em branco para manter o token atual.</small><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar conexão</button></div></form></div>
-  <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
+  const rows=hist.map(x=>`<tr><td>#${x.id}</td><td>${safeHtml(x.cliente_nome||'-')}</td><td>${safeHtml(x.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(x.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
+  const statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
+  const st=consultaLoginStatus();
+  const authExtra=st==='AGUARDANDO_CODIGO'?`<div class="card"><h2>🔐 Código do Telegram</h2><p>O código foi enviado pelo Telegram para sua conta. Digite abaixo.</p><form method="post" action="/admin/consultas-assinatura/telegram-codigo"><label>Código recebido</label><input name="codigo" inputmode="numeric" autocomplete="one-time-code" required><button class="btn green">Conectar</button></form></div>`:st==='AGUARDANDO_SENHA'?`<div class="card"><h2>🔐 Verificação em duas etapas</h2><p>Essa conta possui senha 2FA.${consultaTelegramLogin?.hint?` Dica: ${safeHtml(consultaTelegramLogin.hint)}`:''}</p><form method="post" action="/admin/consultas-assinatura/telegram-senha"><label>Senha de duas etapas</label><input type="password" name="senha" required><button class="btn green">Finalizar conexão</button></form></div>`:'';
+  res.send(page('Consultas por assinatura',`<h1>🔎 Consultas por assinatura</h1><p class="muted">Fluxo WhatsApp → sua conta Telegram → Yan Buscas → PDF → grupo WhatsApp. A sessão Telegram fica salva no banco/persistent disk, sem variáveis novas no Render.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
+  <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Conta Telegram</h3><p><b>${safeHtml(st)}</b></p><small>Telefone: ${safeHtml(c.telefone||'Não configurado')}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
+  <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
+  ${authExtra}
+  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
+});
+app.post('/admin/consultas-assinatura/salvar-conta',async(req,res)=>{
+  try{
+    const apiId=Number(String(req.body.api_id||'').trim()); if(!apiId) throw new Error('API ID inválido.');
+    const telefone=String(req.body.telefone||'').trim(); if(!telefone) throw new Error('Informe o telefone com DDI, por exemplo +5575...');
+    await setConfig('consulta_tg_api_id',String(apiId)); await setConfig('consulta_tg_telefone',telefone);
+    const hash=String(req.body.api_hash||'').trim(); if(hash) await setConfig('consulta_tg_api_hash_enc',dhruEncrypt(hash));
+    const c=await consultaTelegramCredenciais(); if(!c.apiHash) throw new Error('Informe o API Hash.');
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Dados da conta Telegram salvos. Agora clique em Enviar código / Conectar conta.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/telegram-enviar-codigo',async(req,res)=>{
+  try{ const fase=await consultaTelegramIniciarLogin(); if(fase==='ERRO') throw new Error(consultaTelegramLogin?.erro||'Falha ao iniciar autenticação.'); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(fase==='CONECTADO'?'Conta Telegram já conectada.':'Código solicitado ao Telegram.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/telegram-codigo',async(req,res)=>{
+  try{ const codigo=String(req.body.codigo||'').replace(/\s+/g,''); if(!codigo) throw new Error('Informe o código.'); if(!consultaTelegramLogin?.codeResolve) throw new Error('Não há solicitação de código ativa. Clique em Enviar código novamente.'); const fn=consultaTelegramLogin.codeResolve; consultaTelegramLogin.codeResolve=null; fn(codigo); await new Promise(r=>setTimeout(r,1200)); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Código enviado para validação.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/telegram-senha',async(req,res)=>{
+  try{ const senha=String(req.body.senha||''); if(!senha) throw new Error('Informe a senha 2FA.'); if(!consultaTelegramLogin?.passwordResolve) throw new Error('Não há solicitação de senha ativa.'); const fn=consultaTelegramLogin.passwordResolve; consultaTelegramLogin.passwordResolve=null; fn(senha); await new Promise(r=>setTimeout(r,1500)); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Senha enviada para validação.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/telegram-desconectar',async(req,res)=>{
+  try{ if(consultaTelegramLogin?.client){try{await consultaTelegramLogin.client.disconnect()}catch(_){}} consultaTelegramLogin=null; await consultaTelegramEncerrarCliente(); await setConfig('consulta_tg_user_session_enc',''); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Conta Telegram desconectada deste sistema.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
   try{
@@ -8517,13 +8625,11 @@ app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
     await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
     await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
     await setConfig('consulta_timeout_seg',String(Math.max(60,Math.min(900,Number(req.body.timeout_seg||180)||180))));
-    const novo=String(req.body.telegram_token||'').trim(); if(novo) await setConfig('consulta_tg_token_enc',dhruEncrypt(novo));
-    await consultaIniciarTelegramBot(true);
-    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Configuração salva.'));
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Fluxo salvo.'));
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/testar-telegram', async(req,res)=>{
-  try{ if(!(await consultaIniciarTelegramBot())) throw new Error('Token do Telegram não configurado.'); const g=await getConfig('consulta_tg_grupo',''); if(!g) throw new Error('Grupo Telegram não configurado.'); await consultaTelegramBot.sendMessage(g,'✅ Teste de conexão CentralUnlocker — integração de consultas conectada.'); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Mensagem de teste enviada ao Telegram.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+  try{ if(!(await consultaTelegramConectarSalva())) throw new Error('Conta Telegram não conectada.'); const g=await getConfig('consulta_tg_grupo',''); const entidade=await consultaTelegramResolverGrupo(g); await consultaTelegramCliente.sendMessage(entidade,{message:'✅ Teste de conexão CentralUnlocker — conta Telegram conectada à integração de consultas.'}); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Mensagem de teste enviada pela sua conta Telegram.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/testar-whatsapp', async(req,res)=>{
   try{ const g=await getConfig('consulta_wa_grupo',''); if(!g) throw new Error('Grupo WhatsApp não configurado.'); const sock=await consultaObterSocketWhatsApp(g); if(!sock) throw new Error('Nenhuma sessão conectada possui esse grupo.'); await sock.sendMessage(g,{text:'✅ Teste de conexão CentralUnlocker — grupo de consultas conectado.'}); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Mensagem de teste enviada ao WhatsApp.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
