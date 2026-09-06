@@ -1,0 +1,11 @@
+V191 - Consultas Yan Buscas
+
+- Após enviar o comando ao Telegram, aguarda 10 segundos antes de processar qualquer resposta.
+- Mensagens intermediárias como "Buscando informações..." são ignoradas e não são enviadas ao WhatsApp.
+- Após a janela de 10 segundos:
+  * resultado com link: abre o link Yan Buscas, extrai os dados e gera PDF;
+  * resultado em texto: transforma o texto final em PDF;
+  * sem resultado: avisa o cliente e libera o grupo.
+- Se aos 10 segundos só houver mensagem intermediária, continua aguardando a resposta final até o timeout normal.
+- O remetente Yan é memorizado pela primeira resposta/reply para capturar a mensagem final mesmo sem marcadores textuais.
+- Mantidas validação de comandos, /comandos, bloqueio/liberação do grupo e demais recursos da V190.
