@@ -8710,21 +8710,21 @@ async function consultaProxyResponder(req,res,row,alvo){
   res.send(body);
 }
 
-// V201 — página provisória. Não faz redirect: a barra do navegador permanece no domínio deste sistema.
+// V202 — página provisória para todos os comandos com resultado em link. Não faz redirect: a barra do navegador permanece no domínio deste sistema.
 app.get('/consulta/:token',async(req,res)=>{
   try{
     const row=await consultaLinkTemporarioObter(req.params.token);
     if(!row) return res.status(410).send('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Consulta expirada</title><body style="font-family:Arial;padding:32px"><h2>Link expirado</h2><p>Esta consulta não está mais disponível.</p></body>');
     const alvo=consultaProxyDestino(row,row.url_origem); if(!alvo) return res.status(400).send('Consulta inválida.');
     return await consultaProxyResponder(req,res,row,alvo);
-  }catch(e){ console.log('⚠️ V201 PROXY CONSULTA:',e.message); return res.status(502).send('Não foi possível carregar a consulta agora.'); }
+  }catch(e){ console.log('⚠️ V202 PROXY CONSULTA:',e.message); return res.status(502).send('Não foi possível carregar a consulta agora.'); }
 });
 app.all('/consulta/:token/recurso',async(req,res)=>{
   try{
     const row=await consultaLinkTemporarioObter(req.params.token); if(!row) return res.status(410).send('Link expirado.');
     const alvo=consultaProxyDestino(row,req.query.u); if(!alvo) return res.status(400).send('Recurso inválido.');
     return await consultaProxyResponder(req,res,row,alvo);
-  }catch(e){ console.log('⚠️ V201 PROXY RECURSO:',e.message); return res.status(502).send('Falha ao carregar recurso.'); }
+  }catch(e){ console.log('⚠️ V202 PROXY RECURSO:',e.message); return res.status(502).send('Falha ao carregar recurso.'); }
 });
 
 async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={}){
@@ -8741,40 +8741,24 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link||'',messageId,ativo.id]);
   try{
     if(link){
-      // V199: /nome usa o próprio link válido da Yan como fonte e imprime a página
-      // já renderizada pelo navegador. Não usamos mais o contador "0" da tabela para
-      // decidir se a consulta tem ou não resultado. Os demais comandos mantêm o fluxo V196/V198.
-      if(consultaEhComandoNome(ativo)){
-        // V201: /nome entrega um link temporário do próprio sistema, sem expor a URL Yan na mensagem/barra do navegador.
-        const linkTemporario=await consultaCriarLinkTemporario(ativo,link);
-        const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
-        if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-        const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
-        const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
-        await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-          text:`✅ Consulta concluída — ${nomeMencao}\n\n🔗 Acesse o resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.\n\n🟢 Grupo liberado para a próxima consulta.`,
-          mentions:[ativo.cliente_jid]
-        });
-      }else{
-        const dados=await consultaLerPagina(link,ativo);
-        if(dados?.semResultado){
-          await consultaEnviarTextoWhatsApp(ativo,'Nenhum resultado localizado para esta consulta.',true);
-        }else{
-          const pdf=await consultaGerarPdf(dados,ativo);
-          await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
-          const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
-          if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-          const buffer=fs.readFileSync(pdf);
-          const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
-          const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
-          await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-            document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-            caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
-            mentions:[ativo.cliente_jid]
-          });
-          try{fs.unlinkSync(pdf)}catch(_){}
-        }
-      }
+      // V202: qualquer comando que receber um link válido da Yan entrega somente
+      // um link temporário do próprio sistema. A URL original da Yan fica no servidor.
+      const linkTemporario=await consultaCriarLinkTemporario(ativo,link);
+      const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+      if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+      const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+      const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+      await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+        text:`✅ Consulta concluída — ${nomeMencao}
+
+🔗 Acesse o resultado completo:
+${linkTemporario}
+
+⏳ Link disponível por 15 minutos.
+
+🟢 Grupo liberado para a próxima consulta.`,
+        mentions:[ativo.cliente_jid]
+      });
     }else if(semResultado){
       await consultaEnviarTextoWhatsApp(ativo,texto,true);
     }else{

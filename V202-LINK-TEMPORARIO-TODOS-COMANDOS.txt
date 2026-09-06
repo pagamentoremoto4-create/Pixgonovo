@@ -1,0 +1,11 @@
+V202 — LINK TEMPORÁRIO PARA TODOS OS COMANDOS COM RESPOSTA EM LINK
+
+Base: V201 aprovada.
+
+Alteração:
+- Qualquer consulta cuja resposta da Yan contenha link válido passa a entregar ao cliente somente o link temporário do próprio Pixgonovo.
+- O endereço original api.yanbuscas.com permanece apenas no servidor.
+- O link temporário expira em 15 minutos.
+- Não há redirecionamento simples: a barra do navegador permanece no domínio do sistema.
+- Respostas da Yan que chegam somente em texto continuam usando o fluxo já aprovado de texto -> PDF.
+- Validação de comandos, bloqueio/liberação do grupo, /comandos e captura Telegram foram preservados.
