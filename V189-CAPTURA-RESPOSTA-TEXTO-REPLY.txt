@@ -1,0 +1,8 @@
+V189 — CAPTURA DE RESPOSTA TEXTUAL DO YAN
+
+Correção específica sobre a V188:
+- Respostas em texto do Yan agora são reconhecidas quando o bot do Telegram responde diretamente ao comando enviado pela conta do usuário.
+- A correlação usa reply_to_msg_id / replyToMsgId com o ID da mensagem enviada.
+- Mantém compatibilidade com respostas por URL temporária, "Dados da consulta" e sem resultado.
+- Ao capturar texto: envia ao WhatsApp, marca o cliente e libera o grupo.
+- Mantém validação de comandos e /comandos da V188.

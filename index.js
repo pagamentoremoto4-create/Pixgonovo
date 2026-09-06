@@ -8439,8 +8439,8 @@ async function consultaTelegramInstalarHandler(){
       if(!pertence) return;
       if(msg?.out) return;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaPareceRespostaYan(texto)) return;
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+      if(!consultaEhRespostaDaConsultaAtiva(msg,texto,consultaEmMemoria)) return;
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcar:true,replyId:consultaTelegramReplyId(msg)});
     }catch(e){ console.log('❌ V186 RESPOSTA TELEGRAM:',e.message); }
   },new NewMessage({}));
   consultaTelegramHandlerInstalado=true;
@@ -8502,11 +8502,12 @@ async function consultaTelegramProcurarRespostaHistorico(){
       if(enviadoId && mid<=enviadoId) continue;
       if(msg?.out) continue;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaPareceRespostaYan(texto)) continue;
+      if(!consultaEhRespostaDaConsultaAtiva(msg,texto,ativo)) continue;
       const dado=consultaExtrairDadoTelegram(texto);
       if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
-      console.log('✅ V187 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid);
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+      const replyId=consultaTelegramReplyId(msg);
+      console.log('✅ V189 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid,'reply=',replyId||'-');
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcar:true,replyId});
       break;
     }
   }catch(e){ console.log('⚠️ V187 POLLING TELEGRAM:',e.message); }
@@ -8553,6 +8554,31 @@ function consultaPareceRespostaYan(texto){
   const t=String(texto||'').trim(); if(!t) return false;
   return /Dados da consulta:/i.test(t) || /Yan Buscas/i.test(t) || consultaExtrairLinkTelegram(t) || consultaRespostaSemResultado(t);
 }
+function consultaTelegramReplyId(msg){
+  const candidatos=[
+    msg?.replyTo?.replyToMsgId,
+    msg?.replyTo?.reply_to_msg_id,
+    msg?.replyToMsgId,
+    msg?.reply_to_msg_id,
+    msg?.replyTo?.msgId,
+    msg?.reply_to?.reply_to_msg_id
+  ];
+  for(const v of candidatos){
+    const n=Number(v||0);
+    if(Number.isFinite(n)&&n>0) return n;
+  }
+  return 0;
+}
+function consultaEhRespostaDaConsultaAtiva(msg,texto,ativo=consultaEmMemoria){
+  if(!ativo) return false;
+  const enviadoId=Number(ativo.telegram_enviado_id||0);
+  const replyId=consultaTelegramReplyId(msg);
+  // Forma mais segura para respostas em texto do Yan: ele responde diretamente
+  // à mensagem enviada pela nossa própria conta Telegram.
+  if(enviadoId && replyId===enviadoId) return true;
+  // Mantém compatibilidade com os resultados antigos que vêm com URL/Dados da consulta.
+  return consultaPareceRespostaYan(texto);
+}
 function consultaLimparTextoYan(texto){
   return String(texto||'').replace(/\r/g,'').trim();
 }
@@ -8571,13 +8597,17 @@ async function consultaEnviarTextoWhatsApp(ativo,texto,semResultado=false){
     await sock.sendMessage(ativo.grupo_whatsapp,{text:`${i===0?cab+'\n\n':''}${partes[i]}${rodape}`,mentions:i===0?[ativo.cliente_jid]:[]});
   }
 }
-async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
+async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={}){
   if(!consultaEmMemoria) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
   const ativo=consultaEmMemoria;
   if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
   if(ativo.processandoResultado) return;
-  if(!link && !consultaPareceRespostaYan(texto)) return;
+  // V189: respostas textuais do Yan podem não conter a palavra "Yan", URL nem
+  // "Dados da consulta". Quando a mensagem é reply direto ao comando enviado,
+  // ela é aceita pelo sinal de correlação do Telegram.
+  if(!opcoes?.forcar && !link && !consultaPareceRespostaYan(texto)) return;
+  if(!String(texto||'').trim() && !link) return;
   ativo.processandoResultado=true;
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   const semResultado=consultaRespostaSemResultado(texto);
