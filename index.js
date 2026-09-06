@@ -8451,9 +8451,10 @@ async function consultaTelegramInstalarHandler(){
       if(!pertence) return;
       if(msg?.out) return;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaMensagemEhDoYan(msg,texto,consultaEmMemoria)) return;
-      if(consultaMensagemIntermediariaYan(texto)){ console.log('⏳ V196 YAN AINDA PROCESSANDO:',String(msg?.id||'')); return; }
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true});
+      const corr=consultaCorrelacaoUniversalYan(msg,texto,consultaEmMemoria);
+      if(!corr.aceitar) return;
+      if(consultaMensagemIntermediariaYan(texto)){ console.log('⏳ V203 YAN AINDA PROCESSANDO:',String(msg?.id||'')); return; }
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true,correlacaoConfiavel:corr.direta||corr.dadoConfere||corr.senderConfirmado});
     }catch(e){ console.log('❌ V186 RESPOSTA TELEGRAM:',e.message); }
   },new NewMessage({}));
   consultaTelegramHandlerInstalado=true;
@@ -8516,15 +8517,16 @@ async function consultaTelegramProcurarRespostaHistorico(){
       if(enviadoId && mid<=enviadoId) continue;
       if(msg?.out) continue;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaMensagemEhDoYan(msg,texto,ativo)) continue;
-      const dado=consultaExtrairDadoTelegram(texto);
-      if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
+      const corr=consultaCorrelacaoUniversalYan(msg,texto,ativo);
+      if(!corr.aceitar) continue;
+      // V203: não rejeita um link que seja resposta direta ao nosso comando apenas
+      // porque a Yan formatou "Dados da consulta" de outra maneira.
       if(consultaMensagemIntermediariaYan(texto)){
-        console.log('⏳ V196 YAN AINDA PROCESSANDO PELO HISTÓRICO:',mid);
+        console.log('⏳ V203 YAN AINDA PROCESSANDO PELO HISTÓRICO:',mid);
         continue;
       }
-      console.log('✅ V196 RESPOSTA FINAL YAN ENCONTRADA:',mid,consultaExtrairLinkTelegram(texto)?'LINK':'TEXTO');
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true});
+      console.log('✅ V203 RESPOSTA FINAL YAN ENCONTRADA:',mid,consultaExtrairLinkTelegram(texto)?'LINK':'TEXTO',corr.direta?'RESPOSTA-DIRETA':(corr.dadoConfere?'DADO-CONFERIDO':'SENDER-CONFIRMADO'));
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true,correlacaoConfiavel:corr.direta||corr.dadoConfere||corr.senderConfirmado});
       break;
     }
   }catch(e){ console.log('⚠️ V196 POLLING TELEGRAM:',e.message); }
@@ -8604,6 +8606,29 @@ function consultaMensagemEhDoYan(msg,texto,ativo=consultaEmMemoria){
   if(ativo.telegram_yan_sender_id && senderId && senderId===ativo.telegram_yan_sender_id) return true;
   if(consultaPareceRespostaYan(texto)){ if(senderId && !ativo.telegram_yan_sender_id) ativo.telegram_yan_sender_id=senderId; return true; }
   return false;
+}
+
+// V203 — correlação universal para todos os comandos válidos.
+// Um resultado com link /temp/ é considerado pertencente à consulta ativa quando:
+// 1) a Yan respondeu diretamente à mensagem enviada por esta consulta; OU
+// 2) "Dados da consulta" bate exatamente com o dado da consulta; OU
+// 3) o remetente já foi confirmado como Yan por uma resposta direta e o link chegou depois.
+// A resposta direta tem prioridade e não é descartada por diferenças de formatação em "Dados da consulta".
+function consultaCorrelacaoUniversalYan(msg,texto,ativo=consultaEmMemoria){
+  if(!ativo) return {aceitar:false,direta:false,dadoConfere:false,senderConfirmado:false};
+  const enviadoId=Number(ativo.telegram_enviado_id||0);
+  const replyId=consultaTelegramReplyId(msg);
+  const senderId=consultaTelegramSenderId(msg);
+  const direta=!!(enviadoId && replyId===enviadoId);
+  if(direta && senderId) ativo.telegram_yan_sender_id=senderId;
+  const dado=consultaExtrairDadoTelegram(texto);
+  const dadoConfere=!!(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)===consultaNormalizarCorrelacao(ativo.dado_consulta));
+  const senderConfirmado=!!(ativo.telegram_yan_sender_id && senderId && senderId===ativo.telegram_yan_sender_id);
+  const link=consultaExtrairLinkTelegram(texto);
+  // Para links, resposta direta é prova suficiente. Isso evita falhas em comandos
+  // cujo campo "Dados da consulta" vem diferente, abreviado ou formatado pela Yan.
+  const aceitar=link ? (direta || dadoConfere || senderConfirmado) : (direta || dadoConfere || senderConfirmado || consultaMensagemEhDoYan(msg,texto,ativo));
+  return {aceitar,direta,dadoConfere,senderConfirmado,dado,link};
 }
 function consultaLimparTextoYan(texto){
   return String(texto||'').replace(/\r/g,'').trim();
@@ -8731,7 +8756,10 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   if(!consultaEmMemoria) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
   const ativo=consultaEmMemoria;
-  if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
+  // V203: quando o capturador já comprovou a correlação pela resposta direta,
+  // pelo dado exato ou pelo remetente Yan confirmado, não derrubamos o resultado
+  // por uma diferença de formatação em "Dados da consulta".
+  if(!opcoes?.correlacaoConfiavel && dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
   if(ativo.processandoResultado) return;
   if(!opcoes?.forcarTexto && !link && !consultaPareceRespostaYan(texto)) return;
   if(consultaMensagemIntermediariaYan(texto)) return;

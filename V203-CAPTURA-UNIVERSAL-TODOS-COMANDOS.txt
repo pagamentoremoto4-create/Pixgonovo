@@ -1,0 +1,12 @@
+V203 — Captura universal das respostas Yan para todos os comandos válidos
+
+Base: V202.
+
+Mudança principal:
+- Todo comando já cadastrado e validado usa a mesma correlação universal.
+- Se a Yan responder diretamente ao comando com um link https://api.yanbuscas.com/temp/..., o resultado é aceito mesmo que o campo "Dados da consulta" venha com formatação diferente.
+- Também são aceitos resultados com dado da consulta exatamente correlacionado ou vindos do remetente Yan já confirmado pela resposta direta.
+- Links continuam sendo entregues pelo link temporário próprio do Pixgonovo, válido por 15 minutos.
+- Respostas finais em texto continuam sendo convertidas em PDF.
+- Mensagens intermediárias continuam ignoradas.
+- Demais fluxos da V202 preservados.
