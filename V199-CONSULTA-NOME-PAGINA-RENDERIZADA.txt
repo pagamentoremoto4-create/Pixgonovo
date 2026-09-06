@@ -1,0 +1,8 @@
+V199 — CONSULTA /NOME POR PÁGINA RENDERIZADA
+
+Base: V198/V196.
+
+Alteração isolada:
+- /nome: quando a Yan retorna um link temp válido, o sistema não usa o contador inicial da tabela para concluir "sem resultado".
+- O link é aberto em navegador headless, a página é renderizada como no navegador e impressa diretamente em PDF.
+- Mantidos sem alteração os fluxos de /placa, respostas em texto, demais links, validação de comandos, /comandos e liberação automática de 30 segundos.

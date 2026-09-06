@@ -8626,23 +8626,41 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link||'',messageId,ativo.id]);
   try{
     if(link){
-      const dados=await consultaLerPagina(link,ativo);
-      if(dados?.semResultado){
-        await consultaEnviarTextoWhatsApp(ativo,'Nenhum resultado localizado para esta consulta.',true);
-      }else{
-        const pdf=await consultaGerarPdf(dados,ativo);
+      // V199: /nome usa o próprio link válido da Yan como fonte e imprime a página
+      // já renderizada pelo navegador. Não usamos mais o contador "0" da tabela para
+      // decidir se a consulta tem ou não resultado. Os demais comandos mantêm o fluxo V196/V198.
+      if(consultaEhComandoNome(ativo)){
+        const pdf=await consultaGerarPdfPaginaNomeRenderizada(link,ativo);
         await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
         const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
         if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-        const buffer=fs.readFileSync(pdf);
         const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
         const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
         await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-          document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+          document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
           caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
           mentions:[ativo.cliente_jid]
         });
         try{fs.unlinkSync(pdf)}catch(_){}
+      }else{
+        const dados=await consultaLerPagina(link,ativo);
+        if(dados?.semResultado){
+          await consultaEnviarTextoWhatsApp(ativo,'Nenhum resultado localizado para esta consulta.',true);
+        }else{
+          const pdf=await consultaGerarPdf(dados,ativo);
+          await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+          const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+          if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+          const buffer=fs.readFileSync(pdf);
+          const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+          const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+          await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+            document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+            caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
+            mentions:[ativo.cliente_jid]
+          });
+          try{fs.unlinkSync(pdf)}catch(_){}
+        }
       }
     }else if(semResultado){
       await consultaEnviarTextoWhatsApp(ativo,texto,true);
@@ -8689,6 +8707,55 @@ function consultaPaginaNomeVazia(linhas){
   const t=(linhas||[]).join('\n').replace(/\s+/g,' ');
   return /Mostrando\s+1\s+a\s+10\s+de\s+0/i.test(t) || /Resultados da Consulta[\s\S]{0,400}\bde\s+0\b/i.test(t);
 }
+async function consultaGerarPdfPaginaNomeRenderizada(url,consulta){
+  const u=new URL(String(url));
+  if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
+  fs.mkdirSync(CONSULTA_TMP_DIR,{recursive:true});
+  const destino=path.join(CONSULTA_TMP_DIR,`consulta-${consulta.id}-nome-${Date.now()}.pdf`);
+  let browser=null;
+  try{
+    const puppeteer=require('puppeteer');
+    browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+    const page=await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
+    await page.setViewport({width:1440,height:1100,deviceScaleFactor:1});
+    await page.goto(u.toString(),{waitUntil:'domcontentloaded',timeout:10000});
+
+    // Dá tempo para JavaScript, requisições e componentes visuais terminarem de montar.
+    // O link da Yan já é considerado um resultado válido; não interpretamos o contador inicial da tabela.
+    try{ await page.waitForNetworkIdle({idleTime:700,timeout:7000}); }catch(_){}
+    try{ await page.evaluate(async()=>{ if(document.fonts?.ready) await document.fonts.ready; }); }catch(_){}
+    await new Promise(r=>setTimeout(r,1800));
+
+    // Se a aplicação ainda estiver desenhando conteúdo, espera uma pequena janela extra,
+    // sem exigir total > 0 nem linha específica.
+    let anterior='';
+    for(let i=0;i<4;i++){
+      const atual=await page.evaluate(()=>String(document.body?.innerText||'').trim());
+      if(atual && atual===anterior) break;
+      anterior=atual;
+      await new Promise(r=>setTimeout(r,600));
+    }
+
+    await page.emulateMediaType('screen');
+    await page.pdf({
+      path:destino,
+      format:'A4',
+      printBackground:true,
+      preferCSSPageSize:true,
+      margin:{top:'10mm',right:'8mm',bottom:'10mm',left:'8mm'}
+    });
+    if(!fs.existsSync(destino) || fs.statSync(destino).size<800) throw new Error('PDF renderizado da consulta /nome ficou vazio.');
+    console.log('✅ V199 /NOME: página Yan renderizada diretamente em PDF:',destino);
+    return destino;
+  }catch(e){
+    try{ if(fs.existsSync(destino)) fs.unlinkSync(destino); }catch(_){}
+    throw new Error(`Falha ao renderizar a página da consulta /nome: ${e.message}`);
+  }finally{
+    if(browser) try{await browser.close()}catch(_){}
+  }
+}
+
 async function consultaLerPaginaDinamicaNome(url){
   let browser=null;
   try{
