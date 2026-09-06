@@ -1,0 +1,7 @@
+V200 - Consulta /nome
+- Base: V199.
+- Mantém captura do Telegram e demais consultas intactas.
+- /nome agora espera até 24s por evidência real de resultado (CPF+nascimento/endereço/cartão ou total > 0).
+- Não considera estabilidade do HTML inicial como resultado pronto.
+- Após detectar dados, aguarda breve finalização, percorre a página para conteúdo preguiçoso e só então gera o PDF.
+- Timeout geral/liberação do grupo permanece em 30s.

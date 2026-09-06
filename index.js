@@ -8717,42 +8717,98 @@ async function consultaGerarPdfPaginaNomeRenderizada(url,consulta){
     const puppeteer=require('puppeteer');
     browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
     const page=await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
-    await page.setViewport({width:1440,height:1100,deviceScaleFactor:1});
+    await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1');
+    await page.setViewport({width:1280,height:1600,deviceScaleFactor:1,isMobile:false});
+
+    // V200: o /nome da Yan monta os cartões depois do HTML inicial. Portanto,
+    // não imprimimos quando a página apenas "fica estável". Esperamos evidência
+    // de um registro real (CPF/nascimento/cartão ou total > 0) por até 24 s.
     await page.goto(u.toString(),{waitUntil:'domcontentloaded',timeout:10000});
 
-    // Dá tempo para JavaScript, requisições e componentes visuais terminarem de montar.
-    // O link da Yan já é considerado um resultado válido; não interpretamos o contador inicial da tabela.
-    try{ await page.waitForNetworkIdle({idleTime:700,timeout:7000}); }catch(_){}
-    try{ await page.evaluate(async()=>{ if(document.fonts?.ready) await document.fonts.ready; }); }catch(_){}
-    await new Promise(r=>setTimeout(r,1800));
+    const inicio=Date.now();
+    const limiteMs=24000;
+    let estado={pronto:false,total:null,assinatura:false,carregando:true};
+    while(Date.now()-inicio<limiteMs){
+      try{
+        estado=await page.evaluate(()=>{
+          const body=String(document.body?.innerText||'').replace(/\u00a0/g,' ').replace(/[ \t]+/g,' ').trim();
+          const compacto=body.replace(/\s+/g,' ');
 
-    // Se a aplicação ainda estiver desenhando conteúdo, espera uma pequena janela extra,
-    // sem exigir total > 0 nem linha específica.
-    let anterior='';
-    for(let i=0;i<4;i++){
-      const atual=await page.evaluate(()=>String(document.body?.innerText||'').trim());
-      if(atual && atual===anterior) break;
-      anterior=atual;
-      await new Promise(r=>setTimeout(r,600));
+          // O rodapé normalmente muda de "de 0" para "de N" quando os dados chegam.
+          const mt=[...compacto.matchAll(/Mostrando\s+\d+\s+a\s+\d+\s+de\s+(\d+)/ig)];
+          const total=mt.length?Number(mt[mt.length-1][1]||0):null;
+
+          // Assinaturas observadas nos cartões reais da consulta /nome.
+          const temCpfRotulo=/\bCPF\b/i.test(compacto);
+          const temCpfNumero=/\b\d{11}\b/.test(compacto);
+          const temNascimento=/\bNascimento\b/i.test(compacto) && /\b\d{2}\/\d{2}\/\d{4}\b/.test(compacto);
+          const temEndereco=/\bEndere[cç]os?\s*\(\s*\d+\s*\)/i.test(compacto);
+          const temId=/\bID\s*:\s*\d+/i.test(compacto);
+
+          // Fallback estrutural: depois do carregamento surgem vários blocos/cartões
+          // contendo CPF, Nascimento ou Endereços, mesmo que as classes mudem.
+          let cartoes=0;
+          for(const el of document.querySelectorAll('article,section,div')){
+            const t=String(el.innerText||'').replace(/\s+/g,' ').trim();
+            if(t.length<25||t.length>6000) continue;
+            if(/\bCPF\b/i.test(t) && (/\bNascimento\b/i.test(t)||/\bEndere[cç]os?\b/i.test(t))) cartoes++;
+          }
+
+          const assinatura=(temCpfRotulo&&temCpfNumero&&(temNascimento||temEndereco||temId)) || cartoes>0;
+          const pronto=(Number.isFinite(total)&&total>0) || assinatura;
+          return {pronto,total,assinatura,cartoes,chars:body.length,carregando:!pronto};
+        });
+      }catch(_){ }
+
+      if(estado?.pronto) break;
+      await new Promise(r=>setTimeout(r,500));
     }
+
+    if(!estado?.pronto){
+      throw new Error('A página /nome abriu, mas os cartões de resultado não carregaram dentro de 24 segundos.');
+    }
+
+    console.log('✅ V200 /NOME: resultado real detectado antes do PDF:',JSON.stringify(estado));
+
+    // Pequena folga após o primeiro cartão para permitir que todos os registros/endereço
+    // terminem de ser desenhados antes da impressão.
+    try{ await page.waitForNetworkIdle({idleTime:500,timeout:2500}); }catch(_){ }
+    await new Promise(r=>setTimeout(r,1000));
+    try{ await page.evaluate(async()=>{ if(document.fonts?.ready) await document.fonts.ready; }); }catch(_){ }
+
+    // Garante que conteúdo preguiçoso/virtualizado tenha oportunidade de montar.
+    try{
+      await page.evaluate(async()=>{
+        const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+        let y=0, ultimo=-1;
+        for(let i=0;i<30;i++){
+          const h=Math.max(document.body?.scrollHeight||0,document.documentElement?.scrollHeight||0);
+          y=Math.min(h, y+Math.max(700,window.innerHeight||700));
+          window.scrollTo(0,y);
+          await sleep(80);
+          if(y>=h || h===ultimo) break;
+          ultimo=h;
+        }
+        window.scrollTo(0,0);
+      });
+    }catch(_){ }
 
     await page.emulateMediaType('screen');
     await page.pdf({
       path:destino,
       format:'A4',
       printBackground:true,
-      preferCSSPageSize:true,
-      margin:{top:'10mm',right:'8mm',bottom:'10mm',left:'8mm'}
+      preferCSSPageSize:false,
+      margin:{top:'8mm',right:'7mm',bottom:'8mm',left:'7mm'}
     });
-    if(!fs.existsSync(destino) || fs.statSync(destino).size<800) throw new Error('PDF renderizado da consulta /nome ficou vazio.');
-    console.log('✅ V199 /NOME: página Yan renderizada diretamente em PDF:',destino);
+    if(!fs.existsSync(destino) || fs.statSync(destino).size<1200) throw new Error('PDF renderizado da consulta /nome ficou vazio.');
+    console.log('✅ V200 /NOME: página Yan com dados carregados gerada em PDF:',destino);
     return destino;
   }catch(e){
-    try{ if(fs.existsSync(destino)) fs.unlinkSync(destino); }catch(_){}
+    try{ if(fs.existsSync(destino)) fs.unlinkSync(destino); }catch(_){ }
     throw new Error(`Falha ao renderizar a página da consulta /nome: ${e.message}`);
   }finally{
-    if(browser) try{await browser.close()}catch(_){}
+    if(browser) try{await browser.close()}catch(_){ }
   }
 }
 
