@@ -1956,6 +1956,17 @@ async function initDB() {
     finalizado_em TEXT
   )`);
 
+  // V201 — links temporários próprios para consultas /nome.
+  // O cliente recebe somente a URL deste sistema; a URL original da Yan fica no servidor.
+  await run(`CREATE TABLE IF NOT EXISTS consultas_links_temporarios (
+    token TEXT PRIMARY KEY,
+    consulta_id INTEGER,
+    url_origem TEXT NOT NULL,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    expira_em TEXT NOT NULL
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_consulta_links_expira ON consultas_links_temporarios(expira_em)`);
+
   // Migração V123: preserva a regra financeira antiga do eSIM para clientes já existentes.
   // Depois disso, cada cliente pode ter eSIM pré/pós independente dos demais serviços.
   const migracaoModalidadeEsim = await getConfig('migracao_modalidade_esim_v123', '0');
@@ -8612,6 +8623,110 @@ async function consultaEnviarTextoWhatsApp(ativo,texto,semResultado=false){
     await sock.sendMessage(ativo.grupo_whatsapp,{text:`${i===0?cab+'\n\n':''}${partes[i]}${rodape}`,mentions:i===0?[ativo.cliente_jid]:[]});
   }
 }
+
+function consultaUrlYanValida(raw){
+  try{
+    const u=new URL(String(raw||''));
+    return u.protocol==='https:' && u.hostname==='api.yanbuscas.com' && /^\/temp\/[0-9a-f-]{20,}$/i.test(u.pathname);
+  }catch(_){ return false; }
+}
+function consultaBasePublica(){
+  return String(BASE_URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/,'');
+}
+async function consultaCriarLinkTemporario(consulta,urlYan){
+  if(!consultaUrlYanValida(urlYan)) throw new Error('URL de resultado Yan inválida.');
+  const base=consultaBasePublica();
+  if(!base) throw new Error('BASE_URL não configurada para gerar o link provisório.');
+  const token=crypto.randomBytes(18).toString('base64url');
+  const expira=new Date(Date.now()+15*60*1000).toISOString();
+  await run(`DELETE FROM consultas_links_temporarios WHERE expira_em < ?`,[new Date().toISOString()]);
+  await run(`INSERT INTO consultas_links_temporarios(token,consulta_id,url_origem,expira_em) VALUES(?,?,?,?)`,[token,consulta.id,urlYan,expira]);
+  return `${base}/consulta/${token}`;
+}
+async function consultaLinkTemporarioObter(token){
+  const t=String(token||'').trim();
+  if(!/^[A-Za-z0-9_-]{16,80}$/.test(t)) return null;
+  const row=await get(`SELECT * FROM consultas_links_temporarios WHERE token=? LIMIT 1`,[t]);
+  if(!row) return null;
+  if(Date.parse(row.expira_em)<=Date.now()){
+    try{await run(`DELETE FROM consultas_links_temporarios WHERE token=?`,[t])}catch(_){}
+    return null;
+  }
+  if(!consultaUrlYanValida(row.url_origem)) return null;
+  return row;
+}
+function consultaProxyDestino(row,raw){
+  try{
+    const origem=new URL(row.url_origem);
+    const alvo=raw?new URL(String(raw),origem):origem;
+    if(alvo.protocol!=='https:' || alvo.hostname!=='api.yanbuscas.com') return null;
+    return alvo;
+  }catch(_){ return null; }
+}
+function consultaProxyUrl(token,url){
+  return `/consulta/${encodeURIComponent(token)}/recurso?u=${encodeURIComponent(url)}`;
+}
+function consultaReescreverHtmlProxy(html,token,urlAtual){
+  let out=String(html||'');
+  const origem=new URL(urlAtual);
+  // Reescreve URLs absolutas da Yan presentes no HTML/JS/CSS.
+  out=out.replace(/https:\/\/api\.yanbuscas\.com\/[A-Za-z0-9_\-./?=&%+#:]*/gi,m=>consultaProxyUrl(token,m));
+  // Reescreve src/href/action relativos e absolutos de raiz.
+  out=out.replace(/\b(src|href|action)=(['"])(?!data:|blob:|javascript:|#)([^'"]+)\2/gi,(m,attr,q,val)=>{
+    try{ const abs=new URL(val,origem); if(abs.hostname!=='api.yanbuscas.com') return m; return `${attr}=${q}${consultaProxyUrl(token,abs.toString())}${q}`; }catch(_){ return m; }
+  });
+  // Intercepta fetch/XHR feitos pelo JavaScript da página para manter tudo sob o domínio próprio.
+  const bridge=`<script>(function(){const P=${JSON.stringify('/consulta/'+token+'/recurso?u=')};const O='https://api.yanbuscas.com';function cv(u){try{const a=new URL(String(u),O);if(a.origin===O)return P+encodeURIComponent(a.href)}catch(e){}return u}const f=window.fetch;window.fetch=function(i,o){if(typeof i==='string')i=cv(i);else if(i&&i.url){try{i=new Request(cv(i.url),i)}catch(e){}}return f.call(this,i,o)};const op=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){arguments[1]=cv(u);return op.apply(this,arguments)};})();</script>`;
+  if(/<head[^>]*>/i.test(out)) out=out.replace(/<head[^>]*>/i,m=>m+bridge);
+  else out=bridge+out;
+  return out;
+}
+async function consultaProxyResponder(req,res,row,alvo){
+  const h={};
+  const ua=req.get('user-agent'); if(ua) h['user-agent']=ua;
+  const accept=req.get('accept'); if(accept) h.accept=accept;
+  const ref=req.get('referer'); if(ref) h.referer=row.url_origem;
+  const metodo=String(req.method||'GET').toUpperCase();
+  if(req.get('content-type')) h['content-type']=req.get('content-type');
+  let data;
+  if(!['GET','HEAD'].includes(metodo) && req.body!==undefined){
+    if(Buffer.isBuffer(req.body) || typeof req.body==='string') data=req.body;
+    else if(/application\/x-www-form-urlencoded/i.test(String(req.get('content-type')||''))) data=new URLSearchParams(req.body||{}).toString();
+    else data=req.body;
+  }
+  const upstream=await axios.request({url:alvo.toString(),method:metodo,responseType:'arraybuffer',timeout:15000,maxRedirects:3,headers:h,data,validateStatus:()=>true,maxContentLength:12*1024*1024});
+  const ct=String(upstream.headers['content-type']||'application/octet-stream');
+  res.status(upstream.status);
+  res.set('Cache-Control','no-store, private');
+  res.set('X-Content-Type-Options','nosniff');
+  if(ct) res.set('Content-Type',ct);
+  let body=Buffer.from(upstream.data||[]);
+  if(/text\/html/i.test(ct)) body=Buffer.from(consultaReescreverHtmlProxy(body.toString('utf8'),row.token,alvo.toString()),'utf8');
+  else if(/text\/css|javascript|application\/json|text\/plain/i.test(ct)){
+    let txt=body.toString('utf8');
+    txt=txt.replace(/https:\/\/api\.yanbuscas\.com\/[A-Za-z0-9_\-./?=&%+#:]*/gi,m=>consultaProxyUrl(row.token,m));
+    body=Buffer.from(txt,'utf8');
+  }
+  res.send(body);
+}
+
+// V201 — página provisória. Não faz redirect: a barra do navegador permanece no domínio deste sistema.
+app.get('/consulta/:token',async(req,res)=>{
+  try{
+    const row=await consultaLinkTemporarioObter(req.params.token);
+    if(!row) return res.status(410).send('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Consulta expirada</title><body style="font-family:Arial;padding:32px"><h2>Link expirado</h2><p>Esta consulta não está mais disponível.</p></body>');
+    const alvo=consultaProxyDestino(row,row.url_origem); if(!alvo) return res.status(400).send('Consulta inválida.');
+    return await consultaProxyResponder(req,res,row,alvo);
+  }catch(e){ console.log('⚠️ V201 PROXY CONSULTA:',e.message); return res.status(502).send('Não foi possível carregar a consulta agora.'); }
+});
+app.all('/consulta/:token/recurso',async(req,res)=>{
+  try{
+    const row=await consultaLinkTemporarioObter(req.params.token); if(!row) return res.status(410).send('Link expirado.');
+    const alvo=consultaProxyDestino(row,req.query.u); if(!alvo) return res.status(400).send('Recurso inválido.');
+    return await consultaProxyResponder(req,res,row,alvo);
+  }catch(e){ console.log('⚠️ V201 PROXY RECURSO:',e.message); return res.status(502).send('Falha ao carregar recurso.'); }
+});
+
 async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={}){
   if(!consultaEmMemoria) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
@@ -8630,18 +8745,16 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
       // já renderizada pelo navegador. Não usamos mais o contador "0" da tabela para
       // decidir se a consulta tem ou não resultado. Os demais comandos mantêm o fluxo V196/V198.
       if(consultaEhComandoNome(ativo)){
-        const pdf=await consultaGerarPdfPaginaNomeRenderizada(link,ativo);
-        await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+        // V201: /nome entrega um link temporário do próprio sistema, sem expor a URL Yan na mensagem/barra do navegador.
+        const linkTemporario=await consultaCriarLinkTemporario(ativo,link);
         const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
         if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
         const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
         const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
         await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-          document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-          caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
+          text:`✅ Consulta concluída — ${nomeMencao}\n\n🔗 Acesse o resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.\n\n🟢 Grupo liberado para a próxima consulta.`,
           mentions:[ativo.cliente_jid]
         });
-        try{fs.unlinkSync(pdf)}catch(_){}
       }else{
         const dados=await consultaLerPagina(link,ativo);
         if(dados?.semResultado){

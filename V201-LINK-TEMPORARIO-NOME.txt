@@ -1,0 +1,9 @@
+V201 — Link temporário próprio para /nome
+- Base: V200.
+- /nome não tenta mais gerar PDF da página dinâmica.
+- O link original api.yanbuscas.com fica salvo apenas no servidor.
+- Cliente recebe /consulta/<token> no domínio do sistema.
+- Token aleatório expira em 15 minutos.
+- Rota funciona como proxy, sem redirect simples, mantendo a barra no domínio do sistema.
+- Destino do proxy é restrito a HTTPS + api.yanbuscas.com para evitar SSRF.
+- Demais consultas e fluxo de texto/PDF permanecem inalterados.
