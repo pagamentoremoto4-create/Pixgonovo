@@ -8496,32 +8496,53 @@ async function consultaTelegramProcurarRespostaHistorico(){
   if(!ativo || ativo.processandoResultado || !consultaTelegramCliente || !consultaTelegramContaConectada) return;
   try{
     const entidade=ativo.telegram_entidade || await consultaTelegramResolverGrupo(await getConfig('consulta_tg_grupo',''));
-    const mensagens=await consultaTelegramCliente.getMessages(entidade,{limit:40});
+    // V194: o HISTÓRICO é a fonte principal da resposta. Buscamos uma janela maior
+    // e analisamos apenas mensagens posteriores ao ID do comando enviado.
+    const mensagens=await consultaTelegramCliente.getMessages(entidade,{limit:100});
     const enviadoId=Number(ativo.telegram_enviado_id||0);
-    // V190: processar em ordem cronológica. Assim, se o Yan enviar primeiro
-    // uma mensagem de andamento e depois o resultado, a primeira nunca é
-    // confundida com o resultado final durante o polling.
     const ordenadas=[...(mensagens||[])].sort((a,b)=>Number(a?.id||0)-Number(b?.id||0));
+
     for(const msg of ordenadas){
       const mid=Number(msg?.id||0);
-      if(enviadoId && mid<=enviadoId) continue;
-      if(msg?.out) continue;
+      if(!mid || (enviadoId && mid<=enviadoId)) continue;
       if(ativo.telegram_processados?.has?.(String(mid))) continue;
-      const texto=String(msg?.message||msg?.text||'');
-      if(!consultaEhRespostaDaConsultaAtiva(msg,texto,ativo)) continue;
-      const dado=consultaExtrairDadoTelegram(texto);
-      if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
+
+      const texto=String(msg?.message||msg?.text||'').trim();
+      if(!texto) continue;
       const replyId=consultaTelegramReplyId(msg);
-      console.log('✅ V190 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid,'reply=',replyId||'-');
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcar:true,replyId});
+      const senderId=consultaTelegramSenderId(msg);
+      const link=consultaExtrairLinkTelegram(texto);
+      const dado=consultaExtrairDadoTelegram(texto);
+      const correlacaoOk=!dado || !ativo.dado_consulta || consultaNormalizarCorrelacao(dado)===consultaNormalizarCorrelacao(ativo.dado_consulta);
+
+      // Âncoras confiáveis para reconhecer o Yan:
+      // 1) reply direto ao nosso comando; 2) link oficial; 3) Dados da consulta
+      // correlacionados; 4) assinatura Yan; 5) mensagens seguintes do mesmo remetente.
+      let ehYan=false;
+      if(enviadoId && replyId===enviadoId) ehYan=true;
+      if(link) ehYan=true;
+      if(dado && correlacaoOk) ehYan=true;
+      if(/Yan\s*Buscas/i.test(texto)) ehYan=true;
+      if(ativo.telegram_yan_sender_id && senderId && senderId===ativo.telegram_yan_sender_id) ehYan=true;
+
+      // Em consultas textuais, a primeira mensagem intermediária costuma ser reply
+      // direto ao comando. Ao encontrá-la, fixamos o sender do Yan e aceitamos a
+      // próxima mensagem desse mesmo remetente como resultado final.
+      if(!ehYan) continue;
+      if(!correlacaoOk) continue;
+      if(senderId && !ativo.telegram_yan_sender_id) ativo.telegram_yan_sender_id=senderId;
+
+      console.log('✅ V194 HISTÓRICO YAN:',mid,'reply=',replyId||'-','sender=',senderId||'-',link?'LINK':'TEXTO');
+      await consultaTratarTextoRespostaTelegram(texto,String(mid),{forcar:true,replyId});
       if(!consultaEmMemoria || consultaEmMemoria.processandoResultado) break;
     }
-  }catch(e){ console.log('⚠️ V190 POLLING TELEGRAM:',e.message); }
+  }catch(e){ console.log('⚠️ V194 POLLING TELEGRAM:',e?.message||e); }
 }
 function consultaTelegramIniciarPolling(){
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
-  consultaPollingTimer=setInterval(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },2000);
-  setTimeout(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },800);
+  // V194: polling mais rápido e como caminho principal, sem depender do NewMessage.
+  consultaPollingTimer=setInterval(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },1000);
+  setTimeout(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },250);
 }
 async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   const grupo=await getConfig('consulta_wa_grupo','');
@@ -8750,12 +8771,12 @@ async function consultaBaixarPdfOriginalYan(url,consulta){
     // V192: usa o próprio botão "Baixar PDF" do Yan para preservar o PDF original.
     // O require fica aqui para que, se o navegador falhar, o fluxo caia no fallback atual.
     const puppeteer=require('puppeteer');
-    browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+    browser=await puppeteer.launch({headless:true,timeout:7000,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
     const page=await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36');
     const client=await page.target().createCDPSession();
     await client.send('Page.setDownloadBehavior',{behavior:'allow',downloadPath:pasta});
-    await page.goto(u.toString(),{waitUntil:'networkidle2',timeout:45000});
+    await page.goto(u.toString(),{waitUntil:'domcontentloaded',timeout:7000});
 
     const achou=await page.evaluate(()=>{
       const els=[...document.querySelectorAll('button,a,[role="button"]')];
@@ -8766,7 +8787,7 @@ async function consultaBaixarPdfOriginalYan(url,consulta){
     });
     if(!achou) throw new Error('Botão Baixar PDF não localizado na página do Yan.');
 
-    const limite=Date.now()+45000;
+    const limite=Date.now()+7000;
     let arquivo=null;
     while(Date.now()<limite){
       const nomes=fs.readdirSync(pasta).filter(n=>!n.endsWith('.crdownload')&&!n.endsWith('.tmp'));
@@ -8904,8 +8925,8 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     consultaTelegramIniciarPolling();
     if(consultaAguardarTimer){ clearTimeout(consultaAguardarTimer); consultaAguardarTimer=null; }
-    // V193: processamento volta a ser imediato. O polling/histórico continua como fallback.
-    const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
+    // V194: processamento imediato; histórico Telegram é o caminho principal.
+    const timeoutSeg=30; // V194: grupo nunca fica fechado por mais de 30 segundos
     consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
   return true;
@@ -8931,7 +8952,7 @@ function consultaLoginStatus(){
 }
 
 app.get('/admin/consultas-assinatura', async (req,res)=>{
-  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','180');
+  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout='30';
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
@@ -8944,7 +8965,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Conta Telegram</h3><p><b>${safeHtml(st)}</b></p><small>Telefone: ${safeHtml(c.telefone||'Não configurado')}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
-  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>V194: limite fixo de 30 segundos para não manter o grupo bloqueado.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
@@ -8976,7 +8997,7 @@ app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
     await setConfig('consulta_ativa',req.body.ativa==='1'?'1':'0');
     await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
     await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
-    await setConfig('consulta_timeout_seg',String(Math.max(60,Math.min(900,Number(req.body.timeout_seg||180)||180))));
+    await setConfig('consulta_timeout_seg','30');
     res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Fluxo salvo.'));
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
