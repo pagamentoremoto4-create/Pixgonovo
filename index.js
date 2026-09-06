@@ -8693,7 +8693,6 @@ async function consultaProcessarResultadoFinalTelegram(texto,messageId=''){
 async function consultaProcessarRespostasAcumuladas(){
   const ativo=consultaEmMemoria;
   if(!ativo || ativo.processandoResultado) return;
-  if(Date.now() < Number(ativo.telegram_aguardar_ate||0)) return;
   const respostas=[...(ativo.telegram_respostas||[])].sort((a,b)=>Number(a.id||0)-Number(b.id||0));
   if(!respostas.length) return;
 
@@ -8731,10 +8730,9 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   ativo.telegram_respostas.push({id:chave||String(Date.now()),texto:textoLimpo,replyId:Number(opcoes?.replyId||0),recebidoEm:Date.now()});
   console.log('📥 V191 RESPOSTA TELEGRAM COLETADA:',chave||'-',consultaMensagemIntermediariaYan(textoLimpo)?'(intermediária)':'(candidata a resultado)');
 
-  // V191: nenhuma resposta é entregue/processada antes dos 10 segundos.
-  // Depois da janela, analisa o que foi coletado. Se só houver mensagem
-  // intermediária, continua aguardando as próximas respostas até o timeout normal.
-  if(Date.now() >= Number(ativo.telegram_aguardar_ate||0)) await consultaProcessarRespostasAcumuladas();
+  // V193: sem espera fixa de 10 segundos. A mensagem intermediária é ignorada
+  // e qualquer resposta final válida é processada assim que chegar.
+  await consultaProcessarRespostasAcumuladas();
 }
 function consultaDecodificarHtml(txt){
   const mapa={'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'",'&apos;':"'"};
@@ -8902,15 +8900,11 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
     consultaEmMemoria.telegram_entidade=entidade;
     consultaEmMemoria.telegram_enviado_id=String(enviado?.id||'');
     consultaEmMemoria.processandoResultado=false;
-    consultaEmMemoria.telegram_aguardar_ate=Date.now()+10000;
+    consultaEmMemoria.telegram_aguardar_ate=0;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     consultaTelegramIniciarPolling();
     if(consultaAguardarTimer){ clearTimeout(consultaAguardarTimer); consultaAguardarTimer=null; }
-    consultaAguardarTimer=setTimeout(async()=>{
-      if(consultaEmMemoria?.id!==id) return;
-      try{ await consultaTelegramProcurarRespostaHistorico(); }catch(_){}
-      try{ await consultaProcessarRespostasAcumuladas(); }catch(e){ console.log('⚠️ V191 PROCESSAR APÓS 10S:',e.message); }
-    },10050);
+    // V193: processamento volta a ser imediato. O polling/histórico continua como fallback.
     const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
     consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
