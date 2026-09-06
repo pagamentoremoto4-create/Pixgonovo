@@ -1,0 +1,10 @@
+V205 - COMANDOS DHRU DO GRUPO USANDO A ROTINA OFICIAL
+
+- Base: V204.
+- /check, /xiaomi, /converter e qualquer novo comando Dhru cadastrado no painel usam a mesma regra de aceite da integração oficial Dhru.
+- status=success ou code=200 é tratado como pedido aceito mesmo quando order_uuid não vem imediatamente.
+- O grupo usa feedback_url + reference_id group-ID para receber o resultado quando a API trabalha por callback.
+- Quando order_uuid vem no envio, continua acompanhando por polling.
+- Resultado final continua sendo entregue em PDF no grupo.
+- Grupo continua com liberação de segurança em até 30 segundos.
+- Fluxo Yan/V203 e links temporários não foram alterados.

@@ -1234,6 +1234,31 @@ async function textoEntradaDhru(servico){
   if(fs.length<=1) return dhruPromptCampo(fs[0]||{name:labelEntradaServico(servico)},0,1);
   return `📋 Envie os dados abaixo, *um por linha*, usando exatamente este formato:\n\n${fs.map(f=>`${f.name}: ${f.required===false?'(opcional)':'...'}`).join('\n')}\n\nExemplo:\n${fs.map(f=>`${f.name}: exemplo`).join('\n')}`;
 }
+// V205 — envio oficial Dhru compartilhado entre pedidos normais e comandos do grupo.
+// Mantém a mesma regra já usada pelo sistema: status=success/code=200 significa
+// pedido aceito mesmo quando a API ainda não devolve order_uuid; nesse caso o
+// resultado chega pelo feedback_url usando o reference_id.
+async function dhruEnviarPedidoOficial(productUuid, camposEntrada, referenceId){
+  const campos={...(camposEntrada||{})};
+  const pub=await dhruPublicBase(), secret=await dhruCallbackSecret();
+  if(pub) campos.feedback_url=`${pub}/api/dhru/feedback?secret=${encodeURIComponent(secret)}`;
+  campos.reference_id=String(referenceId);
+  if(campos.Quantity===undefined && campos.quantity===undefined) campos.Quantity=1;
+  const payload=[{product_uuid:String(productUuid||''),fields:[campos]}];
+  const resp=await dhruRequest('post','/order',payload);
+  if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'A API Dhru rejeitou o pedido');
+  const flattenDhruData=(v)=>{
+    if(!Array.isArray(v)) return v==null?[]:[v];
+    return v.flatMap(x=>Array.isArray(x)?flattenDhruData(x):[x]);
+  };
+  const arr=flattenDhruData(resp?.data).filter(Boolean);
+  const data=arr.find(x=>String(x?.reference_id||'')===String(referenceId))||arr[0]||{};
+  const orderUuid=String(data?.order_uuid||data?.order_id||'').trim();
+  const apiOk=String(resp?.status||'').toLowerCase()==='success' || Number(resp?.code)===200;
+  if(!orderUuid && !apiOk) throw new Error(resp?.message||'A API Dhru não confirmou o envio do pedido');
+  return {resp,orderUuid:orderUuid||null,aguardandoFeedback:!orderUuid,payload};
+}
+
 async function executarPedidoDhru(pedidoId){
   const pedido=await get(`SELECT p.*,s.api_provider,s.api_service_id FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[pedidoId]);
   if(!pedido||pedido.api_provider!=='DHRU'||!pedido.api_service_id) return {executado:false};
@@ -1247,32 +1272,14 @@ async function executarPedidoDhru(pedidoId){
     await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[e.message,pedido.id]);
     throw e;
   }
-  const pub=await dhruPublicBase(), secret=await dhruCallbackSecret();
-  if(pub) campos.feedback_url=`${pub}/api/dhru/feedback?secret=${encodeURIComponent(secret)}`;
-  campos.reference_id=String(pedido.id);
-  if(campos.Quantity===undefined && campos.quantity===undefined) campos.Quantity=1;
-  const payload=[{product_uuid:pedido.api_service_id,fields:[campos]}];
-  const ins=await run(`INSERT INTO dhru_orders (pedido_id,revenda_id,product_uuid,reference_id,status,request_json) VALUES (?,?,?,?, 'ENVIANDO',?)`,[pedido.id,pedido.revenda_id,pedido.api_service_id,String(pedido.id),JSON.stringify(payload)]);
+  const referenceId=String(pedido.id);
+  // Pré-monta apenas para registrar a tentativa; o envio usa a rotina oficial compartilhada.
+  const payloadRegistro=[{product_uuid:pedido.api_service_id,fields:[{...campos,reference_id:referenceId}]}];
+  const ins=await run(`INSERT INTO dhru_orders (pedido_id,revenda_id,product_uuid,reference_id,status,request_json) VALUES (?,?,?,?, 'ENVIANDO',?)`,[pedido.id,pedido.revenda_id,pedido.api_service_id,referenceId,JSON.stringify(payloadRegistro)]);
   try{
-    const resp=await dhruRequest('post','/order',payload);
-    if(String(resp?.status||'').toLowerCase()==='error') throw new Error(resp?.message||'A API Dhru rejeitou o pedido');
-    // A API oficial pode retornar data como array simples OU array aninhado (lotes).
-    // Achata de forma segura para localizar o pedido pelo reference_id.
-    const flattenDhruData=(v)=>{
-      if(!Array.isArray(v)) return v==null?[]:[v];
-      return v.flatMap(x=>Array.isArray(x)?flattenDhruData(x):[x]);
-    };
-    const arr=flattenDhruData(resp?.data).filter(Boolean);
-    const data=arr.find(x=>String(x?.reference_id||'')===String(pedido.id))||arr[0]||{};
-    const orderUuid=String(data?.order_uuid||data?.order_id||'').trim();
-
-    // status=success / code=200 significa que o fornecedor ACEITOU o pedido.
-    // Algumas instalações não retornam order_uuid imediatamente, mas o feedback_url
-    // ainda envia reference_id + order_id depois. NUNCA estornar um pedido aceito.
-    const apiOk=String(resp?.status||'').toLowerCase()==='success' || Number(resp?.code)===200;
-    if(!orderUuid && !apiOk) throw new Error(resp?.message||'A API Dhru não confirmou o envio do pedido');
-
-    await run(`UPDATE dhru_orders SET status=?,order_uuid=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid?'ENVIADO':'AGUARDANDO_FEEDBACK',orderUuid,JSON.stringify(resp),ins.lastID]);
+    const envio=await dhruEnviarPedidoOficial(pedido.api_service_id,campos,referenceId);
+    const resp=envio.resp, orderUuid=envio.orderUuid;
+    await run(`UPDATE dhru_orders SET status=?,order_uuid=?,request_json=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid?'ENVIADO':'AGUARDANDO_FEEDBACK',orderUuid,JSON.stringify(envio.payload),JSON.stringify(resp),ins.lastID]);
     await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
     console.log(`✅ DHRU pedido ${pedido.id} aceito pelo fornecedor${orderUuid?' | '+orderUuid:' | aguardando feedback'}`);
     return {executado:true,sucesso:true,orderUuid:orderUuid||null,aguardandoFeedback:!orderUuid,resposta:resp};
@@ -1425,6 +1432,28 @@ function timUnlockPedidoConsultaInline(o){
 
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
+  const gm=reference.match(/^group-(\d+)$/i);
+  if(gm){
+    const execId=Number(gm[1]);
+    const row=await get('SELECT * FROM consulta_dhru_execucoes WHERE id=?',[execId]);
+    if(!row) throw new Error('consulta do grupo não encontrada');
+    const status=String(body?.status||'').toLowerCase();
+    const orderId=String(body?.order_id||body?.order_uuid||'').trim();
+    const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+    await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderId,(status||'PROCESSANDO').toUpperCase(),replay,replay,execId]);
+    if(['success','completed','complete','done'].includes(status) && replay){
+      if(consultaDhruEmMemoria?.id===execId) await consultaDhruEntregar(consultaDhruEmMemoria,replay);
+      else await run(`UPDATE consulta_dhru_execucoes SET status='CONCLUIDA_PENDENTE_ENTREGA',resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[replay,execId]);
+    }else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
+      await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(replay||`Dhru: ${status}`).slice(0,800),execId]);
+      if(consultaDhruEmMemoria?.id===execId){
+        const ctx=consultaDhruEmMemoria;
+        try{await ctx.socket.sendMessage(ctx.grupo,{text:'❌ Não foi possível concluir esta consulta.',mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
+        await consultaDhruLiberarGrupo(ctx); consultaDhruEmMemoria=null;
+      }
+    }
+    return {consultaGrupoId:execId,status,replay};
+  }
   if(timUnlockPedidoIdFromReference(reference)) return processarFeedbackTimUnlock(body);
   if(!reference) throw new Error('reference_id ausente');
   const pedidoId=Number(reference); if(!pedidoId) throw new Error('reference_id inválido');
@@ -9174,13 +9203,18 @@ async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,text
   const ctx={id:ins.lastID,socket:socketAtual,grupo,cliente_jid:participante,cliente_nome:msg?.pushName||'Cliente',entrada,nome:map.nome_exibicao||map.comando}; consultaDhruEmMemoria=ctx;
   try{
     await socketAtual.groupSettingUpdate(grupo,'announcement'); await socketAtual.sendMessage(grupo,{text:'🔒 Consulta em processamento. O grupo será liberado assim que o resultado for entregue.'});
-    campos.reference_id=`group-${ctx.id}`; if(campos.Quantity===undefined&&campos.quantity===undefined) campos.Quantity=1;
-    const resp=await dhruRequest('post','/order',[{product_uuid:map.api_service_id,fields:[campos]}]);
-    const flat=v=>Array.isArray(v)?v.flatMap(flat):(v==null?[]:[v]); const d=flat(resp?.data)[0]||{}; const order=String(d.order_uuid||d.order_id||'').trim();
-    if(!order) throw new Error(resp?.message||'A Dhru não retornou o identificador do pedido.');
-    ctx.order_uuid=order; await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status='PROCESSANDO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[order,ctx.id]);
+    const referenceId=`group-${ctx.id}`;
+    const envio=await dhruEnviarPedidoOficial(map.api_service_id,campos,referenceId);
+    const order=envio.orderUuid||'';
+    ctx.order_uuid=order||null;
+    ctx.aguardando_feedback=!order;
+    await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[order,order?'PROCESSANDO':'AGUARDANDO_FEEDBACK',ctx.id]);
+    // Segurança: o grupo sempre volta a liberar em no máximo 30s, sem cancelar o retorno do fornecedor.
     setTimeout(()=>{ if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruLiberarGrupo(ctx).catch(()=>{}); },30000);
-    consultaDhruAcompanhar(ctx).catch(e=>console.log('❌ DHRU GRUPO',e.message)); return true;
+    // Se a API já devolveu order_uuid, acompanha por polling; caso contrário o mesmo
+    // feedback_url usado pelos pedidos normais concluirá a consulta via reference_id group-ID.
+    if(order) consultaDhruAcompanhar(ctx).catch(e=>console.log('❌ DHRU GRUPO',e.message));
+    return true;
   }catch(e){
     await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(e.message).slice(0,800),ctx.id]);
     await socketAtual.sendMessage(grupo,{text:'❌ Não foi possível iniciar esta consulta.'}); await consultaDhruLiberarGrupo(ctx); consultaDhruEmMemoria=null; return true;
