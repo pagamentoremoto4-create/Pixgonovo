@@ -8713,7 +8713,7 @@ async function consultaEnviarTextoWhatsApp(ativo,texto,semResultado=false){
   const numero=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
   const nome=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numero}`;
   const corpo=consultaLimparTextoYan(texto);
-  const cab=semResultado?`⚠️ Consulta sem resultado — ${nome}`:`✅ Consulta concluída — ${nome}`;
+  const cab=semResultado?`⚠️ @${String(nome).replace(/^@+/, '')}, consulta sem resultado.`:`✅ @${String(nome).replace(/^@+/, '')}, sua consulta foi concluída.`;
   const partes=[]; const max=3200;
   for(let i=0;i<corpo.length;i+=max) partes.push(corpo.slice(i,i+max));
   if(!partes.length) partes.push(semResultado?'Nenhum resultado localizado.':'Resultado recebido.');
@@ -8873,7 +8873,7 @@ ${linkTemporario}
       const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
       await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
         document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-        caption:`✅ Consulta concluída — ${nomeMencao}\n📄 O resultado em texto foi convertido para PDF.\n\n🟢 Grupo liberado para a próxima consulta.`,
+        caption:`✅ @${String(nomeMencao).replace(/^@+/,'')}, sua consulta foi concluída.\n📄 O resultado em texto foi convertido para PDF.\n\n🟢 Grupo liberado para a próxima consulta.`,
         mentions:[ativo.cliente_jid]
       });
       try{fs.unlinkSync(pdf)}catch(_){}
@@ -9182,8 +9182,9 @@ async function consultaDhruEntregar(ctx,resultado){
   const resultadoCliente=traduzirResultadoDhruPt(bruto).trim();
   if(!resultadoCliente) throw new Error('Dhru concluiu a consulta sem conteúdo de resultado');
 
+  const nomeCliente=String(ctx.cliente_nome||'Cliente').replace(/^@+/,'').trim()||'Cliente';
   await ctx.socket.sendMessage(ctx.grupo,{
-    text:`✅ Consulta concluída — ${ctx.cliente_nome||'Cliente'}`,
+    text:`✅ @${nomeCliente}, sua consulta foi concluída.`,
     mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]
   });
 
@@ -9317,8 +9318,10 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const dhruCmds=await all(`SELECT c.*,s.nome servico_nome FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id ORDER BY c.id`);
   const dhruServicos=await all(`SELECT id,COALESCE(NULLIF(nome_exibicao,''),nome) nome FROM servicos_catalogo WHERE api_provider='DHRU' ORDER BY nome COLLATE NOCASE`);
   const yanReservados=new Set(CONSULTA_COMANDOS_VALIDOS.flatMap(x=>x.comandos||[]).map(x=>String(x).toLowerCase()));
-  const dhruOptions=(sel)=>['<option value="">Selecione o serviço Dhru...</option>',...dhruServicos.map(s=>`<option value="${s.id}" ${Number(sel)===Number(s.id)?'selected':''}>${safeHtml(s.nome)} (#${s.id})</option>`)].join('');
-  const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="forms-inline"><select name="servico_id" required>${dhruOptions(c.servico_id)}</select><input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome comercial"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
+  const dhruLabel=(s)=>`${s.nome} (#${s.id})`;
+  const dhruAtual=(sel)=>{const x=dhruServicos.find(s=>Number(s.id)===Number(sel));return x?dhruLabel(x):''};
+  const dhruDataList=`<datalist id="dhru-servicos-lista">${dhruServicos.map(s=>`<option value="${safeHtml(dhruLabel(s))}"></option>`).join('')}</datalist>`;
+  const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="forms-inline dhru-service-form"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" value="${safeHtml(dhruAtual(c.servico_id))}" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id" value="${Number(c.servico_id)||''}"><input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome comercial"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
   const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
   const rows=hist.map(x=>`<tr><td>#${x.id}</td><td>${safeHtml(x.cliente_nome||'-')}</td><td>${safeHtml(x.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(x.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
   const statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
@@ -9330,7 +9333,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
-  <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><select name="servico_id" required>${dhruOptions('')}</select><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div>
+  <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Digite parte do nome do serviço para filtrar as opções. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p>${dhruDataList}<form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline dhru-service-form"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id"><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table><script>(function(){function sync(i){var f=i.closest('form'),h=f&&f.querySelector('input[name=servico_id]'),m=(i.value||'').match(/\(#(\d+)\)\s*$/);if(h)h.value=m?m[1]:''}document.querySelectorAll('.dhru-service-search').forEach(function(i){i.addEventListener('input',function(){sync(i)});i.addEventListener('change',function(){sync(i)});sync(i)});document.querySelectorAll('.dhru-service-form').forEach(function(f){f.addEventListener('submit',function(e){var i=f.querySelector('.dhru-service-search'),h=f.querySelector('input[name=servico_id]');sync(i);if(!h.value){e.preventDefault();alert('Selecione um serviço Dhru da lista.')}})})})();</script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });
