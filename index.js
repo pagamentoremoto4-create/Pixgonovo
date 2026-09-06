@@ -1936,6 +1936,24 @@ async function initDB() {
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
+
+  // V184 — Consultas por assinatura (WhatsApp -> Telegram -> PDF)
+  await run(`CREATE TABLE IF NOT EXISTS consultas_assinatura (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente_jid TEXT,
+    cliente_nome TEXT,
+    grupo_whatsapp TEXT,
+    comando TEXT,
+    dado_consulta TEXT,
+    telegram_message_id TEXT,
+    resultado_url TEXT,
+    status TEXT DEFAULT 'AGUARDANDO',
+    erro TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    finalizado_em TEXT
+  )`);
+
   // Migração V123: preserva a regra financeira antiga do eSIM para clientes já existentes.
   // Depois disso, cada cliente pode ter eSIM pré/pós independente dos demais serviços.
   const migracaoModalidadeEsim = await getConfig('migracao_modalidade_esim_v123', '0');
@@ -2313,7 +2331,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -7661,7 +7679,12 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
-          if (!jidPrincipal || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+          if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
+          if (jidPrincipal.endsWith('@g.us')) {
+            const textoGrupo = textoMensagemBaileys(msg?.message || {});
+            if (await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
+            continue;
+          }
 
           if (msg?.key?.fromMe) {
             const textoEnviado = textoMensagemBaileys(msg?.message || {});
@@ -8206,7 +8229,12 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
-          if (!jidPrincipal || jidPrincipal === 'status@broadcast' || jidPrincipal.endsWith('@g.us')) continue;
+          if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
+          if (jidPrincipal.endsWith('@g.us')) {
+            const textoGrupo = textoMensagemBaileys(msg?.message || {});
+            if (await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
+            continue;
+          }
 
           // V90: também funciona na sessão legada enquanto a migração não terminar.
           if (msg?.key?.fromMe) {
@@ -8270,6 +8298,237 @@ async function desconectarWhatsApp() {
   try { fs.rmSync(WHATSAPP_SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
   fs.mkdirSync(WHATSAPP_SESSION_DIR, { recursive: true });
 }
+
+
+// ===== V184 — CONSULTAS POR ASSINATURA =====
+let consultaTelegramBot = null;
+let consultaTelegramTokenAtual = '';
+let consultaEmMemoria = null;
+let consultaTimeoutTimer = null;
+const CONSULTA_TMP_DIR = path.join(DATA_DIR, 'consultas-temp');
+
+function consultaTokenMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)}${t.slice(-5)}` : 'Não configurado'; }
+async function consultaObterSocketWhatsApp(grupo=''){
+  const candidatos=[];
+  if(consultaEmMemoria?.socket) candidatos.push(consultaEmMemoria.socket);
+  if(whatsappSocket) candidatos.push(whatsappSocket);
+  try{ for(const x of whatsappSessoes.values()) if(x?.conectado&&x?.socket) candidatos.push(x.socket); }catch(_){}
+  const unicos=[...new Set(candidatos.filter(Boolean))];
+  if(!grupo) return unicos[0]||null;
+  for(const sock of unicos){ try{ await sock.groupMetadata(grupo); return sock; }catch(_){} }
+  return null;
+}
+async function consultaTelegramToken(){ return dhruDecrypt(await getConfig('consulta_tg_token_enc','')); }
+async function consultaAtivaConfig(){ return (await getConfig('consulta_ativa','0')) === '1'; }
+function consultaExtrairDadoDoComando(texto){
+  const t=String(texto||'').trim();
+  const m=t.match(/(?:\b\d{11}\b|\b\d{14}\b|\b\d{15}\b)/);
+  return m ? m[0] : t.slice(0,120);
+}
+function consultaExtrairLinkTelegram(texto){
+  const m=String(texto||'').match(/https:\/\/api\.yanbuscas\.com\/temp\/[^\s<>]+/i);
+  return m ? m[0].replace(/[),.;]+$/,'') : '';
+}
+function consultaExtrairDadoTelegram(texto){
+  const m=String(texto||'').match(/Dados da consulta:\s*([^\n\r]+)/i);
+  return m ? m[1].trim() : '';
+}
+async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
+  const grupo=await getConfig('consulta_wa_grupo','');
+  try {
+    const sock=await consultaObterSocketWhatsApp(grupo);
+    if(grupo && sock){
+      await sock.groupSettingUpdate(grupo,'not_announcement');
+      await sock.sendMessage(grupo,{text: motivo==='erro' ? '🟢 Grupo liberado. A consulta anterior não pôde ser concluída.' : '🟢 Grupo liberado para a próxima consulta.'});
+    }
+  } catch(e){ console.log('⚠️ V184 LIBERAR GRUPO:',e.message); }
+  if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
+  consultaEmMemoria=null;
+}
+async function consultaFalhar(id,erro){
+  const msg=String(erro?.message||erro||'Erro desconhecido').slice(0,1000);
+  try{ await run(`UPDATE consultas_assinatura SET status='ERRO',erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[msg,id]); }catch(_){}
+  try{
+    const c=await get('SELECT * FROM consultas_assinatura WHERE id=?',[id]);
+    const sock=await consultaObterSocketWhatsApp(c?.grupo_whatsapp||'');
+    if(c?.cliente_jid && sock) await sock.sendMessage(c.cliente_jid,{text:'❌ Não foi possível concluir sua consulta. O grupo será liberado para uma nova tentativa.'});
+  }catch(_){}
+  await consultaGrupoWhatsAppLiberar('erro');
+}
+async function consultaIniciarTelegramBot(force=false){
+  if(!TelegramBot) return false;
+  const token=await consultaTelegramToken();
+  if(!token){
+    if(consultaTelegramBot){ try{ await consultaTelegramBot.stopPolling(); }catch(_){} consultaTelegramBot=null; consultaTelegramTokenAtual=''; }
+    return false;
+  }
+  if(consultaTelegramBot && consultaTelegramTokenAtual===token && !force) return true;
+  if(consultaTelegramBot){ try{ await consultaTelegramBot.stopPolling(); }catch(_){} consultaTelegramBot=null; }
+  const bot=new TelegramBot(token,{polling:true});
+  consultaTelegramBot=bot; consultaTelegramTokenAtual=token;
+  bot.on('polling_error',e=>console.log('❌ V184 TELEGRAM POLLING:',e?.message||e));
+  bot.on('message',msg=>consultaTratarRespostaTelegram(msg).catch(e=>console.log('❌ V184 RESPOSTA TG:',e.message)));
+  console.log('✅ V184 BOT TELEGRAM DE CONSULTAS INICIADO');
+  return true;
+}
+async function consultaTratarRespostaTelegram(msg){
+  if(!consultaEmMemoria) return;
+  const grupo=await getConfig('consulta_tg_grupo','');
+  if(!grupo || String(msg?.chat?.id)!==String(grupo)) return;
+  const texto=msg?.text||msg?.caption||'';
+  if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) return;
+  const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
+  if(!link) return;
+  const ativo=consultaEmMemoria;
+  if(dado && ativo.dado_consulta && String(dado).trim()!==String(ativo.dado_consulta).trim()) return;
+  await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,String(msg.message_id||''),ativo.id]);
+  try{
+    const dados=await consultaLerPagina(link);
+    const pdf=await consultaGerarPdf(dados,ativo);
+    await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+    const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+    if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+    const buffer=fs.readFileSync(pdf);
+    const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+    const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+    await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+      document:buffer,
+      mimetype:'application/pdf',
+      fileName:`consulta-${ativo.id}.pdf`,
+      caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
+      mentions:[ativo.cliente_jid]
+    });
+    try{fs.unlinkSync(pdf)}catch(_){}
+    await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+    await consultaGrupoWhatsAppLiberar('finalizada');
+  }catch(e){ await consultaFalhar(ativo.id,e); }
+}
+function consultaDecodificarHtml(txt){
+  const mapa={'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'",'&apos;':"'"};
+  return String(txt||'').replace(/&(nbsp|amp|lt|gt|quot|apos);|&#39;/gi,m=>mapa[m.toLowerCase()]||m).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCharCode(parseInt(n,16)));
+}
+async function consultaLerPagina(url){
+  const r=await axios.get(url,{timeout:45000,headers:{'User-Agent':'Mozilla/5.0 CentralUnlocker/1.0'},maxContentLength:8*1024*1024,responseType:'text'});
+  let html=String(r.data||'');
+  const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'Resultado da consulta';
+  html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi,' ');
+  html=html.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div|section|article|header|footer|li|tr|table|h1|h2|h3|h4|h5|h6|dt|dd)>/gi,'\n').replace(/<td\b[^>]*>/gi,' | ').replace(/<th\b[^>]*>/gi,' | ');
+  const texto=consultaDecodificarHtml(html.replace(/<[^>]+>/g,' '));
+  const linhas=[];
+  for(const parte of texto.split(/\n+/)){
+    const limpa=parte.replace(/[ \t\r]+/g,' ').replace(/^\s*\|\s*/,'').replace(/\s*\|\s*$/,'').trim();
+    if(!limpa||limpa.length>2000) continue;
+    if(!linhas.includes(limpa)) linhas.push(limpa);
+  }
+  if(!linhas.length) throw new Error('A página de resultado não retornou conteúdo legível.');
+  return {titulo:consultaDecodificarHtml(title.replace(/<[^>]+>/g,' ')).trim(),linhas,url};
+}
+function consultaPdfEscapeLatin1(s){
+  return Buffer.from(String(s||'').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,' '),'latin1').toString('latin1');
+}
+function consultaQuebrarLinha(texto,max=92){
+  const palavras=String(texto||'').split(/\s+/), out=[]; let linha='';
+  for(const p of palavras){ const teste=linha?linha+' '+p:p; if(teste.length>max&&linha){out.push(linha); linha=p;}else linha=teste; }
+  if(linha) out.push(linha); return out.length?out:[''];
+}
+async function consultaGerarPdf(dados,consulta){
+  fs.mkdirSync(CONSULTA_TMP_DIR,{recursive:true});
+  const destino=path.join(CONSULTA_TMP_DIR,`consulta-${consulta.id}-${Date.now()}.pdf`);
+  const linhas=['RESULTADO DA CONSULTA','',`Consulta: ${consulta.dado_consulta||'-'}`,`Gerado em: ${new Date().toLocaleString('pt-BR',{timeZone:'America/Bahia'})}`,'',dados.titulo||'Dados retornados','',...dados.linhas.flatMap(x=>consultaQuebrarLinha(x,92))];
+  const porPagina=55, paginas=[]; for(let i=0;i<linhas.length;i+=porPagina) paginas.push(linhas.slice(i,i+porPagina));
+  const objects=[null]; const add=x=>{objects.push(x);return objects.length-1};
+  const fontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  const pagesId=add(''); const pageIds=[];
+  for(const pg of paginas){
+    let stream='BT\n/F1 9 Tf\n42 800 Td\n12 TL\n';
+    pg.forEach((ln,i)=>{ if(i) stream+='T*\n'; stream+=`(${consultaPdfEscapeLatin1(ln)}) Tj\n`; }); stream+='ET\n';
+    const contentId=add(`<< /Length ${Buffer.byteLength(stream,'latin1')} >>\nstream\n${stream}endstream`);
+    const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`); pageIds.push(pageId);
+  }
+  objects[pagesId]=`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map(id=>id+' 0 R').join(' ')}] >>`;
+  const catalogId=add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  let pdf='%PDF-1.4\n%âãÏÓ\n', offsets=[0];
+  for(let i=1;i<objects.length;i++){ offsets[i]=Buffer.byteLength(pdf,'latin1'); pdf+=`${i} 0 obj\n${objects[i]}\nendobj\n`; }
+  const xref=Buffer.byteLength(pdf,'latin1'); pdf+=`xref\n0 ${objects.length}\n0000000000 65535 f \n`; for(let i=1;i<objects.length;i++) pdf+=String(offsets[i]).padStart(10,'0')+' 00000 n \n';
+  pdf+=`trailer\n<< /Size ${objects.length} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  fs.writeFileSync(destino,Buffer.from(pdf,'latin1')); return destino;
+}
+async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
+  if(!(await consultaAtivaConfig())) return false;
+  const grupo=await getConfig('consulta_wa_grupo','');
+  if(!grupo || String(msg?.key?.remoteJid||'')!==String(grupo)) return false;
+  if(msg?.key?.fromMe) return true;
+  const participante=melhorJidCliente(msg,msg?.key?.participant||'');
+  if(!participante) return true;
+  if(consultaEmMemoria){
+    try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){}
+    return true;
+  }
+  const cmd=String(texto||'').trim();
+  if(!cmd) return true;
+  const tgGrupo=await getConfig('consulta_tg_grupo','');
+  if(!tgGrupo) { await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
+  if(!(await consultaIniciarTelegramBot())) { await socketAtual.sendMessage(grupo,{text:'⚠️ Bot do Telegram de consultas ainda não está conectado.'}); return true; }
+  const dado=consultaExtrairDadoDoComando(cmd);
+  const r=await run(`INSERT INTO consultas_assinatura(cliente_jid,cliente_nome,grupo_whatsapp,comando,dado_consulta,status) VALUES(?,?,?,?,?,'ENVIANDO_TELEGRAM')`,[participante,msg?.pushName||'Cliente',grupo,cmd,dado]);
+  const id=r.lastID;
+  consultaEmMemoria={id,cliente_jid:participante,cliente_nome:msg?.pushName||'Cliente',grupo_whatsapp:grupo,comando:cmd,dado_consulta:dado,socket:socketAtual};
+  try{
+    await socketAtual.groupSettingUpdate(grupo,'announcement');
+    await socketAtual.sendMessage(grupo,{text:'🔒 Consulta em processamento. O grupo será liberado assim que o resultado for entregue.'});
+    const enviado=await consultaTelegramBot.sendMessage(tgGrupo,cmd);
+    await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado.message_id||''),id]);
+    const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
+    consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
+  }catch(e){ await consultaFalhar(id,e); }
+  return true;
+}
+async function consultaListarGruposWhatsApp(){
+  const mapa=new Map(), candidatos=[];
+  if(whatsappSocket)candidatos.push(whatsappSocket);
+  try{for(const x of whatsappSessoes.values())if(x?.conectado&&x?.socket)candidatos.push(x.socket)}catch(_){}
+  for(const sock of [...new Set(candidatos)]){ try{ const gs=await sock.groupFetchAllParticipating(); for(const g of Object.values(gs||{})) mapa.set(g.id,{id:g.id,nome:g.subject||g.id}); }catch(_){} }
+  return [...mapa.values()].sort((a,b)=>a.nome.localeCompare(b.nome));
+}
+async function consultaRecuperarEstado(){
+  try{
+    const antigo=await get(`SELECT * FROM consultas_assinatura WHERE status NOT IN ('FINALIZADA','ERRO') ORDER BY id DESC LIMIT 1`);
+    if(antigo){ await run(`UPDATE consultas_assinatura SET status='ERRO',erro='Servidor reiniciado durante a consulta',finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[antigo.id]); }
+    await consultaIniciarTelegramBot();
+  }catch(e){console.log('⚠️ V184 RECUPERAÇÃO:',e.message)}
+}
+
+app.get('/admin/consultas-assinatura', async (req,res)=>{
+  const ativa=await consultaAtivaConfig(), token=await consultaTelegramToken(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','180');
+  const grupos=await consultaListarGruposWhatsApp();
+  const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
+  const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
+  const rows=hist.map(c=>`<tr><td>#${c.id}</td><td>${safeHtml(c.cliente_nome||'-')}</td><td>${safeHtml(c.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(c.status||'-')}</span></td><td>${safeHtml(c.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
+  const statusBot=consultaTelegramBot?'CONECTADO':'DESCONECTADO', statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
+  res.send(page('Consultas por assinatura',`<h1>🔎 Consultas por assinatura</h1><p class="muted">Configure aqui o fluxo WhatsApp → Telegram → PDF. Nenhuma variável nova no Render é necessária.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
+  <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo configurado: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Telegram Consultas</h3><p><b>${statusBot}</b></p><small>Token: ${safeHtml(consultaTokenMask(token))}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
+  <div class="card"><h2>⚙️ Configuração</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>Token do bot Telegram de consultas</label><input type="password" name="telegram_token" placeholder="${safeHtml(consultaTokenMask(token))}"><small>Deixe em branco para manter o token atual.</small><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar conexão</button></div></form></div>
+  <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
+  <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
+});
+app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
+  try{
+    await setConfig('consulta_ativa',req.body.ativa==='1'?'1':'0');
+    await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
+    await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
+    await setConfig('consulta_timeout_seg',String(Math.max(60,Math.min(900,Number(req.body.timeout_seg||180)||180))));
+    const novo=String(req.body.telegram_token||'').trim(); if(novo) await setConfig('consulta_tg_token_enc',dhruEncrypt(novo));
+    await consultaIniciarTelegramBot(true);
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Configuração salva.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/testar-telegram', async(req,res)=>{
+  try{ if(!(await consultaIniciarTelegramBot())) throw new Error('Token do Telegram não configurado.'); const g=await getConfig('consulta_tg_grupo',''); if(!g) throw new Error('Grupo Telegram não configurado.'); await consultaTelegramBot.sendMessage(g,'✅ Teste de conexão CentralUnlocker — integração de consultas conectada.'); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Mensagem de teste enviada ao Telegram.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/testar-whatsapp', async(req,res)=>{
+  try{ const g=await getConfig('consulta_wa_grupo',''); if(!g) throw new Error('Grupo WhatsApp não configurado.'); const sock=await consultaObterSocketWhatsApp(g); if(!sock) throw new Error('Nenhuma sessão conectada possui esse grupo.'); await sock.sendMessage(g,{text:'✅ Teste de conexão CentralUnlocker — grupo de consultas conectado.'}); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Mensagem de teste enviada ao WhatsApp.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/liberar-grupo', async(req,res)=>{ await consultaGrupoWhatsAppLiberar('erro'); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Grupo liberado manualmente.')); });
 
 app.post('/webhook/whatsapp', async (req, res) => {
   try {
@@ -10664,6 +10923,7 @@ iniciarTelegram()
     // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
     await new Promise(r => setTimeout(r, 2500));
     await iniciarTodasSessoesWhatsAppSalvas();
+    await consultaRecuperarEstado();
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
   .catch(e => console.log('❌ V93 START:', e.message));

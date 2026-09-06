@@ -1,0 +1,35 @@
+V184 — CONSULTAS POR ASSINATURA
+
+NOVO MENU:
+Admin > Consultas por assinatura
+
+CONFIGURACAO PELO PAINEL:
+- Ativar/desativar modulo
+- Token do bot Telegram de consultas (criptografado no banco)
+- ID do grupo Telegram
+- Selecao do grupo WhatsApp a partir das sessoes conectadas
+- Timeout de 60 a 900 segundos
+- Teste Telegram
+- Teste WhatsApp
+- Liberacao manual do grupo
+- Historico das ultimas consultas
+
+FLUXO:
+WhatsApp grupo -> fecha grupo -> envia comando ao Telegram -> recebe link Resultado -> confere Dados da consulta -> le pagina -> gera PDF -> envia no privado do cliente -> apaga PDF temporario -> reabre grupo.
+
+SEGURANCA/RECUPERACAO:
+- Uma consulta por vez
+- Timeout automatico
+- Grupo reabre em caso de erro
+- PDFs temporarios apagados apos entrega
+- Consulta interrompida por reinicio e marcada como ERRO
+
+OBSERVACAO TELEGRAM:
+Se o bot externo de consultas ignorar mensagens enviadas por outro bot, sera necessario substituir somente a camada de envio Telegram por uma sessao de usuario (MTProto). O restante do fluxo permanece igual.
+
+
+ATUALIZAÇÃO — ENTREGA NO GRUPO
+- O PDF final é enviado no próprio grupo WhatsApp configurado.
+- O cliente que iniciou a consulta é marcado automaticamente na entrega.
+- O grupo permanece em modo somente administradores até o PDF ser enviado com sucesso.
+- Após a entrega, o grupo é liberado para a próxima consulta.
