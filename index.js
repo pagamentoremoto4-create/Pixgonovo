@@ -8626,20 +8626,24 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link||'',messageId,ativo.id]);
   try{
     if(link){
-      const dados=await consultaLerPagina(link);
-      const pdf=await consultaGerarPdf(dados,ativo);
-      await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
-      const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
-      if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-      const buffer=fs.readFileSync(pdf);
-      const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
-      const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
-      await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-        document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-        caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
-        mentions:[ativo.cliente_jid]
-      });
-      try{fs.unlinkSync(pdf)}catch(_){}
+      const dados=await consultaLerPagina(link,ativo);
+      if(dados?.semResultado){
+        await consultaEnviarTextoWhatsApp(ativo,'Nenhum resultado localizado para esta consulta.',true);
+      }else{
+        const pdf=await consultaGerarPdf(dados,ativo);
+        await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+        const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+        if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+        const buffer=fs.readFileSync(pdf);
+        const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+        const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+        await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+          document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+          caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
+          mentions:[ativo.cliente_jid]
+        });
+        try{fs.unlinkSync(pdf)}catch(_){}
+      }
     }else if(semResultado){
       await consultaEnviarTextoWhatsApp(ativo,texto,true);
     }else{
@@ -8665,24 +8669,80 @@ function consultaDecodificarHtml(txt){
   const mapa={'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'",'&apos;':"'"};
   return String(txt||'').replace(/&(nbsp|amp|lt|gt|quot|apos);|&#39;/gi,m=>mapa[m.toLowerCase()]||m).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCharCode(parseInt(n,16)));
 }
-async function consultaLerPagina(url){
-  const u=new URL(String(url));
-  if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
-  const r=await axios.get(u.toString(),{timeout:45000,headers:{'User-Agent':'Mozilla/5.0 CentralUnlocker/1.0'},maxContentLength:8*1024*1024,responseType:'text',maxRedirects:2});
-  let html=String(r.data||'');
-  const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'Resultado da consulta';
-  html=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi,' ');
-  html=html.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div|section|article|header|footer|li|tr|table|h1|h2|h3|h4|h5|h6|dt|dd)>/gi,'\n').replace(/<td\b[^>]*>/gi,' | ').replace(/<th\b[^>]*>/gi,' | ');
-  const texto=consultaDecodificarHtml(html.replace(/<[^>]+>/g,' '));
+function consultaEhComandoNome(consulta){
+  return /^\/nome(?:\s|$)/i.test(String(consulta?.comando||'').trim());
+}
+function consultaLinhasPagina(html,title='Resultado da consulta'){
+  let corpo=String(html||'');
+  corpo=corpo.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi,' ');
+  corpo=corpo.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div|section|article|header|footer|li|tr|table|h1|h2|h3|h4|h5|h6|dt|dd)>/gi,'\n').replace(/<td\b[^>]*>/gi,' | ').replace(/<th\b[^>]*>/gi,' | ');
+  const texto=consultaDecodificarHtml(corpo.replace(/<[^>]+>/g,' '));
   const linhas=[];
   for(const parte of texto.split(/\n+/)){
     const limpa=parte.replace(/[ \t\r]+/g,' ').replace(/^\s*\|\s*/,'').replace(/\s*\|\s*$/,'').trim();
     if(!limpa||limpa.length>2000) continue;
-    linhas.push(limpa); // V188: preservar campos/registros repetidos do resultado
+    linhas.push(limpa);
   }
-  if(!linhas.length) throw new Error('A página de resultado não retornou conteúdo legível.');
-  return {titulo:consultaDecodificarHtml(title.replace(/<[^>]+>/g,' ')).trim(),linhas,url:u.toString()};
+  return {titulo:consultaDecodificarHtml(String(title||'').replace(/<[^>]+>/g,' ')).trim()||'Resultado da consulta',linhas};
 }
+function consultaPaginaNomeVazia(linhas){
+  const t=(linhas||[]).join('\n').replace(/\s+/g,' ');
+  return /Mostrando\s+1\s+a\s+10\s+de\s+0/i.test(t) || /Resultados da Consulta[\s\S]{0,400}\bde\s+0\b/i.test(t);
+}
+async function consultaLerPaginaDinamicaNome(url){
+  let browser=null;
+  try{
+    const puppeteer=require('puppeteer');
+    browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+    const page=await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
+    await page.goto(url,{waitUntil:'domcontentloaded',timeout:12000});
+    // /nome monta a tabela no navegador. Esperamos somente essa tela mudar de 0 registros
+    // ou surgir ao menos uma linha de dados; as demais consultas continuam no leitor antigo.
+    try{
+      await page.waitForFunction(()=>{
+        const body=(document.body?.innerText||'').replace(/\s+/g,' ');
+        const rows=document.querySelectorAll('tbody tr').length;
+        return rows>0 || !/Mostrando\s+1\s+a\s+10\s+de\s+0/i.test(body);
+      },{timeout:10000,polling:350});
+    }catch(_){}
+    await new Promise(r=>setTimeout(r,700));
+    const extraido=await page.evaluate(()=>({titulo:document.title||'Resultado da consulta',texto:document.body?.innerText||''}));
+    const linhas=String(extraido.texto||'').split(/\n+/).map(x=>x.replace(/[ \t\r]+/g,' ').trim()).filter(x=>x&&x.length<=2000);
+    return {titulo:String(extraido.titulo||'Resultado da consulta').trim(),linhas};
+  }catch(e){
+    console.log('⚠️ V197 /NOME LEITURA DINÂMICA:',e.message);
+    return null;
+  }finally{
+    if(browser) try{await browser.close()}catch(_){}
+  }
+}
+async function consultaLerPagina(url,consulta=null){
+  const u=new URL(String(url));
+  if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
+  const r=await axios.get(u.toString(),{timeout:12000,headers:{'User-Agent':'Mozilla/5.0 CentralUnlocker/1.0'},maxContentLength:8*1024*1024,responseType:'text',maxRedirects:2});
+  const html=String(r.data||'');
+  const title=(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'Resultado da consulta';
+  let dados=consultaLinhasPagina(html,title);
+  if(!dados.linhas.length) throw new Error('A página de resultado não retornou conteúdo legível.');
+
+  // V197: somente /nome ganha uma segunda leitura com navegador quando a tabela inicial vem vazia.
+  // Assim não alteramos o caminho que já funciona para CPF, placa e demais consultas.
+  if(consultaEhComandoNome(consulta) && consultaPaginaNomeVazia(dados.linhas)){
+    console.log('⏳ V197 /NOME: tabela veio com 0 registros; aguardando carregamento dinâmico...');
+    const dinamico=await consultaLerPaginaDinamicaNome(u.toString());
+    if(dinamico?.linhas?.length){
+      dados=dinamico;
+      console.log('✅ V197 /NOME: leitura dinâmica concluída. Linhas:',dados.linhas.length);
+    }
+    if(consultaPaginaNomeVazia(dados.linhas)){
+      console.log('ℹ️ V197 /NOME: resultado permaneceu com 0 registros após a espera.');
+      return {...dados,url:u.toString(),semResultado:true};
+    }
+  }
+  return {...dados,url:u.toString(),semResultado:false};
+}
+
 function consultaPdfEscapeLatin1(s){
   return Buffer.from(String(s||'').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,' '),'latin1').toString('latin1');
 }

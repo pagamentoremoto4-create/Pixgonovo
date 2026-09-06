@@ -1,0 +1,9 @@
+V197 — CORREÇÃO /NOME
+
+Base: V196, preservando captura Telegram, fluxo de link, fluxo texto->PDF, /comandos e liberação de segurança em 30s.
+
+Alteração isolada:
+- Quando uma consulta /nome retorna a página de resultados com 0 registros no HTML inicial, o sistema abre somente esse link em navegador headless e aguarda até 10s a tabela dinâmica carregar.
+- Se os registros aparecerem, o texto renderizado da página é usado para gerar o PDF.
+- Se continuar em 0, não envia PDF vazio; informa que não houve resultado e libera o grupo.
+- As demais consultas continuam usando o leitor anterior.
