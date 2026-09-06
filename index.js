@@ -8326,6 +8326,7 @@ async function consultaObterSocketWhatsApp(grupo=''){
 async function consultaAtivaConfig(){ return (await getConfig('consulta_ativa','0')) === '1'; }
 
 // ===== V188 — validação de comandos / tutorial =====
+// ===== V196 — mantém fluxo de link da V188 + texto final em PDF + liberação em 30s =====
 const CONSULTA_COMANDO_TUTORIAL='/comandos';
 const CONSULTA_COMANDOS_VALIDOS=[
   {nome:'CPF', exemplo:'/cpf 09034334344', re:/^\/cpf\s+\d{11}$/i},
@@ -8439,8 +8440,9 @@ async function consultaTelegramInstalarHandler(){
       if(!pertence) return;
       if(msg?.out) return;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaPareceRespostaYan(texto)) return;
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+      if(!consultaMensagemEhDoYan(msg,texto,consultaEmMemoria)) return;
+      if(consultaMensagemIntermediariaYan(texto)){ console.log('⏳ V196 YAN AINDA PROCESSANDO:',String(msg?.id||'')); return; }
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true});
     }catch(e){ console.log('❌ V186 RESPOSTA TELEGRAM:',e.message); }
   },new NewMessage({}));
   consultaTelegramHandlerInstalado=true;
@@ -8497,24 +8499,36 @@ async function consultaTelegramProcurarRespostaHistorico(){
     const entidade=ativo.telegram_entidade || await consultaTelegramResolverGrupo(await getConfig('consulta_tg_grupo',''));
     const mensagens=await consultaTelegramCliente.getMessages(entidade,{limit:40});
     const enviadoId=Number(ativo.telegram_enviado_id||0);
-    for(const msg of mensagens||[]){
+    const ordenadas=[...(mensagens||[])].sort((a,b)=>Number(a?.id||0)-Number(b?.id||0));
+    for(const msg of ordenadas){
       const mid=Number(msg?.id||0);
       if(enviadoId && mid<=enviadoId) continue;
       if(msg?.out) continue;
       const texto=String(msg?.message||msg?.text||'');
-      if(!consultaPareceRespostaYan(texto)) continue;
+      if(!consultaMensagemEhDoYan(msg,texto,ativo)) continue;
       const dado=consultaExtrairDadoTelegram(texto);
       if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
-      console.log('✅ V187 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid);
-      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+      if(consultaMensagemIntermediariaYan(texto)){
+        console.log('⏳ V196 YAN AINDA PROCESSANDO PELO HISTÓRICO:',mid);
+        continue;
+      }
+      console.log('✅ V196 RESPOSTA FINAL YAN ENCONTRADA:',mid,consultaExtrairLinkTelegram(texto)?'LINK':'TEXTO');
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''),{forcarTexto:true});
       break;
     }
-  }catch(e){ console.log('⚠️ V187 POLLING TELEGRAM:',e.message); }
+  }catch(e){ console.log('⚠️ V196 POLLING TELEGRAM:',e.message); }
 }
 function consultaTelegramIniciarPolling(){
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   consultaPollingTimer=setInterval(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },2000);
   setTimeout(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },800);
+}
+async function consultaGrupoWhatsAppAbrirSemEncerrar(){
+  const grupo=await getConfig('consulta_wa_grupo','');
+  try{
+    const sock=await consultaObterSocketWhatsApp(grupo);
+    if(grupo&&sock) await sock.groupSettingUpdate(grupo,'not_announcement');
+  }catch(e){ console.log('⚠️ V196 LIBERAÇÃO DE SEGURANÇA 30S:',e.message); }
 }
 async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   const grupo=await getConfig('consulta_wa_grupo','');
@@ -8553,6 +8567,33 @@ function consultaPareceRespostaYan(texto){
   const t=String(texto||'').trim(); if(!t) return false;
   return /Dados da consulta:/i.test(t) || /Yan Buscas/i.test(t) || consultaExtrairLinkTelegram(t) || consultaRespostaSemResultado(t);
 }
+function consultaTelegramReplyId(msg){
+  const candidatos=[
+    msg?.replyTo?.replyToMsgId, msg?.replyTo?.reply_to_msg_id, msg?.replyToMsgId,
+    msg?.reply_to_msg_id, msg?.replyTo?.msgId, msg?.reply_to?.reply_to_msg_id
+  ];
+  for(const v of candidatos){ const n=Number(v||0); if(Number.isFinite(n)&&n>0) return n; }
+  return 0;
+}
+function consultaTelegramSenderId(msg){
+  const v=msg?.senderId ?? msg?.fromId?.userId ?? msg?.fromId?.channelId ?? msg?.peerId?.userId ?? '';
+  return String(v||'');
+}
+function consultaMensagemIntermediariaYan(texto){
+  const t=String(texto||'').replace(/\r/g,'').trim().toLowerCase();
+  if(!t) return true;
+  return /buscando informa[cç][oõ]es|aguarde\s*(um momento|alguns instantes)?|consultando\.{0,3}$|processando\.{0,3}$|pesquisando\.{0,3}$|localizando\.{0,3}$/i.test(t);
+}
+function consultaMensagemEhDoYan(msg,texto,ativo=consultaEmMemoria){
+  if(!ativo) return false;
+  const enviadoId=Number(ativo.telegram_enviado_id||0);
+  const replyId=consultaTelegramReplyId(msg);
+  const senderId=consultaTelegramSenderId(msg);
+  if(enviadoId && replyId===enviadoId){ if(senderId) ativo.telegram_yan_sender_id=senderId; return true; }
+  if(ativo.telegram_yan_sender_id && senderId && senderId===ativo.telegram_yan_sender_id) return true;
+  if(consultaPareceRespostaYan(texto)){ if(senderId && !ativo.telegram_yan_sender_id) ativo.telegram_yan_sender_id=senderId; return true; }
+  return false;
+}
 function consultaLimparTextoYan(texto){
   return String(texto||'').replace(/\r/g,'').trim();
 }
@@ -8571,13 +8612,14 @@ async function consultaEnviarTextoWhatsApp(ativo,texto,semResultado=false){
     await sock.sendMessage(ativo.grupo_whatsapp,{text:`${i===0?cab+'\n\n':''}${partes[i]}${rodape}`,mentions:i===0?[ativo.cliente_jid]:[]});
   }
 }
-async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
+async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={}){
   if(!consultaEmMemoria) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
   const ativo=consultaEmMemoria;
   if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
   if(ativo.processandoResultado) return;
-  if(!link && !consultaPareceRespostaYan(texto)) return;
+  if(!opcoes?.forcarTexto && !link && !consultaPareceRespostaYan(texto)) return;
+  if(consultaMensagemIntermediariaYan(texto)) return;
   ativo.processandoResultado=true;
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   const semResultado=consultaRespostaSemResultado(texto);
@@ -8598,8 +8640,22 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
         mentions:[ativo.cliente_jid]
       });
       try{fs.unlinkSync(pdf)}catch(_){}
+    }else if(semResultado){
+      await consultaEnviarTextoWhatsApp(ativo,texto,true);
     }else{
-      await consultaEnviarTextoWhatsApp(ativo,texto,semResultado);
+      const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);
+      const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);
+      await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+      const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+      if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+      const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+      const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+      await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+        document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+        caption:`✅ Consulta concluída — ${nomeMencao}\n📄 O resultado em texto foi convertido para PDF.\n\n🟢 Grupo liberado para a próxima consulta.`,
+        mentions:[ativo.cliente_jid]
+      });
+      try{fs.unlinkSync(pdf)}catch(_){}
     }
     await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
     await consultaGrupoWhatsAppLiberar('finalizada');
@@ -8718,8 +8774,16 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
     consultaEmMemoria.processandoResultado=false;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     consultaTelegramIniciarPolling();
-    const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
-    consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
+    const timeoutSeg=30;
+    consultaTimeoutTimer=setTimeout(()=>{
+      if(consultaEmMemoria?.id!==id) return;
+      if(consultaEmMemoria.processandoResultado){
+        console.log('🟢 V196 30S: resultado já encontrado; liberando o grupo enquanto finaliza a entrega.');
+        consultaGrupoWhatsAppAbrirSemEncerrar().catch(()=>{});
+      }else{
+        consultaFalhar(id,new Error('Tempo limite de 30 segundos excedido.')).catch(()=>{});
+      }
+    },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
   return true;
 }
@@ -8744,7 +8808,7 @@ function consultaLoginStatus(){
 }
 
 app.get('/admin/consultas-assinatura', async (req,res)=>{
-  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','180');
+  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','30');
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
@@ -8757,7 +8821,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Conta Telegram</h3><p><b>${safeHtml(st)}</b></p><small>Telefone: ${safeHtml(c.telefone||'Não configurado')}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
-  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
@@ -8789,7 +8853,7 @@ app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
     await setConfig('consulta_ativa',req.body.ativa==='1'?'1':'0');
     await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
     await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
-    await setConfig('consulta_timeout_seg',String(Math.max(60,Math.min(900,Number(req.body.timeout_seg||180)||180))));
+    await setConfig('consulta_timeout_seg',String(30));
     res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Fluxo salvo.'));
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
