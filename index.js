@@ -9161,14 +9161,26 @@ async function consultaDhruLiberarGrupo(ctx){
   try{ if(ctx?.socket&&ctx?.grupo) await ctx.socket.groupSettingUpdate(ctx.grupo,'not_announcement'); }catch(e){console.log('⚠️ DHRU GRUPO LIBERAR',e.message)}
 }
 async function consultaDhruEntregar(ctx,resultado){
-  const txt=traduzirResultadoDhruPt(String(resultado||'').trim())||'Consulta concluída.';
-  const fake={id:`dhru-${ctx.id}`,dado_consulta:ctx.entrada};
-  let pdf=null;
-  try{
-    pdf=await consultaGerarPdf({titulo:ctx.nome||'Resultado da consulta',linhas:txt.split(/\r?\n/).filter(Boolean)},fake);
-    await ctx.socket.sendMessage(ctx.grupo,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ctx.id}.pdf`,caption:`✅ Consulta concluída — ${ctx.cliente_nome||'Cliente'}`,mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]});
-  }finally{ if(pdf) try{fs.unlinkSync(pdf)}catch(_){} }
-  await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[txt,ctx.id]);
+  // V206: comandos Dhru do grupo entregam o retorno NATIVO da API.
+  // Não traduz, não converte em PDF e não aplica o proxy/link temporário da Yan.
+  const bruto=String(resultado??'');
+  const txt=bruto.trim();
+  if(!txt) throw new Error('Dhru concluiu a consulta sem conteúdo de resultado');
+
+  // Cabeçalho separado para não alterar o conteúdo retornado pela API.
+  await ctx.socket.sendMessage(ctx.grupo,{
+    text:`✅ Consulta concluída — ${ctx.cliente_nome||'Cliente'}`,
+    mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]
+  });
+
+  // WhatsApp/Baileys aceita mensagens grandes, mas dividimos somente quando necessário.
+  // A divisão preserva o texto original, sem tradução, formatação ou conversão.
+  const LIMITE=50000;
+  for(let i=0;i<bruto.length;i+=LIMITE){
+    await ctx.socket.sendMessage(ctx.grupo,{text:bruto.slice(i,i+LIMITE)});
+  }
+
+  await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[bruto,ctx.id]);
   await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null;
 }
 async function consultaDhruAcompanhar(ctx){
@@ -9209,8 +9221,8 @@ async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,text
     ctx.order_uuid=order||null;
     ctx.aguardando_feedback=!order;
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[order,order?'PROCESSANDO':'AGUARDANDO_FEEDBACK',ctx.id]);
-    // Segurança: o grupo sempre volta a liberar em no máximo 30s, sem cancelar o retorno do fornecedor.
-    setTimeout(()=>{ if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruLiberarGrupo(ctx).catch(()=>{}); },30000);
+    // V206: segurança exclusiva das consultas Dhru do grupo: libera em no máximo 60s, sem cancelar o retorno do fornecedor.
+    setTimeout(()=>{ if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruLiberarGrupo(ctx).catch(()=>{}); },60000);
     // Se a API já devolveu order_uuid, acompanha por polling; caso contrário o mesmo
     // feedback_url usado pelos pedidos normais concluirá a consulta via reference_id group-ID.
     if(order) consultaDhruAcompanhar(ctx).catch(e=>console.log('❌ DHRU GRUPO',e.message));

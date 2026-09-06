@@ -1,0 +1,11 @@
+V206 - CONSULTAS DHRU NO GRUPO
+
+- Base: V205.
+- Comandos Dhru cadastrados no painel entregam o retorno nativo da API no WhatsApp.
+- Não gera PDF, não traduz e não aplica link temporário da Yan.
+- Cabeçalho de conclusão é enviado separado; o conteúdo Dhru é enviado sem alteração.
+- Retornos muito longos são apenas divididos em blocos, preservando o texto original.
+- Segurança do bloqueio do grupo para consultas Dhru: máximo de 60 segundos.
+- Se o resultado chegar antes, o grupo é liberado imediatamente após a entrega.
+- Se demorar mais de 60 segundos, o grupo é liberado sem cancelar o acompanhamento do fornecedor.
+- Fluxo Yan/V203 permanece inalterado.
