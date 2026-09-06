@@ -8302,7 +8302,7 @@ async function desconectarWhatsApp() {
 }
 
 
-// ===== V186 — CONSULTAS POR ASSINATURA VIA CONTA TELEGRAM (MTProto/GramJS) =====
+// ===== V188 — CONSULTAS POR ASSINATURA / VALIDAÇÃO / TEXTO-PDF / TUTORIAL =====
 let consultaTelegramCliente = null;
 let consultaTelegramContaConectada = false;
 let consultaTelegramLogin = null;
@@ -8324,6 +8324,60 @@ async function consultaObterSocketWhatsApp(grupo=''){
   return null;
 }
 async function consultaAtivaConfig(){ return (await getConfig('consulta_ativa','0')) === '1'; }
+
+// ===== V188 — validação de comandos / tutorial =====
+const CONSULTA_COMANDO_TUTORIAL='/comandos';
+const CONSULTA_COMANDOS_VALIDOS=[
+  {nome:'CPF', exemplo:'/cpf 09034334344', re:/^\/cpf\s+\d{11}$/i},
+  {nome:'PROCESSO', exemplo:'/processo 09034334344', re:/^\/processo\s+\d{11}$/i},
+  {nome:'CNPJ', exemplo:'/cnpj 34.147.491\/0001-10', re:/^[\/.]cnpj\s+(?=(?:\D*\d){14}\D*$)[\d.\/-]+$/i},
+  {nome:'SÓCIOS', exemplo:'/socios 03.778.046\/0002-05', re:/^[\/.]socios\s+(?=(?:\D*\d){14}\D*$)[\d.\/-]+$/i},
+  {nome:'CNS', exemplo:'/cns 704202718184383', re:/^\/cns\s+\d{15}$/i},
+  {nome:'SCORE', exemplo:'/score 70130756202', re:/^\/score\s+\d{11}$/i},
+  {nome:'PIX - DESMASCARADOR', exemplo:'/pix 898399|NOME COMPLETO', valida:t=>{const m=t.match(/^\/pix\s+([^|]+)\|(.+)$/i);return !!(m&&/^\d{4,11}$/.test(m[1].trim())&&m[2].trim().length>=3);}},
+  {nome:'CHAVE PIX', exemplo:'/chavepix chave_pix', valida:t=>{const m=t.match(/^\/chavepix\s+(.+)$/i);return !!(m&&m[1].trim().length>=3&&m[1].trim().length<=180);}},
+  {nome:'SENHA', exemplo:'/senha email@exemplo.com  ou  /senha 70130756202', valida:t=>{const m=t.match(/^\/senha\s+(.+)$/i);if(!m)return false;const v=m[1].trim();return /^\d{11}$/.test(v)||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);}},
+  {nome:'NOME', exemplo:'/nome KARIN GHOST', valida:t=>/^\/nome\s+\S+(?:\s+\S+)+$/i.test(t)},
+  {nome:'NOME SIMILAR', exemplo:'/nome_similar KARIN EFSTATHION', valida:t=>/^\/nome_similar\s+\S+(?:\s+\S+)+$/i.test(t)},
+  {nome:'RG', exemplo:'/rg 3401866', re:/^\/rg\s+[A-Z0-9.\/-]{4,20}$/i},
+  {nome:'CNH', exemplo:'/cnh 1223232323', re:/^\/cnh\s+\d{9,11}$/i},
+  {nome:'ESTADO', exemplo:'.estado RJ', re:/^\.estado\s+[A-Z]{2}$/i},
+  {nome:'NASCIMENTO', exemplo:'.nascimento 26\/03\/1945', valida:t=>{const m=t.match(/^\.nascimento\s+(\d{2})\/(\d{2})\/(\d{4})$/i);if(!m)return false;const d=+m[1],mo=+m[2],y=+m[3];return d>=1&&d<=31&&mo>=1&&mo<=12&&y>=1900&&y<=new Date().getFullYear();}},
+  {nome:'CBO', exemplo:'.cbo 521135', re:/^\.cbo\s+\d{6}$/i},
+  {nome:'MÃE', exemplo:'/mae MARIANA VENTURA', valida:t=>/^\/mae\s+\S+(?:\s+\S+)+$/i.test(t)},
+  {nome:'PAI', exemplo:'/pai JOAO DO NASCIMENTO', valida:t=>/^\/pai\s+\S+(?:\s+\S+)+$/i.test(t)},
+  {nome:'PARENTES', exemplo:'/parentes 12692484568', re:/^\/parentes\s+\d{11}$/i},
+  {nome:'CEP', exemplo:'/cep 15600-000', re:/^\/cep\s+\d{5}-?\d{3}$/i},
+  {nome:'PIS', exemplo:'/pis 13080926853', re:/^\/pis\s+\d{11}$/i},
+  {nome:'EMAIL', exemplo:'/email carlinhos_damanjuba@gmail.com', re:/^\/email\s+[^\s@]+@[^\s@]+\.[^\s@]+$/i},
+  {nome:'TELEFONE', exemplo:'/telefone 51986333184', re:/^\/telefone\s+\d{10,13}$/i},
+  {nome:'PLACA', exemplo:'/placa EEE445G', re:/^\/placa\s+[A-Z0-9]{7}$/i}
+];
+function consultaValidarComando(texto){
+  const t=String(texto||'').trim();
+  if(t.toLowerCase()===CONSULTA_COMANDO_TUTORIAL) return {ok:true,tutorial:true};
+  for(const c of CONSULTA_COMANDOS_VALIDOS){
+    try{ if(c.re?.test(t) || (c.valida&&c.valida(t))) return {ok:true,tutorial:false,comando:c}; }catch(_){}
+  }
+  return {ok:false,tutorial:false};
+}
+function consultaTutorialLinhas(){
+  return [
+    'GUIA RÁPIDO - COMANDOS DE CONSULTA','',
+    'Envie exatamente um dos comandos abaixo no grupo.','',
+    'PESSOA',
+    '/cpf 09034334344','/processo 09034334344','/score 70130756202','/cns 704202718184383','/rg 3401866','/cnh 1223232323','/pis 13080926853','',
+    'NOME E PARENTES','/nome KARIN GHOST','/nome_similar KARIN EFSTATHION','/mae MARIANA VENTURA','/pai JOAO DO NASCIMENTO','/parentes 12692484568','',
+    'CONTATO','/telefone 51986333184','/email exemplo@gmail.com','',
+    'EMPRESA','/cnpj 34.147.491/0001-10','.cnpj 34.147.491/0001-10','/socios 03.778.046/0002-05','.socios 03.778.046/0002-05','',
+    'VEÍCULO','/placa EEE445G','',
+    'LOCALIZAÇÃO','/cep 15600-000','',
+    'PIX','/pix 898399|NOME COMPLETO','/chavepix chave_pix','',
+    'SENHA','/senha email@exemplo.com','/senha 70130756202','',
+    'GERADOR','.estado RJ','.nascimento 26/03/1945','.cbo 521135','',
+    'IMPORTANTE','Somente comandos válidos iniciam uma consulta.','Mensagens ou comandos inválidos são apagados e não bloqueiam o grupo.','Para receber este guia novamente, digite /comandos.'
+  ];
+}
 async function consultaTelegramCredenciais(){
   return {
     apiId:Number(await getConfig('consulta_tg_api_id','0'))||0,
@@ -8335,7 +8389,7 @@ async function consultaTelegramCredenciais(){
 function consultaExtrairDadoDoComando(texto){
   const t=String(texto||'').trim();
   const m=t.match(/(?:\b\d{11}\b|\b\d{14}\b|\b\d{15}\b)/);
-  return m ? m[0] : t.replace(/^\/[a-z0-9_]+\s*/i,'').trim().slice(0,120) || t.slice(0,120);
+  return m ? m[0] : t.replace(/^[\/.][a-z0-9_]+\s*/i,'').trim().slice(0,120) || t.slice(0,120);
 }
 function consultaExtrairLinkTelegram(texto){
   const m=String(texto||'').match(/https:\/\/api\.yanbuscas\.com\/temp\/[^\s<>]+/i);
@@ -8345,7 +8399,12 @@ function consultaExtrairDadoTelegram(texto){
   const m=String(texto||'').match(/Dados da consulta:\s*([^\n\r]+)/i);
   return m ? m[1].trim() : '';
 }
-function consultaNormalizarCorrelacao(v){ return String(v||'').trim().toLowerCase().replace(/\s+/g,' '); }
+function consultaNormalizarCorrelacao(v){
+  const bruto=String(v||'').trim().toLowerCase();
+  const digitos=bruto.replace(/\D/g,'');
+  if(digitos.length>=6 && /^[\d\s.\/()+|_-]+$/.test(bruto)) return digitos;
+  return bruto.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9@|.+_-]+/g,' ').replace(/\s+/g,' ').trim();
+}
 async function consultaTelegramEncerrarCliente(){
   if(consultaTelegramCliente){ try{ await consultaTelegramCliente.disconnect(); }catch(_){} }
   consultaTelegramCliente=null; consultaTelegramContaConectada=false; consultaTelegramHandlerInstalado=false;
@@ -8378,8 +8437,9 @@ async function consultaTelegramInstalarHandler(){
         try{ const chat=await event.getChat(); const cid=String(chat?.id||''); pertence=cid===String(grupo)|| (String(grupo).startsWith('-100')&&cid===String(grupo).slice(4)); }catch(_){}
       }
       if(!pertence) return;
+      if(msg?.out) return;
       const texto=String(msg?.message||msg?.text||'');
-      if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) return;
+      if(!consultaPareceRespostaYan(texto)) return;
       await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
     }catch(e){ console.log('❌ V186 RESPOSTA TELEGRAM:',e.message); }
   },new NewMessage({}));
@@ -8440,8 +8500,9 @@ async function consultaTelegramProcurarRespostaHistorico(){
     for(const msg of mensagens||[]){
       const mid=Number(msg?.id||0);
       if(enviadoId && mid<=enviadoId) continue;
+      if(msg?.out) continue;
       const texto=String(msg?.message||msg?.text||'');
-      if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) continue;
+      if(!consultaPareceRespostaYan(texto)) continue;
       const dado=consultaExtrairDadoTelegram(texto);
       if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
       console.log('✅ V187 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid);
@@ -8481,31 +8542,65 @@ async function consultaFalhar(id,erro){
   }catch(_){}
   await consultaGrupoWhatsAppLiberar('erro');
 }
+function consultaRespostaSemResultado(texto){
+  const t=String(texto||'').trim();
+  if(/\b(nenhum resultado|nenhum registro|dados n[aã]o encontrados|consulta n[aã]o localizada|consulta n[aã]o encontrada|n[aã]o foi localizado|n[aã]o foi encontrada)\b/i.test(t)) return true;
+  const linhas=t.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  if(linhas.length<=8 && t.length<700 && /\b(sem resultado|sem resultados|n[aã]o encontrado|n[aã]o encontrada|n[aã]o localizado|n[aã]o localizada)\b/i.test(t)) return true;
+  return false;
+}
+function consultaPareceRespostaYan(texto){
+  const t=String(texto||'').trim(); if(!t) return false;
+  return /Dados da consulta:/i.test(t) || /Yan Buscas/i.test(t) || consultaExtrairLinkTelegram(t) || consultaRespostaSemResultado(t);
+}
+function consultaLimparTextoYan(texto){
+  return String(texto||'').replace(/\r/g,'').trim();
+}
+async function consultaEnviarTextoWhatsApp(ativo,texto,semResultado=false){
+  const sock=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+  if(!sock) throw new Error('WhatsApp desconectado no momento da entrega.');
+  const numero=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+  const nome=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numero}`;
+  const corpo=consultaLimparTextoYan(texto);
+  const cab=semResultado?`⚠️ Consulta sem resultado — ${nome}`:`✅ Consulta concluída — ${nome}`;
+  const partes=[]; const max=3200;
+  for(let i=0;i<corpo.length;i+=max) partes.push(corpo.slice(i,i+max));
+  if(!partes.length) partes.push(semResultado?'Nenhum resultado localizado.':'Resultado recebido.');
+  for(let i=0;i<partes.length;i++){
+    const rodape=i===partes.length-1?'\n\n🟢 Grupo liberado para a próxima consulta.':'';
+    await sock.sendMessage(ativo.grupo_whatsapp,{text:`${i===0?cab+'\n\n':''}${partes[i]}${rodape}`,mentions:i===0?[ativo.cliente_jid]:[]});
+  }
+}
 async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
   if(!consultaEmMemoria) return;
   const link=consultaExtrairLinkTelegram(texto), dado=consultaExtrairDadoTelegram(texto);
-  if(!link) return;
   const ativo=consultaEmMemoria;
   if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
   if(ativo.processandoResultado) return;
+  if(!link && !consultaPareceRespostaYan(texto)) return;
   ativo.processandoResultado=true;
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
-  await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,messageId,ativo.id]);
+  const semResultado=consultaRespostaSemResultado(texto);
+  await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link||'',messageId,ativo.id]);
   try{
-    const dados=await consultaLerPagina(link);
-    const pdf=await consultaGerarPdf(dados,ativo);
-    await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
-    const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
-    if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-    const buffer=fs.readFileSync(pdf);
-    const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
-    const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
-    await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-      document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-      caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
-      mentions:[ativo.cliente_jid]
-    });
-    try{fs.unlinkSync(pdf)}catch(_){}
+    if(link){
+      const dados=await consultaLerPagina(link);
+      const pdf=await consultaGerarPdf(dados,ativo);
+      await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+      const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+      if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+      const buffer=fs.readFileSync(pdf);
+      const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+      const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+      await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+        document:buffer,mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+        caption:`✅ Consulta concluída — ${nomeMencao}\n📄 Seu resultado está no PDF abaixo.\n\n🟢 Grupo liberado para a próxima consulta.`,
+        mentions:[ativo.cliente_jid]
+      });
+      try{fs.unlinkSync(pdf)}catch(_){}
+    }else{
+      await consultaEnviarTextoWhatsApp(ativo,texto,semResultado);
+    }
     await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
     await consultaGrupoWhatsAppLiberar('finalizada');
   }catch(e){ await consultaFalhar(ativo.id,e); }
@@ -8527,7 +8622,7 @@ async function consultaLerPagina(url){
   for(const parte of texto.split(/\n+/)){
     const limpa=parte.replace(/[ \t\r]+/g,' ').replace(/^\s*\|\s*/,'').replace(/\s*\|\s*$/,'').trim();
     if(!limpa||limpa.length>2000) continue;
-    if(!linhas.includes(limpa)) linhas.push(limpa);
+    linhas.push(limpa); // V188: preservar campos/registros repetidos do resultado
   }
   if(!linhas.length) throw new Error('A página de resultado não retornou conteúdo legível.');
   return {titulo:consultaDecodificarHtml(title.replace(/<[^>]+>/g,' ')).trim(),linhas,url:u.toString()};
@@ -8562,6 +8657,38 @@ async function consultaGerarPdf(dados,consulta){
   pdf+=`trailer\n<< /Size ${objects.length} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   fs.writeFileSync(destino,Buffer.from(pdf,'latin1')); return destino;
 }
+async function consultaGerarPdfTutorial(){
+  fs.mkdirSync(CONSULTA_TMP_DIR,{recursive:true});
+  const destino=path.join(CONSULTA_TMP_DIR,`tutorial-comandos-${Date.now()}.pdf`);
+  const linhas=consultaTutorialLinhas().flatMap(x=>consultaQuebrarLinha(x,86));
+  const porPagina=58, paginas=[]; for(let i=0;i<linhas.length;i+=porPagina) paginas.push(linhas.slice(i,i+porPagina));
+  const objects=[null]; const add=x=>{objects.push(x);return objects.length-1};
+  const fontId=add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  const pagesId=add(''); const pageIds=[];
+  for(const pg of paginas){
+    let stream='BT\n/F1 10 Tf\n44 800 Td\n14 TL\n';
+    pg.forEach((ln,i)=>{ if(i) stream+='T*\n'; stream+=`(${consultaPdfEscapeLatin1(ln)}) Tj\n`; }); stream+='ET\n';
+    const contentId=add(`<< /Length ${Buffer.byteLength(stream,'latin1')} >>\nstream\n${stream}endstream`);
+    const pageId=add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R >> >> /Contents ${contentId} 0 R >>`); pageIds.push(pageId);
+  }
+  objects[pagesId]=`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map(id=>id+' 0 R').join(' ')}] >>`;
+  const catalogId=add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  let pdf='%PDF-1.4\n%âãÏÓ\n', offsets=[0];
+  for(let i=1;i<objects.length;i++){ offsets[i]=Buffer.byteLength(pdf,'latin1'); pdf+=`${i} 0 obj\n${objects[i]}\nendobj\n`; }
+  const xref=Buffer.byteLength(pdf,'latin1'); pdf+=`xref\n0 ${objects.length}\n0000000000 65535 f \n`; for(let i=1;i<objects.length;i++) pdf+=String(offsets[i]).padStart(10,'0')+' 00000 n \n';
+  pdf+=`trailer\n<< /Size ${objects.length} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  fs.writeFileSync(destino,Buffer.from(pdf,'latin1')); return destino;
+}
+async function consultaEnviarTutorial(socketAtual,grupo,participante){
+  const pdf=await consultaGerarPdfTutorial();
+  try{
+    await socketAtual.sendMessage(grupo,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:'comandos-consulta.pdf',caption:'📘 Guia rápido de comandos de consulta.\n\nUse /comandos sempre que quiser receber este tutorial novamente.',mentions:participante?[participante]:[]});
+  }finally{ try{fs.unlinkSync(pdf)}catch(_){} }
+}
+async function consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante){
+  try{ await socketAtual.sendMessage(grupo,{delete:msg.key}); }catch(e){ console.log('⚠️ V188 APAGAR MENSAGEM INVÁLIDA:',e.message); }
+  try{ await socketAtual.sendMessage(grupo,{text:'❌ Comando inválido.\n\nPara receber a lista de comandos, digite /comandos.',mentions:participante?[participante]:[]}); }catch(_){}
+}
 async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!(await consultaAtivaConfig())) return false;
   const grupo=await getConfig('consulta_wa_grupo','');
@@ -8569,8 +8696,11 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(msg?.key?.fromMe) return true;
   const participante=melhorJidCliente(msg,msg?.key?.participant||'');
   if(!participante) return true;
-  if(consultaEmMemoria){ try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){} return true; }
   const cmd=String(texto||'').trim(); if(!cmd) return true;
+  const validacao=consultaValidarComando(cmd);
+  if(!validacao.ok){ await consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante); return true; }
+  if(validacao.tutorial){ try{ await consultaEnviarTutorial(socketAtual,grupo,participante); }catch(e){ console.log('❌ V188 TUTORIAL PDF:',e.message); await socketAtual.sendMessage(grupo,{text:'⚠️ Não foi possível gerar o tutorial agora. Tente novamente em instantes.'}); } return true; }
+  if(consultaEmMemoria){ try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){} return true; }
   const tgGrupo=await getConfig('consulta_tg_grupo','');
   if(!tgGrupo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
   if(!(await consultaTelegramConectarSalva())){ await socketAtual.sendMessage(grupo,{text:'⚠️ Conta Telegram de consultas ainda não está conectada. O administrador precisa autenticá-la no painel.'}); return true; }
@@ -8628,6 +8758,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Tempo limite da consulta (segundos)</label><input type="number" min="60" max="900" name="timeout_seg" value="${safeHtml(timeout)}"><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });

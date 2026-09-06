@@ -1,0 +1,20 @@
+V188 - CONSULTAS POR ASSINATURA
+
+Base: V187 estável.
+
+Alterações:
+1. Validação dos comandos antes de bloquear o grupo.
+2. Mensagem/comando inválido é apagado e o grupo permanece aberto.
+3. Aviso: "Comando inválido. Para receber a lista de comandos, digite /comandos."
+4. /comandos entrega tutorial compacto em PDF sem bloquear o grupo.
+5. Lista de comandos válidos cadastrada conforme exemplos fornecidos.
+6. Resposta Yan com link: mantém geração e entrega do PDF.
+7. Resposta Yan em texto: entrega o texto no WhatsApp e libera o grupo.
+8. Resposta sem resultado/não localizada: avisa no WhatsApp e libera o grupo.
+9. Captura do Telegram V187 mantida (listener + polling de histórico).
+10. Parser do resultado não elimina mais linhas repetidas, preservando registros/campos repetidos no PDF.
+11. Correlação de consulta reforçada para dados numéricos formatados (ex.: CNPJ com pontuação).
+12. Nenhuma variável nova no Render.
+13. Nenhum arquivo .md incluído.
+
+Comando do tutorial: /comandos
