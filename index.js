@@ -1956,6 +1956,36 @@ async function initDB() {
     finalizado_em TEXT
   )`);
 
+  // V204 — comandos Dhru dinâmicos para o grupo de consultas.
+  await run(`CREATE TABLE IF NOT EXISTS consulta_dhru_comandos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    comando TEXT NOT NULL UNIQUE,
+    nome_exibicao TEXT,
+    servico_id INTEGER,
+    ativo INTEGER DEFAULT 1,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS consulta_dhru_execucoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    comando_id INTEGER,
+    servico_id INTEGER,
+    cliente_jid TEXT,
+    cliente_nome TEXT,
+    grupo_whatsapp TEXT,
+    entrada TEXT,
+    order_uuid TEXT,
+    status TEXT DEFAULT 'ENVIANDO',
+    resultado TEXT,
+    erro TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    finalizado_em TEXT
+  )`);
+  for (const c of ['/check','/xiaomi','/converter']) {
+    await run(`INSERT OR IGNORE INTO consulta_dhru_comandos(comando,nome_exibicao,ativo) VALUES(?,?,1)`,[c,c.slice(1).toUpperCase()]);
+  }
+
   // V201 — links temporários próprios para consultas /nome.
   // O cliente recebe somente a URL deste sistema; a URL original da Yan fica no servidor.
   await run(`CREATE TABLE IF NOT EXISTS consultas_links_temporarios (
@@ -9086,6 +9116,77 @@ async function consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante
   try{ await socketAtual.sendMessage(grupo,{delete:msg.key}); }catch(e){ console.log('⚠️ V188 APAGAR MENSAGEM INVÁLIDA:',e.message); }
   try{ await socketAtual.sendMessage(grupo,{text:'❌ Comando inválido.\n\nPara receber a lista de comandos, digite /comandos.',mentions:participante?[participante]:[]}); }catch(_){}
 }
+
+let consultaDhruEmMemoria=null;
+function consultaDhruNormalizarComando(v){
+  let c=String(v||'').trim().toLowerCase().replace(/\s+/g,'');
+  if(!c) return ''; if(!c.startsWith('/')) c='/'+c;
+  return /^\/[a-z0-9_]{2,32}$/i.test(c)?c:'';
+}
+async function consultaDhruMapeamentoDoTexto(texto){
+  const cmd=consultaDhruNormalizarComando(String(texto||'').trim().split(/\s+/)[0]);
+  if(!cmd) return null;
+  return await get(`SELECT c.*,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE lower(c.comando)=lower(?) AND c.ativo=1`,[cmd]);
+}
+async function consultaDhruLiberarGrupo(ctx){
+  try{ if(ctx?.socket&&ctx?.grupo) await ctx.socket.groupSettingUpdate(ctx.grupo,'not_announcement'); }catch(e){console.log('⚠️ DHRU GRUPO LIBERAR',e.message)}
+}
+async function consultaDhruEntregar(ctx,resultado){
+  const txt=traduzirResultadoDhruPt(String(resultado||'').trim())||'Consulta concluída.';
+  const fake={id:`dhru-${ctx.id}`,dado_consulta:ctx.entrada};
+  let pdf=null;
+  try{
+    pdf=await consultaGerarPdf({titulo:ctx.nome||'Resultado da consulta',linhas:txt.split(/\r?\n/).filter(Boolean)},fake);
+    await ctx.socket.sendMessage(ctx.grupo,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ctx.id}.pdf`,caption:`✅ Consulta concluída — ${ctx.cliente_nome||'Cliente'}`,mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]});
+  }finally{ if(pdf) try{fs.unlinkSync(pdf)}catch(_){} }
+  await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[txt,ctx.id]);
+  await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null;
+}
+async function consultaDhruAcompanhar(ctx){
+  const inicio=Date.now(), limite=5*60*1000;
+  while(Date.now()-inicio<limite){
+    await new Promise(r=>setTimeout(r,5000));
+    try{
+      const resp=await consultarPedidoDhru(ctx.order_uuid), d=resp?.data||{}, st=String(d?.status||'').toLowerCase();
+      const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+      await run(`UPDATE consulta_dhru_execucoes SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),ctx.id]);
+      if(['success','completed','complete','done'].includes(st) && replay){ await consultaDhruEntregar(ctx,dhruDecodeReplay(replay)); return; }
+      if(['rejected','reject','failed','failure','cancelled','canceled'].includes(st)) throw new Error(dhruDecodeReplay(replay)||`Dhru: ${st}`);
+    }catch(e){
+      if(/Dhru:|rejected|failed|cancel/i.test(String(e.message||''))){
+        await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(e.message).slice(0,800),ctx.id]);
+        try{await ctx.socket.sendMessage(ctx.grupo,{text:'❌ Não foi possível concluir esta consulta.',mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
+        await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null; return;
+      }
+    }
+  }
+  await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro='Tempo limite do fornecedor',finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ctx.id]);
+  await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null;
+}
+async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,texto,map){
+  if(!map.servico_id||!map.api_service_id){ await socketAtual.sendMessage(grupo,{text:`⚠️ O comando ${map.comando} ainda não possui um serviço Dhru configurado no painel.`}); return true; }
+  if(consultaEmMemoria||consultaDhruEmMemoria){ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); return true; }
+  const entrada=String(texto||'').trim().replace(/^\S+\s*/,'').trim();
+  if(!entrada){ await socketAtual.sendMessage(grupo,{text:`⚠️ Informe os dados após o comando.\nExemplo: ${map.comando} DADO`}); return true; }
+  const product=await dhruProductForService(map.servico_id); if(!product){await socketAtual.sendMessage(grupo,{text:'⚠️ Serviço Dhru não sincronizado. Sincronize a API no painel.'});return true;}
+  let campos; try{campos=dhruParseInput(product,entrada)}catch(e){await socketAtual.sendMessage(grupo,{text:`⚠️ ${e.message}`});return true;}
+  const ins=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[map.id,map.servico_id,participante,msg?.pushName||'Cliente',grupo,entrada]);
+  const ctx={id:ins.lastID,socket:socketAtual,grupo,cliente_jid:participante,cliente_nome:msg?.pushName||'Cliente',entrada,nome:map.nome_exibicao||map.comando}; consultaDhruEmMemoria=ctx;
+  try{
+    await socketAtual.groupSettingUpdate(grupo,'announcement'); await socketAtual.sendMessage(grupo,{text:'🔒 Consulta em processamento. O grupo será liberado assim que o resultado for entregue.'});
+    campos.reference_id=`group-${ctx.id}`; if(campos.Quantity===undefined&&campos.quantity===undefined) campos.Quantity=1;
+    const resp=await dhruRequest('post','/order',[{product_uuid:map.api_service_id,fields:[campos]}]);
+    const flat=v=>Array.isArray(v)?v.flatMap(flat):(v==null?[]:[v]); const d=flat(resp?.data)[0]||{}; const order=String(d.order_uuid||d.order_id||'').trim();
+    if(!order) throw new Error(resp?.message||'A Dhru não retornou o identificador do pedido.');
+    ctx.order_uuid=order; await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status='PROCESSANDO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[order,ctx.id]);
+    setTimeout(()=>{ if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruLiberarGrupo(ctx).catch(()=>{}); },30000);
+    consultaDhruAcompanhar(ctx).catch(e=>console.log('❌ DHRU GRUPO',e.message)); return true;
+  }catch(e){
+    await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(e.message).slice(0,800),ctx.id]);
+    await socketAtual.sendMessage(grupo,{text:'❌ Não foi possível iniciar esta consulta.'}); await consultaDhruLiberarGrupo(ctx); consultaDhruEmMemoria=null; return true;
+  }
+}
+
 async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!(await consultaAtivaConfig())) return false;
   const grupo=await getConfig('consulta_wa_grupo','');
@@ -9094,6 +9195,8 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   const participante=melhorJidCliente(msg,msg?.key?.participant||'');
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
+  const mapaDhru=await consultaDhruMapeamentoDoTexto(cmd);
+  if(mapaDhru) return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru);
   const validacao=consultaValidarComando(cmd);
   if(!validacao.ok){ await consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante); return true; }
   if(validacao.tutorial){ try{ await consultaEnviarTutorial(socketAtual,grupo,participante); }catch(e){ console.log('❌ V188 TUTORIAL PDF:',e.message); await socketAtual.sendMessage(grupo,{text:'⚠️ Não foi possível gerar o tutorial agora. Tente novamente em instantes.'}); } return true; }
@@ -9153,6 +9256,11 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
+  const dhruCmds=await all(`SELECT c.*,s.nome servico_nome FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id ORDER BY c.id`);
+  const dhruServicos=await all(`SELECT id,COALESCE(NULLIF(nome_exibicao,''),nome) nome FROM servicos_catalogo WHERE api_provider='DHRU' ORDER BY nome COLLATE NOCASE`);
+  const yanReservados=new Set(CONSULTA_COMANDOS_VALIDOS.flatMap(x=>x.comandos||[]).map(x=>String(x).toLowerCase()));
+  const dhruOptions=(sel)=>['<option value="">Selecione o serviço Dhru...</option>',...dhruServicos.map(s=>`<option value="${s.id}" ${Number(sel)===Number(s.id)?'selected':''}>${safeHtml(s.nome)} (#${s.id})</option>`)].join('');
+  const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="forms-inline"><select name="servico_id" required>${dhruOptions(c.servico_id)}</select><input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome comercial"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
   const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
   const rows=hist.map(x=>`<tr><td>#${x.id}</td><td>${safeHtml(x.cliente_nome||'-')}</td><td>${safeHtml(x.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(x.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
   const statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
@@ -9164,9 +9272,28 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
+  <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><select name="servico_id" required>${dhruOptions('')}</select><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });
+app.post('/admin/consultas-assinatura/dhru-comando/novo',async(req,res)=>{
+  try{
+    const comando=consultaDhruNormalizarComando(req.body.comando); if(!comando) throw new Error('Comando inválido. Use / seguido de letras, números ou _.');
+    const reservados=new Set(CONSULTA_COMANDOS_VALIDOS.flatMap(x=>x.comandos||[]).map(x=>String(x).toLowerCase())); if(comando==='/comandos'||reservados.has(comando)) throw new Error('Esse comando já pertence às consultas Yan.');
+    if(await get('SELECT id FROM consulta_dhru_comandos WHERE lower(comando)=lower(?)',[comando])) throw new Error('Esse comando Dhru já existe.');
+    const sid=Number(req.body.servico_id); const sv=await get(`SELECT id FROM servicos_catalogo WHERE id=? AND api_provider='DHRU'`,[sid]); if(!sv) throw new Error('Selecione um serviço Dhru válido.');
+    await run(`INSERT INTO consulta_dhru_comandos(comando,nome_exibicao,servico_id,ativo) VALUES(?,?,?,1)`,[comando,String(req.body.nome_exibicao||comando.slice(1)).trim(),sid]);
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Comando Dhru cadastrado.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/dhru-comando/:id/salvar',async(req,res)=>{
+  try{
+    const sid=Number(req.body.servico_id); const sv=await get(`SELECT id FROM servicos_catalogo WHERE id=? AND api_provider='DHRU'`,[sid]); if(!sv) throw new Error('Selecione um serviço Dhru válido.');
+    await run(`UPDATE consulta_dhru_comandos SET servico_id=?,nome_exibicao=?,ativo=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[sid,String(req.body.nome_exibicao||'').trim(),req.body.ativo==='1'?1:0,Number(req.params.id)]);
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Comando Dhru atualizado.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+
 app.post('/admin/consultas-assinatura/salvar-conta',async(req,res)=>{
   try{
     const apiId=Number(String(req.body.api_id||'').trim()); if(!apiId) throw new Error('API ID inválido.');
