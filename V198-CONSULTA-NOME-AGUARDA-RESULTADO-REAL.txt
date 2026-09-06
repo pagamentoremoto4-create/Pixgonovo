@@ -1,0 +1,9 @@
+V198 — CONSULTA /NOME
+Base: V197/V196 estável.
+
+Alteração isolada:
+- O valor inicial "0 resultados" da página /nome não é mais tratado como "sem resultado".
+- A página é mantida aberta por até 25 segundos procurando total > 0 ou linha real na tabela.
+- Há recarga periódica da página para capturar atualizações tardias do link temporário.
+- Se os dados não carregarem dentro do prazo, o sistema trata como falha de carregamento, não como "sem resultado" e não envia PDF vazio.
+- Fluxos de link das demais consultas, texto -> PDF, /comandos e liberação de grupo em 30s foram preservados.

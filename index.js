@@ -8696,22 +8696,52 @@ async function consultaLerPaginaDinamicaNome(url){
     browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
     const page=await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36');
-    await page.goto(url,{waitUntil:'domcontentloaded',timeout:12000});
-    // /nome monta a tabela no navegador. Esperamos somente essa tela mudar de 0 registros
-    // ou surgir ao menos uma linha de dados; as demais consultas continuam no leitor antigo.
-    try{
-      await page.waitForFunction(()=>{
-        const body=(document.body?.innerText||'').replace(/\s+/g,' ');
-        const rows=document.querySelectorAll('tbody tr').length;
-        return rows>0 || !/Mostrando\s+1\s+a\s+10\s+de\s+0/i.test(body);
-      },{timeout:10000,polling:350});
-    }catch(_){}
-    await new Promise(r=>setTimeout(r,700));
+    await page.goto(url,{waitUntil:'domcontentloaded',timeout:10000});
+
+    // V198: /nome pode abrir mostrando "0" enquanto a tabela ainda está sendo alimentada.
+    // Não consideramos esse zero como resposta final. Aguardamos até aparecer total > 0
+    // ou uma linha real de resultado. A cada poucos segundos recarregamos a página para
+    // também pegar casos em que o servidor atualiza o conteúdo do link temporário depois.
+    const inicio=Date.now();
+    const limiteMs=25000;
+    let ultimaRecarga=Date.now();
+    let ultimoEstado=null;
+
+    while(Date.now()-inicio<limiteMs){
+      ultimoEstado=await page.evaluate(()=>{
+        const body=(document.body?.innerText||'').replace(/\s+/g,' ').trim();
+        const m=body.match(/Mostrando\s+\d+\s+a\s+\d+\s+de\s+(\d+)/i);
+        const total=m?Number(m[1]||0):null;
+        const trs=[...document.querySelectorAll('tbody tr')];
+        const linhasReais=trs.filter(tr=>{
+          const txt=(tr.innerText||'').replace(/\s+/g,' ').trim();
+          const tds=tr.querySelectorAll('td').length;
+          if(!txt||tds<2) return false;
+          if(/nenhum\s+(resultado|registro|dado)|sem\s+resultado|carregando|processando/i.test(txt)) return false;
+          return true;
+        }).length;
+        return {body,total,linhasReais};
+      });
+
+      if((ultimoEstado?.total||0)>0 || (ultimoEstado?.linhasReais||0)>0){
+        await new Promise(r=>setTimeout(r,500));
+        const extraido=await page.evaluate(()=>({titulo:document.title||'Resultado da consulta',texto:document.body?.innerText||''}));
+        const linhas=String(extraido.texto||'').split(/\n+/).map(x=>x.replace(/[ \t\r]+/g,' ').trim()).filter(x=>x&&x.length<=2000);
+        return {titulo:String(extraido.titulo||'Resultado da consulta').trim(),linhas,carregouResultado:true};
+      }
+
+      if(Date.now()-ultimaRecarga>=4500){
+        ultimaRecarga=Date.now();
+        try{ await page.reload({waitUntil:'domcontentloaded',timeout:6000}); }catch(_){}
+      }
+      await new Promise(r=>setTimeout(r,700));
+    }
+
     const extraido=await page.evaluate(()=>({titulo:document.title||'Resultado da consulta',texto:document.body?.innerText||''}));
     const linhas=String(extraido.texto||'').split(/\n+/).map(x=>x.replace(/[ \t\r]+/g,' ').trim()).filter(x=>x&&x.length<=2000);
-    return {titulo:String(extraido.titulo||'Resultado da consulta').trim(),linhas};
+    return {titulo:String(extraido.titulo||'Resultado da consulta').trim(),linhas,carregouResultado:false,carregamentoPendente:true};
   }catch(e){
-    console.log('⚠️ V197 /NOME LEITURA DINÂMICA:',e.message);
+    console.log('⚠️ V198 /NOME LEITURA DINÂMICA:',e.message);
     return null;
   }finally{
     if(browser) try{await browser.close()}catch(_){}
@@ -8729,15 +8759,18 @@ async function consultaLerPagina(url,consulta=null){
   // V197: somente /nome ganha uma segunda leitura com navegador quando a tabela inicial vem vazia.
   // Assim não alteramos o caminho que já funciona para CPF, placa e demais consultas.
   if(consultaEhComandoNome(consulta) && consultaPaginaNomeVazia(dados.linhas)){
-    console.log('⏳ V197 /NOME: tabela veio com 0 registros; aguardando carregamento dinâmico...');
+    console.log('⏳ V198 /NOME: zero inicial ignorado; aguardando resultado real por até 25s...');
     const dinamico=await consultaLerPaginaDinamicaNome(u.toString());
-    if(dinamico?.linhas?.length){
+    if(dinamico?.carregouResultado && dinamico?.linhas?.length){
       dados=dinamico;
-      console.log('✅ V197 /NOME: leitura dinâmica concluída. Linhas:',dados.linhas.length);
-    }
-    if(consultaPaginaNomeVazia(dados.linhas)){
-      console.log('ℹ️ V197 /NOME: resultado permaneceu com 0 registros após a espera.');
-      return {...dados,url:u.toString(),semResultado:true};
+      console.log('✅ V198 /NOME: resultado dinâmico carregado. Linhas:',dados.linhas.length);
+    }else{
+      // Importante: "0" inicial não significa "sem resultado". Se a página não carregar
+      // dados dentro da janela, sinalizamos falha de carregamento em vez de enviar PDF vazio
+      // ou afirmar incorretamente que não há resultado.
+      const err=new Error('A página da consulta /nome não carregou os resultados dentro do prazo.');
+      err.codigo='NOME_CARREGAMENTO_PENDENTE';
+      throw err;
     }
   }
   return {...dados,url:u.toString(),semResultado:false};
