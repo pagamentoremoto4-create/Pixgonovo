@@ -1299,7 +1299,22 @@ async function executarPedidoDhru(pedidoId){
 function dhruDecodeReplay(v){
   const s=String(v||'');
   if(!s) return '';
-  try { const b=Buffer.from(s,'base64').toString('utf8'); if(b && /[\x20-\x7E\u00A0-\uFFFF]/.test(b)) return b; } catch(_){}
+  // Só tenta Base64 quando o fornecedor realmente enviou Base64 válido.
+  // Buffer.from(...,'base64') é permissivo e corrompia respostas Dhru já em texto puro.
+  const compact=s.replace(/\s+/g,'');
+  const pareceBase64=compact.length>=8 && compact.length%4===0 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact);
+  if(pareceBase64){
+    try{
+      const buf=Buffer.from(compact,'base64');
+      const roundtrip=buf.toString('base64').replace(/=+$/,'');
+      if(roundtrip===compact.replace(/=+$/,'')){
+        const b=buf.toString('utf8');
+        const ruins=(b.match(/\uFFFD/g)||[]).length;
+        const controles=(b.match(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g)||[]).length;
+        if(b && ruins===0 && controles===0) return b;
+      }
+    }catch(_){}
+  }
   return s;
 }
 function limparResultadoDhru(v){
@@ -9161,23 +9176,20 @@ async function consultaDhruLiberarGrupo(ctx){
   try{ if(ctx?.socket&&ctx?.grupo) await ctx.socket.groupSettingUpdate(ctx.grupo,'not_announcement'); }catch(e){console.log('⚠️ DHRU GRUPO LIBERAR',e.message)}
 }
 async function consultaDhruEntregar(ctx,resultado){
-  // V206: comandos Dhru do grupo entregam o retorno NATIVO da API.
-  // Não traduz, não converte em PDF e não aplica o proxy/link temporário da Yan.
+  // V207: usa exatamente o mesmo tratamento de resultado dos pedidos Dhru normais.
+  // A entrada do grupo muda; a leitura/limpeza do Order reply é a rotina já usada pelo bot de serviços.
   const bruto=String(resultado??'');
-  const txt=bruto.trim();
-  if(!txt) throw new Error('Dhru concluiu a consulta sem conteúdo de resultado');
+  const resultadoCliente=traduzirResultadoDhruPt(bruto).trim();
+  if(!resultadoCliente) throw new Error('Dhru concluiu a consulta sem conteúdo de resultado');
 
-  // Cabeçalho separado para não alterar o conteúdo retornado pela API.
   await ctx.socket.sendMessage(ctx.grupo,{
     text:`✅ Consulta concluída — ${ctx.cliente_nome||'Cliente'}`,
     mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]
   });
 
-  // WhatsApp/Baileys aceita mensagens grandes, mas dividimos somente quando necessário.
-  // A divisão preserva o texto original, sem tradução, formatação ou conversão.
   const LIMITE=50000;
-  for(let i=0;i<bruto.length;i+=LIMITE){
-    await ctx.socket.sendMessage(ctx.grupo,{text:bruto.slice(i,i+LIMITE)});
+  for(let i=0;i<resultadoCliente.length;i+=LIMITE){
+    await ctx.socket.sendMessage(ctx.grupo,{text:resultadoCliente.slice(i,i+LIMITE)});
   }
 
   await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[bruto,ctx.id]);
