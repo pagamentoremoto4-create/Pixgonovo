@@ -8302,7 +8302,7 @@ async function desconectarWhatsApp() {
 }
 
 
-// ===== V188 — CONSULTAS POR ASSINATURA / VALIDAÇÃO / TEXTO-PDF / TUTORIAL =====
+// ===== V195 — CONSULTAS / CAPTURA DIRETA TELEGRAM + TIMEOUT 30S =====
 let consultaTelegramCliente = null;
 let consultaTelegramContaConectada = false;
 let consultaTelegramLogin = null;
@@ -8311,6 +8311,7 @@ let consultaEmMemoria = null;
 let consultaTimeoutTimer = null;
 let consultaPollingTimer = null;
 let consultaAguardarTimer = null;
+let consultaWatcherDiretoToken = 0;
 const CONSULTA_TMP_DIR = path.join(DATA_DIR, 'consultas-temp');
 
 function consultaSegredoMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)}${t.slice(-5)}` : 'Não configurado'; }
@@ -8538,6 +8539,61 @@ async function consultaTelegramProcurarRespostaHistorico(){
     }
   }catch(e){ console.log('⚠️ V194 POLLING TELEGRAM:',e?.message||e); }
 }
+async function consultaTelegramAguardarResultadoDireto(ativo, entidade){
+  const meuToken=++consultaWatcherDiretoToken;
+  const inicio=Date.now();
+  const enviadoId=Number(ativo?.telegram_enviado_id||0);
+  let yanSender=String(ativo?.telegram_yan_sender_id||'');
+  const vistos=new Set();
+  console.log('👀 V195 WATCHER TELEGRAM INICIADO: consulta',ativo?.id,'msg',enviadoId||'-');
+
+  while(consultaEmMemoria?.id===ativo?.id && !ativo.processandoResultado && (Date.now()-inicio)<29500 && meuToken===consultaWatcherDiretoToken){
+    try{
+      const mensagens=await consultaTelegramCliente.getMessages(entidade,{limit:60});
+      const ordenadas=[...(mensagens||[])].sort((a,b)=>Number(a?.id||0)-Number(b?.id||0));
+      for(const msg of ordenadas){
+        if(consultaEmMemoria?.id!==ativo?.id || ativo.processandoResultado) return;
+        const mid=Number(msg?.id||0);
+        if(!mid || (enviadoId && mid<=enviadoId)) continue;
+        const chave=String(mid);
+        if(vistos.has(chave)) continue;
+        vistos.add(chave);
+        if(msg?.out) continue;
+        const texto=String(msg?.message||msg?.text||'').trim();
+        if(!texto) continue;
+        const senderId=consultaTelegramSenderId(msg);
+        const replyId=consultaTelegramReplyId(msg);
+        const link=consultaExtrairLinkTelegram(texto);
+        const dado=consultaExtrairDadoTelegram(texto);
+        const correlacaoOk=!dado || !ativo.dado_consulta || consultaNormalizarCorrelacao(dado)===consultaNormalizarCorrelacao(ativo.dado_consulta);
+        if(!correlacaoOk) continue;
+
+        // O primeiro retorno recebido depois do nosso comando define o remetente do Yan.
+        // Isso evita depender de assinatura textual ou do evento NewMessage.
+        if(!yanSender && senderId) yanSender=String(senderId);
+        if(yanSender && senderId && String(senderId)!==yanSender && !link && !(enviadoId&&replyId===enviadoId)) continue;
+        if(senderId && !ativo.telegram_yan_sender_id) ativo.telegram_yan_sender_id=String(senderId);
+
+        console.log('📨 V195 RETORNO TELEGRAM:',mid,'reply=',replyId||'-','sender=',senderId||'-',link?'LINK':(consultaMensagemIntermediariaYan(texto)?'INTERMEDIARIA':'TEXTO'));
+
+        if(link || consultaRespostaSemResultado(texto) || !consultaMensagemIntermediariaYan(texto)){
+          await consultaTratarTextoRespostaTelegram(texto,chave,{forcar:true,replyId});
+          if(ativo.processandoResultado || !consultaEmMemoria) return;
+        }else{
+          // Marca apenas a intermediária como vista e continua esperando o resultado real.
+          if(!ativo.telegram_processados) ativo.telegram_processados=new Set();
+          ativo.telegram_processados.add(chave);
+        }
+      }
+    }catch(e){
+      console.log('⚠️ V195 WATCHER TELEGRAM:',e?.message||e);
+      // tenta reconectar uma vez se a sessão caiu
+      try{ if(!consultaTelegramContaConectada) await consultaTelegramConectarSalva(true); }catch(_){}
+    }
+    await new Promise(r=>setTimeout(r,750));
+  }
+}
+
 function consultaTelegramIniciarPolling(){
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   // V194: polling mais rápido e como caminho principal, sem depender do NewMessage.
@@ -8556,6 +8612,7 @@ async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   if(consultaAguardarTimer){ clearTimeout(consultaAguardarTimer); consultaAguardarTimer=null; }
+  consultaWatcherDiretoToken++;
   consultaEmMemoria=null;
 }
 async function consultaFalhar(id,erro){
@@ -8654,6 +8711,8 @@ async function consultaProcessarResultadoFinalTelegram(texto,messageId=''){
 
   const semResultado=consultaRespostaSemResultado(textoLimpo);
   ativo.processandoResultado=true;
+  // V195: assim que o resultado final foi encontrado, o timeout de 30s não pode competir com a geração/entrega do PDF.
+  if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   if(consultaAguardarTimer){ clearTimeout(consultaAguardarTimer); consultaAguardarTimer=null; }
 
@@ -8923,10 +8982,13 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
     consultaEmMemoria.processandoResultado=false;
     consultaEmMemoria.telegram_aguardar_ate=0;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
+    // V195: watcher direto independente. Ele lê o histórico do mesmo entity usado no sendMessage,
+    // sem depender do evento NewMessage nem de resolver o grupo novamente.
+    consultaTelegramAguardarResultadoDireto(consultaEmMemoria,entidade).catch(e=>console.log('❌ V195 WATCHER DIRETO:',e?.message||e));
+    // Mantém o polling antigo apenas como redundância.
     consultaTelegramIniciarPolling();
     if(consultaAguardarTimer){ clearTimeout(consultaAguardarTimer); consultaAguardarTimer=null; }
-    // V194: processamento imediato; histórico Telegram é o caminho principal.
-    const timeoutSeg=30; // V194: grupo nunca fica fechado por mais de 30 segundos
+    const timeoutSeg=30; // grupo nunca fica fechado por mais de 30 segundos
     consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
   return true;
