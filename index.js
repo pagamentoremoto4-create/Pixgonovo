@@ -8309,6 +8309,7 @@ let consultaTelegramLogin = null;
 let consultaTelegramHandlerInstalado = false;
 let consultaEmMemoria = null;
 let consultaTimeoutTimer = null;
+let consultaPollingTimer = null;
 const CONSULTA_TMP_DIR = path.join(DATA_DIR, 'consultas-temp');
 
 function consultaSegredoMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)}${t.slice(-5)}` : 'Não configurado'; }
@@ -8429,6 +8430,31 @@ async function consultaTelegramIniciarLogin(){
   for(let i=0;i<40;i++){ if(['AGUARDANDO_CODIGO','AGUARDANDO_SENHA','CONECTADO','ERRO'].includes(login.fase)) break; await new Promise(r=>setTimeout(r,250)); }
   return login.fase;
 }
+async function consultaTelegramProcurarRespostaHistorico(){
+  const ativo=consultaEmMemoria;
+  if(!ativo || ativo.processandoResultado || !consultaTelegramCliente || !consultaTelegramContaConectada) return;
+  try{
+    const entidade=ativo.telegram_entidade || await consultaTelegramResolverGrupo(await getConfig('consulta_tg_grupo',''));
+    const mensagens=await consultaTelegramCliente.getMessages(entidade,{limit:40});
+    const enviadoId=Number(ativo.telegram_enviado_id||0);
+    for(const msg of mensagens||[]){
+      const mid=Number(msg?.id||0);
+      if(enviadoId && mid<=enviadoId) continue;
+      const texto=String(msg?.message||msg?.text||'');
+      if(!texto.includes('Resultado:') || !/Dados da consulta:/i.test(texto)) continue;
+      const dado=consultaExtrairDadoTelegram(texto);
+      if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) continue;
+      console.log('✅ V187 RESPOSTA YAN ENCONTRADA PELO HISTÓRICO:',mid);
+      await consultaTratarTextoRespostaTelegram(texto,String(msg?.id||''));
+      break;
+    }
+  }catch(e){ console.log('⚠️ V187 POLLING TELEGRAM:',e.message); }
+}
+function consultaTelegramIniciarPolling(){
+  if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
+  consultaPollingTimer=setInterval(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },2000);
+  setTimeout(()=>{ consultaTelegramProcurarRespostaHistorico().catch(()=>{}); },800);
+}
 async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   const grupo=await getConfig('consulta_wa_grupo','');
   try {
@@ -8439,6 +8465,7 @@ async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
     }
   } catch(e){ console.log('⚠️ V186 LIBERAR GRUPO:',e.message); }
   if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
+  if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   consultaEmMemoria=null;
 }
 async function consultaFalhar(id,erro){
@@ -8460,6 +8487,9 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId=''){
   if(!link) return;
   const ativo=consultaEmMemoria;
   if(dado && ativo.dado_consulta && consultaNormalizarCorrelacao(dado)!==consultaNormalizarCorrelacao(ativo.dado_consulta)) return;
+  if(ativo.processandoResultado) return;
+  ativo.processandoResultado=true;
+  if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,messageId,ativo.id]);
   try{
     const dados=await consultaLerPagina(link);
@@ -8553,7 +8583,11 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
     await socketAtual.sendMessage(grupo,{text:'🔒 Consulta em processamento. O grupo será liberado assim que o resultado for entregue.'});
     const entidade=await consultaTelegramResolverGrupo(tgGrupo);
     const enviado=await consultaTelegramCliente.sendMessage(entidade,{message:cmd});
+    consultaEmMemoria.telegram_entidade=entidade;
+    consultaEmMemoria.telegram_enviado_id=String(enviado?.id||'');
+    consultaEmMemoria.processandoResultado=false;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
+    consultaTelegramIniciarPolling();
     const timeoutSeg=Math.max(60,Math.min(900,Number(await getConfig('consulta_timeout_seg','180'))||180));
     consultaTimeoutTimer=setTimeout(()=>{ if(consultaEmMemoria?.id===id) consultaFalhar(id,new Error('Tempo limite da consulta excedido.')).catch(()=>{}); },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
