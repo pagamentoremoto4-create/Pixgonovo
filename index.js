@@ -8640,8 +8640,14 @@ async function consultaProcessarResultadoFinalTelegram(texto,messageId=''){
   if(link){
     await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link,messageId,ativo.id]);
     try{
-      const dados=await consultaLerPagina(link);
-      const pdf=await consultaGerarPdf(dados,ativo);
+      let pdf=null;
+      try{
+        pdf=await consultaBaixarPdfOriginalYan(link,ativo);
+      }catch(ePdfYan){
+        console.warn('⚠️ V192 PDF ORIGINAL YAN INDISPONÍVEL, USANDO FALLBACK:',ePdfYan?.message||ePdfYan);
+        const dados=await consultaLerPagina(link);
+        pdf=await consultaGerarPdf(dados,ativo);
+      }
       await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
       const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
       if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
@@ -8734,6 +8740,61 @@ function consultaDecodificarHtml(txt){
   const mapa={'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#39;':"'",'&apos;':"'"};
   return String(txt||'').replace(/&(nbsp|amp|lt|gt|quot|apos);|&#39;/gi,m=>mapa[m.toLowerCase()]||m).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCharCode(parseInt(n,16)));
 }
+
+async function consultaBaixarPdfOriginalYan(url,consulta){
+  const u=new URL(String(url));
+  if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
+  fs.mkdirSync(CONSULTA_TMP_DIR,{recursive:true});
+  const pasta=path.join(CONSULTA_TMP_DIR,`yan-download-${consulta.id}-${Date.now()}`);
+  fs.mkdirSync(pasta,{recursive:true});
+  let browser=null;
+  try{
+    // V192: usa o próprio botão "Baixar PDF" do Yan para preservar o PDF original.
+    // O require fica aqui para que, se o navegador falhar, o fluxo caia no fallback atual.
+    const puppeteer=require('puppeteer');
+    browser=await puppeteer.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']});
+    const page=await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36');
+    const client=await page.target().createCDPSession();
+    await client.send('Page.setDownloadBehavior',{behavior:'allow',downloadPath:pasta});
+    await page.goto(u.toString(),{waitUntil:'networkidle2',timeout:45000});
+
+    const achou=await page.evaluate(()=>{
+      const els=[...document.querySelectorAll('button,a,[role="button"]')];
+      const alvo=els.find(el=>String(el.innerText||el.textContent||'').trim().toLowerCase().includes('baixar pdf'));
+      if(!alvo) return false;
+      alvo.click();
+      return true;
+    });
+    if(!achou) throw new Error('Botão Baixar PDF não localizado na página do Yan.');
+
+    const limite=Date.now()+45000;
+    let arquivo=null;
+    while(Date.now()<limite){
+      const nomes=fs.readdirSync(pasta).filter(n=>!n.endsWith('.crdownload')&&!n.endsWith('.tmp'));
+      for(const nome of nomes){
+        const fp=path.join(pasta,nome);
+        try{
+          const st=fs.statSync(fp);
+          if(st.isFile()&&st.size>1000){ arquivo=fp; break; }
+        }catch(_){}
+      }
+      if(arquivo) break;
+      await new Promise(r=>setTimeout(r,500));
+    }
+    if(!arquivo) throw new Error('O download do PDF original do Yan não foi concluído.');
+    const cab=fs.readFileSync(arquivo,{encoding:null,flag:'r'}).subarray(0,5).toString('ascii');
+    if(cab!=='%PDF-') throw new Error('O arquivo baixado pelo Yan não é um PDF válido.');
+    const destino=path.join(CONSULTA_TMP_DIR,`consulta-${consulta.id}-yan-${Date.now()}.pdf`);
+    fs.copyFileSync(arquivo,destino);
+    console.log('✅ V192 PDF ORIGINAL DO YAN BAIXADO:',path.basename(destino));
+    return destino;
+  }finally{
+    try{if(browser) await browser.close();}catch(_){}
+    try{fs.rmSync(pasta,{recursive:true,force:true});}catch(_){}
+  }
+}
+
 async function consultaLerPagina(url){
   const u=new URL(String(url));
   if(u.protocol!=='https:'||u.hostname!=='api.yanbuscas.com'||!u.pathname.startsWith('/temp/')) throw new Error('URL de resultado não autorizada.');
