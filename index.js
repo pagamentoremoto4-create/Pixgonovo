@@ -8812,7 +8812,11 @@ function consultaUrlYanValida(raw){
   }catch(_){ return false; }
 }
 function consultaBasePublica(){
-  return String(BASE_URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/,'');
+  // V212: o cliente recebe o endereço público do Cloudflare Worker,
+  // enquanto o endpoint /consulta/:token continua sendo servido pelo Render.
+  // Pode ser alterado no Render pela variável CONSULTA_PUBLIC_BASE sem mexer no código.
+  const publica=String(process.env.CONSULTA_PUBLIC_BASE || 'https://vip.consultavip.workers.dev').trim().replace(/\/$/,'');
+  return publica || String(BASE_URL || process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').replace(/\/$/,'');
 }
 async function consultaCriarLinkTemporario(consulta,urlYan){
   if(!consultaUrlYanValida(urlYan)) throw new Error('URL de resultado Yan inválida.');
