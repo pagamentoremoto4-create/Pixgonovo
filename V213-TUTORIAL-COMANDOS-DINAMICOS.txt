@@ -1,0 +1,9 @@
+V213 - Tutorial de comandos dinâmicos
+Base: V212
+- /comandos continua gerando o PDF na hora.
+- O PDF passa a incluir automaticamente todos os comandos adicionais ativos cadastrados no painel.
+- O cliente vê somente nome comercial, comando e exemplo; nomes de fornecedor/API não aparecem.
+- Novo campo "Exemplo" no cadastro/edição de comandos adicionais.
+- Se o exemplo ficar vazio, o PDF usa automaticamente: /comando 350000000000000.
+- Comando desativado deixa de aparecer no próximo PDF gerado.
+- Fluxos Yan, Dhru, assinatura, pagamentos, promoções e link Cloudflare VIP preservados.
