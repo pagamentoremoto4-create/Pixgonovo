@@ -2059,6 +2059,46 @@ async function initDB() {
     await run(`INSERT OR IGNORE INTO consulta_assinatura_planos(nome,dias,preco,ativo,ordem) VALUES(?,?,?,1,?)`,[nome,dias,preco,ordem]);
   }
 
+
+  // V211 — pagamentos, promoções, indicações, alertas e histórico das assinaturas.
+  await run(`CREATE TABLE IF NOT EXISTS consulta_assinatura_pagamentos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id TEXT UNIQUE,
+    cliente_numero TEXT,
+    cliente_jid TEXT,
+    cliente_nome TEXT,
+    plano_id INTEGER,
+    valor_normal REAL DEFAULT 0,
+    desconto_percentual REAL DEFAULT 0,
+    valor_pago REAL DEFAULT 0,
+    gateway TEXT,
+    status TEXT DEFAULT 'PENDENTE',
+    promocao INTEGER DEFAULT 0,
+    bonus_dias INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    confirmado_em TEXT
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS consulta_assinatura_indicacoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    indicado_numero TEXT UNIQUE,
+    indicador_numero TEXT NOT NULL,
+    status TEXT DEFAULT 'PENDENTE',
+    bonus_dias INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    convertido_em TEXT
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS consulta_assinatura_alertas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assinante_id INTEGER,
+    tipo TEXT,
+    referencia TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(assinante_id,tipo,referencia)
+  )`);
+  await addColumnIfMissing('consulta_assinantes','ultima_consulta_em','TEXT');
+  await addColumnIfMissing('consulta_assinantes','total_consultas','INTEGER DEFAULT 0');
+  await addColumnIfMissing('consulta_assinantes','ultimo_comando','TEXT');
+
   // V201 — links temporários próprios para consultas /nome.
   // O cliente recebe somente a URL deste sistema; a URL original da Yan fica no servidor.
   await run(`CREATE TABLE IF NOT EXISTS consultas_links_temporarios (
@@ -6851,10 +6891,10 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   const paymentId = pix?.paymentId;
   const qrCode = pix?.qrCode;
   if (paymentId) {
-    const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : 'SALDO';
+    const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : (sess.tipo_pix === 'ASSINATURA' ? 'ASSINATURA' : 'SALDO');
     const contextoJson = tipoPagamento === 'SERVICO'
       ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
-      : null;
+      : (tipoPagamento === 'ASSINATURA' ? JSON.stringify(sess.contexto_assinatura || {}) : null);
     await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
     verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
@@ -7089,7 +7129,19 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       if (!marcado?.changes) return;
 
       let novo = null;
-      const pagamentoServico = String(tipoPagamento || '').toUpperCase() === 'SERVICO';
+      const tipoPagamentoUpper = String(tipoPagamento || '').toUpperCase();
+      const pagamentoServico = tipoPagamentoUpper === 'SERVICO';
+      const pagamentoAssinatura = tipoPagamentoUpper === 'ASSINATURA';
+      if (pagamentoAssinatura) {
+        try {
+          await consultaAssinaturaConfirmarPagamento(paymentId, jid, valorPix, gateway, contextoJson);
+        } catch (e) {
+          console.log('❌ V211 ASSINATURA CONFIRMAR PAGAMENTO:', e.message);
+          await run('UPDATE pix_pedidos SET status="pending" WHERE payment_id=?',[paymentId]).catch(()=>{});
+          return;
+        }
+        return;
+      }
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
@@ -8658,6 +8710,7 @@ async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
   if(consultaTimeoutTimer){ clearTimeout(consultaTimeoutTimer); consultaTimeoutTimer=null; }
   if(consultaPollingTimer){ clearInterval(consultaPollingTimer); consultaPollingTimer=null; }
   consultaEmMemoria=null;
+  setTimeout(()=>consultaAssinaturaProcessarFila().catch(()=>{}),500);
 }
 async function consultaFalhar(id,erro){
   const msg=String(erro?.message||erro||'Erro desconhecido').slice(0,1000);
@@ -9203,6 +9256,7 @@ async function consultaDhruMapeamentoDoTexto(texto){
 }
 async function consultaDhruLiberarGrupo(ctx){
   try{ if(ctx?.socket&&ctx?.grupo) await ctx.socket.groupSettingUpdate(ctx.grupo,'not_announcement'); }catch(e){console.log('⚠️ DHRU GRUPO LIBERAR',e.message)}
+  setTimeout(()=>consultaAssinaturaProcessarFila().catch(()=>{}),500);
 }
 async function consultaDhruEntregar(ctx,resultado){
   // V207: usa exatamente o mesmo tratamento de resultado dos pedidos Dhru normais.
@@ -9276,6 +9330,128 @@ async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,text
 }
 
 
+
+// V211 — camada comercial completa das assinaturas.
+const CONSULTA_PROMO_MODELOS_PADRAO = [
+  '🎁 *PROMOÇÃO ATIVA!*\nAssine o plano de {PLANO} com *{DESCONTO}% OFF*.\nDe {PRECO_NORMAL} por apenas *{PRECO_PROMO}*.\n💎 Digite /assinatura e aproveite!',
+  '🔥 *OFERTA POR TEMPO LIMITADO*\nSeu acesso às consultas ficou mais barato.\n⭐ {PLANO} com *{DESCONTO}% de desconto*\n{PRECO_NORMAL} → *{PRECO_PROMO}*\nDigite /assinatura para renovar ou assinar.',
+  '💎 *DESCONTO ATIVO — {DESCONTO}% OFF*\n📅 Plano: {PLANO}\n💰 De {PRECO_NORMAL} por *{PRECO_PROMO}*\n👉 Digite /assinatura',
+  '⚡ *PROMOÇÃO CENTRALUNLOCKER*\n{PLANO} por *{PRECO_PROMO}* enquanto a promoção estiver ativa.\nEconomize {DESCONTO}% e continue consultando sem interrupção.\nDigite /assinatura.',
+  '🚀 *RENOVE COM DESCONTO*\nPlano {PLANO}: {PRECO_NORMAL} → *{PRECO_PROMO}*\n🎁 {DESCONTO}% OFF por tempo limitado.\nUse /assinatura para comprar agora.'
+];
+const consultaAssinaturaAntiSpam = new Map();
+const consultaFilaInteligente = [];
+let consultaFilaProcessando = false;
+
+async function consultaAssinaturaGateway(){
+  const g=String(await getConfig('consulta_assinatura_gateway','mercadopago')).toLowerCase();
+  return ['pixgo','mercadopago'].includes(g)?g:'mercadopago';
+}
+async function consultaAssinaturaPromocaoConfig(){
+  const modelosSalvos=String(await getConfig('consulta_promo_modelos_json','')||'').trim();
+  let modelos=CONSULTA_PROMO_MODELOS_PADRAO.slice();
+  if(modelosSalvos){ try{ const x=JSON.parse(modelosSalvos); if(Array.isArray(x)&&x.length) modelos=x.map(v=>String(v||'')).filter(Boolean).slice(0,5); }catch(_){} }
+  while(modelos.length<5) modelos.push(CONSULTA_PROMO_MODELOS_PADRAO[modelos.length]||CONSULTA_PROMO_MODELOS_PADRAO[0]);
+  return {
+    ativo:(await getConfig('consulta_promo_ativo','0'))==='1',
+    planoId:Number(await getConfig('consulta_promo_plano_id','0')||0),
+    percentual:Math.max(0,Math.min(100,Number(await getConfig('consulta_promo_percentual','0')||0))),
+    inicio:String(await getConfig('consulta_promo_inicio','')||''),
+    fim:String(await getConfig('consulta_promo_fim','')||''),
+    intervaloHoras:Math.max(1,Number(await getConfig('consulta_promo_intervalo_horas','6')||6)),
+    ultimoEnvio:String(await getConfig('consulta_promo_ultimo_envio','')||''),
+    proximoModelo:Number(await getConfig('consulta_promo_modelo_indice','0')||0),
+    modelos
+  };
+}
+function consultaAssinaturaPromoVigente(cfg){
+  if(!cfg?.ativo||!cfg.planoId||cfg.percentual<=0) return false;
+  const agora=Date.now();
+  const ini=cfg.inicio?Date.parse(cfg.inicio):NaN, fim=cfg.fim?Date.parse(cfg.fim):NaN;
+  if(Number.isFinite(ini)&&agora<ini) return false;
+  if(Number.isFinite(fim)&&agora>fim) return false;
+  return true;
+}
+async function consultaAssinaturaPrecoPlano(plano){
+  const normal=Number(plano?.preco||0), cfg=await consultaAssinaturaPromocaoConfig();
+  const promo=consultaAssinaturaPromoVigente(cfg)&&Number(plano?.id)===Number(cfg.planoId);
+  const pct=promo?cfg.percentual:0;
+  const final=promo?Math.max(0,Math.round((normal*(1-pct/100)+Number.EPSILON)*100)/100):normal;
+  return {normal,final,promo,percentual:pct,cfg};
+}
+function consultaPromoAplicarModelo(modelo,plano,preco){
+  return String(modelo||'').replaceAll('{PLANO}',String(plano?.nome||`${plano?.dias||''} dias`)).replaceAll('{DESCONTO}',String(Number(preco?.percentual||0).toLocaleString('pt-BR'))).replaceAll('{PRECO_NORMAL}',brl(preco?.normal||0)).replaceAll('{PRECO_PROMO}',brl(preco?.final||0));
+}
+async function consultaAssinaturaTextoPlanosV211(){
+  const ps=await consultaAssinaturaPlanosAtivos();
+  if(!ps.length) return '\n\n⚠️ Nenhum plano disponível no momento.';
+  const linhas=[];
+  for(const p of ps){ const pr=await consultaAssinaturaPrecoPlano(p); linhas.push(pr.promo?`• ⭐ ${p.nome} — ${brl(pr.normal)} → *${brl(pr.final)}* (${pr.percentual}% OFF)`:`• ${p.nome} — ${brl(pr.final)}`); }
+  return `\n\n💎 *Planos disponíveis:*\n${linhas.join('\n')}\n\nPara comprar: /assinar DIAS\nExemplo: /assinar 30`;
+}
+async function consultaAssinaturaClienteCadastro(jid,nome='Cliente'){
+  const numero=normalizarNumeroWhatsApp(jidToNumber(jid)||String(jid||''));
+  let rev=numero?await get(`SELECT * FROM revendas WHERE replace(replace(replace(COALESCE(whatsapp,''),'+',''),' ',''),'-','') LIKE ? OR jid=? ORDER BY id DESC LIMIT 1`,[`%${numero.slice(-10)}`,jid]):null;
+  return {numero,jid,nome:String(nome||rev?.nome||'Cliente').trim(),revenda:rev||null};
+}
+async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
+  const cliente=await consultaAssinaturaClienteCadastro(jid,nome), gateway=await consultaAssinaturaGateway();
+  const pgcfg=await getPagamentoConfig();
+  if((gateway==='pixgo'&&!pgcfg.pixgoAtivo)||(gateway==='mercadopago'&&!pgcfg.mercadoPagoAtivo)){
+    await sock.sendMessage(grupo,{text:`⚠️ ${nomeGateway(gateway)} está desativado nas formas de pagamento. Fale com o administrador.`}); return true;
+  }
+  const preco=await consultaAssinaturaPrecoPlano(plano);
+  let documento='';
+  if(gateway==='pixgo'){
+    documento=String(cliente.revenda?.pix_documento||'').replace(/\D/g,'');
+    if(![11,14].includes(documento.length)){
+      await sock.sendMessage(grupo,{text:`⚠️ @${cliente.numero}, para gerar o PIX pela PixGo é necessário ter CPF/CNPJ cadastrado na sua conta. Atualize seu cadastro com o suporte ou aguarde o administrador selecionar Mercado Pago.`,mentions:[jid]}); return true;
+    }
+  }
+  await sock.sendMessage(grupo,{text:`⏳ @${cliente.numero}, gerando PIX de ${brl(preco.final)} para o plano ${plano.nome}...`,mentions:[jid]});
+  const pix=await gerarPix(preco.final,`Assinatura ${cliente.nome}`,documento,gateway);
+  if(!pix?.paymentId||!pix?.qrCode){ await sock.sendMessage(grupo,{text:`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)} agora.`}); return true; }
+  const contexto={tipoCompra:'ASSINATURA_GRUPO',planoId:Number(plano.id),clienteNumero:cliente.numero,clienteJid:jid,clienteNome:cliente.nome,grupoWhatsapp:grupo,valorNormal:preco.normal,descontoPercentual:preco.percentual,promocao:preco.promo?1:0};
+  await run(`INSERT OR REPLACE INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','ASSINATURA',?,?)`,[String(pix.paymentId),cliente.revenda?.id||null,jid,jid,preco.final,JSON.stringify(contexto),gateway]);
+  await run(`INSERT OR REPLACE INTO consulta_assinatura_pagamentos(payment_id,cliente_numero,cliente_jid,cliente_nome,plano_id,valor_normal,desconto_percentual,valor_pago,gateway,status,promocao) VALUES(?,?,?,?,?,?,?,?,?,'PENDENTE',?)`,[String(pix.paymentId),cliente.numero,jid,cliente.nome,plano.id,preco.normal,preco.percentual,preco.final,gateway,preco.promo?1:0]);
+  let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n🏦 ${nomeGateway(gateway)}\n💰 Valor: *${brl(preco.final)}*`;
+  if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
+  await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
+  if(gateway==='mercadopago'&&pix.qrCodeBase64){ try{ const b=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64'); if(b.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'}); }catch(_){} }
+  await sock.sendMessage(grupo,{text:`📋 PIX Copia e Cola:\n${String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()}`});
+  verificarPagamento(String(pix.paymentId),cliente.revenda?.id||null,jid,preco.final,'ASSINATURA',JSON.stringify(contexto),gateway);
+  return true;
+}
+async function consultaAssinaturaConfirmarPagamento(paymentId,jid,valorPix,gateway,contextoJson){
+  let ctx={}; try{ctx=typeof contextoJson==='string'?JSON.parse(contextoJson||'{}'):(contextoJson||{});}catch(_){}
+  const p=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=?`,[Number(ctx.planoId||0)]); if(!p) throw new Error('Plano da assinatura não encontrado');
+  const numero=normalizarNumeroWhatsApp(ctx.clienteNumero||jidToNumber(jid)||'');
+  const existente=numero?await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[numero]):null;
+  const estavaAtiva=consultaAssinaturaStatus(existente)==='ATIVA';
+  const bonusAtivo=(await getConfig('consulta_bonus_renovacao_ativo','0'))==='1';
+  const bonusDias=estavaAtiva&&bonusAtivo?Math.max(0,Number(await getConfig('consulta_bonus_renovacao_dias','0')||0)):0;
+  const base=estavaAtiva&&existente?.vencimento_em?new Date(String(existente.vencimento_em).replace(' ','T')+'Z'):new Date();
+  const fim=new Date(base.getTime()+(Number(p.dias)+bonusDias)*86400000);
+  if(existente){ await run(`UPDATE consulta_assinantes SET plano_id=?,cliente_jid=?,cliente_nome=?,inicio_em=COALESCE(NULLIF(inicio_em,''),CURRENT_TIMESTAMP),vencimento_em=?,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id,ctx.clienteJid||jid,ctx.clienteNome||existente.cliente_nome||'Cliente',consultaAssinaturaSqlDate(fim),existente.id]); }
+  else { await run(`INSERT INTO consulta_assinantes(cliente_numero,cliente_jid,cliente_nome,plano_id,inicio_em,vencimento_em,status) VALUES(?,?,?,?,CURRENT_TIMESTAMP,?,'ATIVA')`,[numero,ctx.clienteJid||jid,ctx.clienteNome||'Cliente',p.id,consultaAssinaturaSqlDate(fim)]); }
+  await run(`UPDATE consulta_assinatura_pagamentos SET status='PAGO',bonus_dias=?,confirmado_em=CURRENT_TIMESTAMP WHERE payment_id=?`,[bonusDias,String(paymentId)]);
+  await run(`INSERT INTO pagamentos(revenda_id,revenda_nome,cliente_jid,cliente_numero,valor,origem) VALUES(NULL,?,?,?,?,?)`,[ctx.clienteNome||'Assinante',ctx.clienteJid||jid,numero,Number(valorPix||0),`${gateway}_assinatura`]);
+  const ind=await get(`SELECT * FROM consulta_assinatura_indicacoes WHERE indicado_numero=? AND status='PENDENTE'`,[numero]);
+  if(ind){ const bonusInd=Math.max(0,Number(await getConfig('consulta_indicacao_bonus_dias','2')||2)); const ref=await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[ind.indicador_numero]); if(ref&&bonusInd>0){ const st=consultaAssinaturaStatus(ref), b=st==='ATIVA'&&ref.vencimento_em?new Date(String(ref.vencimento_em).replace(' ','T')+'Z'):new Date(); b.setTime(b.getTime()+bonusInd*86400000); await run(`UPDATE consulta_assinantes SET vencimento_em=?,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[consultaAssinaturaSqlDate(b),ref.id]); await run(`UPDATE consulta_assinatura_indicacoes SET status='CONVERTIDA',bonus_dias=?,convertido_em=CURRENT_TIMESTAMP WHERE id=?`,[bonusInd,ind.id]); } }
+  const grupo=ctx.grupoWhatsapp||await getConfig('consulta_wa_grupo',''); const sock=await consultaObterSocketWhatsApp(grupo); const j=ctx.clienteJid||jid;
+  if(sock&&grupo){ const tag=numero?`@${numero}`:(ctx.clienteNome||'Cliente'); await sock.sendMessage(grupo,{text:`✅ ${tag}, pagamento confirmado!\n\n💎 Assinatura ${estavaAtiva?'renovada':'ativada'}\n📦 Plano: ${p.nome}\n💰 Valor: ${brl(valorPix)}\n📅 Vencimento: ${dateBR(fim)}${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}`,mentions:j?[j]:[]}); }
+  notificarPainel('pix','💎 Assinatura paga',`${ctx.clienteNome||numero} • ${p.nome} • ${brl(valorPix)} • ${nomeGateway(gateway)}`);
+}
+async function consultaAssinaturaRegistrarUso(jid,comando){ const numero=normalizarNumeroWhatsApp(jidToNumber(jid)||''); if(numero) await run(`UPDATE consulta_assinantes SET total_consultas=COALESCE(total_consultas,0)+1,ultima_consulta_em=CURRENT_TIMESTAMP,ultimo_comando=? WHERE cliente_numero=?`,[String(comando||'').slice(0,120),numero]).catch(()=>{}); }
+function consultaAssinaturaSpamOk(jid,cmd){ const k=String(jid||''), agora=Date.now(), prev=consultaAssinaturaAntiSpam.get(k)||{t:0,cmd:'',hits:[]}; prev.hits=(prev.hits||[]).filter(x=>agora-x<60000); if(agora-prev.t<1800&&prev.cmd===cmd) return false; prev.t=agora;prev.cmd=cmd;prev.hits.push(agora);consultaAssinaturaAntiSpam.set(k,prev);return prev.hits.length<=25; }
+async function consultaAssinaturaProcessarFila(){ if(consultaFilaProcessando||consultaEmMemoria||consultaDhruEmMemoria||!consultaFilaInteligente.length)return; consultaFilaProcessando=true; try{ const item=consultaFilaInteligente.shift(); if(item) await consultaReceberWhatsAppGrupo(item); }catch(e){console.log('⚠️ FILA CONSULTAS:',e.message)} finally{consultaFilaProcessando=false;} }
+async function consultaAssinaturaAnunciarPromocao(){
+  try{ const cfg=await consultaAssinaturaPromocaoConfig(); if(!consultaAssinaturaPromoVigente(cfg))return; const last=cfg.ultimoEnvio?Date.parse(cfg.ultimoEnvio):0; if(last&&Date.now()-last<cfg.intervaloHoras*3600000)return; const plano=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[cfg.planoId]); if(!plano)return; const pr=await consultaAssinaturaPrecoPlano(plano), grupo=await getConfig('consulta_wa_grupo',''), sock=await consultaObterSocketWhatsApp(grupo); if(!grupo||!sock)return; const idx=((cfg.proximoModelo%cfg.modelos.length)+cfg.modelos.length)%cfg.modelos.length; await sock.sendMessage(grupo,{text:consultaPromoAplicarModelo(cfg.modelos[idx],plano,pr)}); await setConfig('consulta_promo_ultimo_envio',new Date().toISOString()); await setConfig('consulta_promo_modelo_indice',String((idx+1)%cfg.modelos.length)); }catch(e){console.log('⚠️ PROMO ASSINATURA:',e.message)}
+}
+async function consultaAssinaturaEnviarAlertas(){
+  try{ const grupo=await getConfig('consulta_wa_grupo',''), sock=await consultaObterSocketWhatsApp(grupo); if(!grupo||!sock)return; const rows=await all(`SELECT a.*,p.nome plano_nome FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id WHERE a.status='ATIVA' AND a.vencimento_em IS NOT NULL`); const agora=Date.now(); for(const a of rows){ const fim=Date.parse(String(a.vencimento_em).replace(' ','T')+'Z'); if(!Number.isFinite(fim))continue; const hrs=(fim-agora)/3600000; let tipo=''; if(hrs<=0)tipo='VENCEU'; else if(hrs<=24)tipo='1D'; else if(hrs<=72)tipo='3D'; if(!tipo)continue; const ref=String(a.vencimento_em); if(await get(`SELECT id FROM consulta_assinatura_alertas WHERE assinante_id=? AND tipo=? AND referencia=?`,[a.id,tipo,ref]))continue; const tag=`@${a.cliente_numero}`; const msg=tipo==='VENCEU'?`⛔ ${tag}, sua assinatura venceu. Digite /assinatura para renovar.`:`⏰ ${tag}, sua assinatura vence ${tipo==='1D'?'em até 1 dia':'em até 3 dias'}. Digite /assinatura para renovar sem interrupção.`; await sock.sendMessage(grupo,{text:msg,mentions:a.cliente_jid?[a.cliente_jid]:[]}); await run(`INSERT OR IGNORE INTO consulta_assinatura_alertas(assinante_id,tipo,referencia) VALUES(?,?,?)`,[a.id,tipo,ref]); } }catch(e){console.log('⚠️ ALERTAS ASSINATURA:',e.message)}
+}
+
 // V210 — assinaturas: uma única verificação serve para comandos Yan e Dhru.
 async function consultaAssinaturaControleAtivo(){ return (await getConfig('consulta_assinaturas_controle_ativo','0'))==='1'; }
 function consultaAssinaturaSqlDate(d){ return new Date(d).toISOString().slice(0,19).replace('T',' '); }
@@ -9301,9 +9477,11 @@ async function consultaAssinaturaEnviarStatus(sock,grupo,jid,nome){
   const tag='@'+String(nome||'Cliente').trim().split(/\s+/)[0];
   if(st==='ATIVA'){
     const venc=dateBR(String(a.vencimento_em||'')+'Z');
-    await sock.sendMessage(grupo,{text:`👤 ${tag}\n✅ Assinatura ativa\n📦 Plano: ${a.plano_nome||'-'}\n📅 Vencimento: ${venc}`,mentions:[jid]});
+    const planos=await consultaAssinaturaTextoPlanosV211();
+    const bonusAtivo=(await getConfig('consulta_bonus_renovacao_ativo','0'))==='1', bonusDias=Number(await getConfig('consulta_bonus_renovacao_dias','0')||0);
+    await sock.sendMessage(grupo,{text:`👤 ${tag}\n✅ Assinatura ativa\n📦 Plano: ${a.plano_nome||'-'}\n📅 Vencimento: ${venc}${bonusAtivo&&bonusDias?`\n🎁 Renovando antes de vencer: +${bonusDias} dia(s) de bônus`:''}${planos}`,mentions:[jid]});
   }else{
-    const planos=await consultaAssinaturaTextoPlanos();
+    const planos=await consultaAssinaturaTextoPlanosV211();
     const motivo=st==='SUSPENSA'?'está suspensa':st==='VENCIDA'?'está vencida':'ainda não está ativa';
     await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.${planos}`,mentions:[jid]});
   }
@@ -9313,7 +9491,7 @@ async function consultaAssinaturaPodeConsultar(sock,grupo,jid,nome){
   const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
   if(st==='ATIVA') return true;
   const tag='@'+String(nome||'Cliente').trim().split(/\s+/)[0];
-  const planos=await consultaAssinaturaTextoPlanos();
+  const planos=await consultaAssinaturaTextoPlanosV211();
   const motivo=st==='SUSPENSA'?'está suspensa':st==='VENCIDA'?'expirou':'ainda não está ativa';
   await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.\nPara continuar utilizando as consultas, renove seu acesso.${planos}\n\nDigite /assinatura para consultar seu status.`,mentions:[jid]});
   return false;
@@ -9348,14 +9526,26 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
   const nomeCliente=msg?.pushName||'Cliente';
+  if(!consultaAssinaturaSpamOk(participante,cmd)){ await socketAtual.sendMessage(grupo,{text:'⚠️ Aguarde um instante antes de repetir o mesmo comando.'}); return true; }
   if(/^\/assinatura(?:\s|$)/i.test(cmd)){ await consultaAssinaturaEnviarStatus(socketAtual,grupo,participante,nomeCliente); return true; }
+  if(/^\/assinar(?:\s|$)/i.test(cmd)){
+    const termo=String(cmd.replace(/^\/assinar\s*/i,'')).trim(); if(!termo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Informe o plano. Exemplo: /assinar 30'}); return true; }
+    const n=Number(termo.replace(/\D/g,'')); const plano=await get(`SELECT * FROM consulta_assinatura_planos WHERE ativo=1 AND (dias=? OR id=?) ORDER BY CASE WHEN dias=? THEN 0 ELSE 1 END LIMIT 1`,[n,n,n]); if(!plano){ await socketAtual.sendMessage(grupo,{text:'⚠️ Plano não encontrado. Digite /assinatura para ver os planos disponíveis.'}); return true; }
+    return await consultaAssinaturaGerarPixGrupo(socketAtual,grupo,participante,nomeCliente,plano);
+  }
+  if(/^\/indicacao(?:\s|$)/i.test(cmd)){ if((await getConfig('consulta_indicacao_ativa','1'))!=='1'){await socketAtual.sendMessage(grupo,{text:'⚠️ O sistema de indicação está desativado no momento.'});return true;} const num=normalizarNumeroWhatsApp(jidToNumber(participante)||''); const bonus=Number(await getConfig('consulta_indicacao_bonus_dias','2')||2); await socketAtual.sendMessage(grupo,{text:`🤝 @${num}, para indicar alguém envie a essa pessoa seu número ${num}. Quando ela entrar, deve usar:
+/indicado ${num}
+
+Depois que fizer a primeira assinatura paga, você recebe +${bonus} dia(s).`,mentions:[participante]}); return true; }
+  if(/^\/indicado(?:\s|$)/i.test(cmd)){ if((await getConfig('consulta_indicacao_ativa','1'))!=='1'){await socketAtual.sendMessage(grupo,{text:'⚠️ O sistema de indicação está desativado no momento.'});return true;} const indicador=normalizarNumeroWhatsApp(cmd.replace(/^\/indicado\s*/i,'')), indicado=normalizarNumeroWhatsApp(jidToNumber(participante)||''); if(!indicador||indicador===indicado){await socketAtual.sendMessage(grupo,{text:'⚠️ Indicação inválida.'});return true;} const ja=await get(`SELECT id FROM consulta_assinatura_pagamentos WHERE cliente_numero=? AND status='PAGO' LIMIT 1`,[indicado]); if(ja){await socketAtual.sendMessage(grupo,{text:'⚠️ A indicação só pode ser vinculada antes da primeira assinatura paga.'});return true;} await run(`INSERT OR IGNORE INTO consulta_assinatura_indicacoes(indicado_numero,indicador_numero,status) VALUES(?,?,'PENDENTE')`,[indicado,indicador]); await socketAtual.sendMessage(grupo,{text:'✅ Indicação registrada. O bônus será liberado após sua primeira assinatura paga.'}); return true; }
   const mapaDhru=await consultaDhruMapeamentoDoTexto(cmd);
-  if(mapaDhru){ if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true; return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru); }
+  if(mapaDhru){ if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true; if(consultaEmMemoria||consultaDhruEmMemoria){ consultaFilaInteligente.push({socketAtual,msg,texto:cmd}); await socketAtual.sendMessage(grupo,{text:`⏳ @${normalizarNumeroWhatsApp(jidToNumber(participante)||'')}, sua consulta entrou na fila (${consultaFilaInteligente.length}).`,mentions:[participante]}); return true; } await consultaAssinaturaRegistrarUso(participante,cmd); return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru); }
   const validacao=consultaValidarComando(cmd);
   if(!validacao.ok){ await consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante); return true; }
   if(validacao.tutorial){ try{ await consultaEnviarTutorial(socketAtual,grupo,participante); }catch(e){ console.log('❌ V188 TUTORIAL PDF:',e.message); await socketAtual.sendMessage(grupo,{text:'⚠️ Não foi possível gerar o tutorial agora. Tente novamente em instantes.'}); } return true; }
   if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true;
-  if(consultaEmMemoria){ try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){} return true; }
+  if(consultaEmMemoria||consultaDhruEmMemoria){ consultaFilaInteligente.push({socketAtual,msg,texto:cmd}); try{ await socketAtual.sendMessage(grupo,{text:`⏳ @${normalizarNumeroWhatsApp(jidToNumber(participante)||'')}, sua consulta entrou na fila (${consultaFilaInteligente.length}).`,mentions:[participante]}); }catch(_){} return true; }
+  await consultaAssinaturaRegistrarUso(participante,cmd);
   const tgGrupo=await getConfig('consulta_tg_grupo','');
   if(!tgGrupo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
   if(!(await consultaTelegramConectarSalva())){ await socketAtual.sendMessage(grupo,{text:'⚠️ Conta Telegram de consultas ainda não está conectada. O administrador precisa autenticá-la no painel.'}); return true; }
@@ -9422,9 +9612,24 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const assinaturaControle=(await getConfig('consulta_assinaturas_controle_ativo','0'))==='1';
   const assinaturaPlanos=await all(`SELECT * FROM consulta_assinatura_planos ORDER BY ordem,dias,id`);
   const assinaturaAssinantes=await all(`SELECT a.*,p.nome plano_nome,p.dias plano_dias,p.preco plano_preco FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id ORDER BY a.id DESC LIMIT 200`);
+  const assinaturaClientes=await all(`SELECT id,nome,whatsapp,jid,status,pix_documento FROM revendas WHERE COALESCE(status,'ATIVA')!='REMOVIDA' AND (COALESCE(whatsapp,'')!='' OR COALESCE(jid,'')!='') ORDER BY nome COLLATE NOCASE LIMIT 1000`);
+  const assinaturaClienteOpts=assinaturaClientes.map(c=>{const n=normalizarNumeroWhatsApp(c.whatsapp||jidToNumber(c.jid)||'');return n?`<option value="${safeHtml(String(c.id))}">${safeHtml(c.nome)} — ${safeHtml(n)}${c.pix_documento?' — CPF/CNPJ OK':''}</option>`:''}).join('');
+  const assinaturaGateway=await consultaAssinaturaGateway();
+  const promoCfg=await consultaAssinaturaPromocaoConfig();
+  const bonusRenovAtivo=(await getConfig('consulta_bonus_renovacao_ativo','0'))==='1';
+  const bonusRenovDias=Number(await getConfig('consulta_bonus_renovacao_dias','2')||2);
+  const indicacaoAtiva=(await getConfig('consulta_indicacao_ativa','1'))==='1';
+  const indicacaoBonus=Number(await getConfig('consulta_indicacao_bonus_dias','2')||2);
+  const pagamentosAss=await all(`SELECT pg.*,p.nome plano_nome FROM consulta_assinatura_pagamentos pg LEFT JOIN consulta_assinatura_planos p ON p.id=pg.plano_id ORDER BY pg.id DESC LIMIT 50`);
+  const pagamentosAssRows=pagamentosAss.map(x=>`<tr><td>${safeHtml(x.cliente_nome||x.cliente_numero||'-')}</td><td>${safeHtml(x.plano_nome||'-')}</td><td>${safeHtml(brl(x.valor_pago||0))}</td><td>${safeHtml(nomeGateway(x.gateway))}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(dateBR(String(x.criado_em||'')+'Z'))}</td></tr>`).join('')||'<tr><td colspan="6">Nenhum pagamento de assinatura.</td></tr>';
+  const totalAtivos=assinaturaAssinantes.filter(a=>consultaAssinaturaStatus(a)==='ATIVA').length;
+  const receitaMes=await get(`SELECT COALESCE(SUM(valor_pago),0) total FROM consulta_assinatura_pagamentos WHERE status='PAGO' AND substr(confirmado_em,1,7)=substr(CURRENT_TIMESTAMP,1,7)`);
+  const consultasMes=await get(`SELECT COUNT(*) total FROM consultas_assinatura WHERE substr(criado_em,1,7)=substr(CURRENT_TIMESTAMP,1,7)`);
+  const rankingUso=await all(`SELECT cliente_nome,cliente_numero,total_consultas,ultima_consulta_em FROM consulta_assinantes ORDER BY COALESCE(total_consultas,0) DESC,ultima_consulta_em DESC LIMIT 10`);
+  const rankingRows=rankingUso.map((x,i)=>`<tr><td>${i+1}º</td><td>${safeHtml(x.cliente_nome||x.cliente_numero||'-')}</td><td>${Number(x.total_consultas||0)}</td><td>${safeHtml(x.ultima_consulta_em?dateBR(String(x.ultima_consulta_em)+'Z'):'-')}</td></tr>`).join('')||'<tr><td colspan="4">Sem uso registrado.</td></tr>';
   const assinaturaPlanoOpts=assinaturaPlanos.filter(p=>Number(p.ativo)).map(p=>`<option value="${p.id}">${safeHtml(p.nome)} — ${p.dias}d — ${safeHtml(brl(p.preco))}</option>`).join('');
   const assinaturaPlanosRows=assinaturaPlanos.map(p=>`<tr><td>#${p.id}</td><td><form method="post" action="/admin/consultas-assinatura/plano/${p.id}/salvar" class="forms-inline"><input name="nome" value="${safeHtml(p.nome)}" required><input name="dias" type="number" min="1" value="${Number(p.dias)}" required><input name="preco" value="${safeHtml(Number(p.preco).toFixed(2).replace('.',','))}" required><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(p.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('');
-  const assinaturaAssinantesRows=assinaturaAssinantes.map(a=>{const st=consultaAssinaturaStatus(a);return `<tr><td>${safeHtml(a.cliente_nome||'-')}<br><small>${safeHtml(a.cliente_numero||'-')}</small></td><td>${safeHtml(a.plano_nome||'-')}</td><td>${safeHtml(dateBR(String(a.vencimento_em||'')+'Z'))}</td><td><span class="pill">${safeHtml(st)}</span></td><td><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/renovar" class="forms-inline"><select name="plano_id">${assinaturaPlanoOpts}</select><button class="btn green">Renovar</button></form><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/suspender" style="margin-top:6px"><button class="btn red">Suspender</button></form></td></tr>`}).join('')||'<tr><td colspan="5">Nenhum assinante cadastrado.</td></tr>';
+  const assinaturaAssinantesRows=assinaturaAssinantes.map(a=>{const st=consultaAssinaturaStatus(a);return `<tr><td>${safeHtml(a.cliente_nome||'-')}<br><small>${safeHtml(a.cliente_numero||'-')}</small></td><td>${safeHtml(a.plano_nome||'-')}</td><td>${safeHtml(dateBR(String(a.vencimento_em||'')+'Z'))}</td><td><span class="pill">${safeHtml(st)}</span><br><a href="/admin/consultas-assinatura/cliente/${a.id}">Ver histórico</a></td><td><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/renovar" class="forms-inline"><select name="plano_id">${assinaturaPlanoOpts}</select><button class="btn green">Renovar</button></form><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/suspender" style="margin-top:6px"><button class="btn red">Suspender</button></form></td></tr>`}).join('')||'<tr><td colspan="5">Nenhum assinante cadastrado.</td></tr>';
   const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
   const rows=hist.map(x=>`<tr><td>#${x.id}</td><td>${safeHtml(x.cliente_nome||'-')}</td><td>${safeHtml(x.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(x.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
   const statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
@@ -9432,17 +9637,39 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const authExtra=st==='AGUARDANDO_CODIGO'?`<div class="card"><h2>🔐 Código do Telegram</h2><p>O código foi enviado pelo Telegram para sua conta. Digite abaixo.</p><form method="post" action="/admin/consultas-assinatura/telegram-codigo"><label>Código recebido</label><input name="codigo" inputmode="numeric" autocomplete="one-time-code" required><button class="btn green">Conectar</button></form></div>`:st==='AGUARDANDO_SENHA'?`<div class="card"><h2>🔐 Verificação em duas etapas</h2><p>Essa conta possui senha 2FA.${consultaTelegramLogin?.hint?` Dica: ${safeHtml(consultaTelegramLogin.hint)}`:''}</p><form method="post" action="/admin/consultas-assinatura/telegram-senha"><label>Senha de duas etapas</label><input type="password" name="senha" required><button class="btn green">Finalizar conexão</button></form></div>`:'';
   res.send(page('Consultas por assinatura',`<h1>🔎 Consultas por assinatura</h1><p class="muted">Fluxo WhatsApp → sua conta Telegram → Yan Buscas → PDF → grupo WhatsApp. A sessão Telegram fica salva no banco/persistent disk, sem variáveis novas no Render.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
   <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Conta Telegram</h3><p><b>${safeHtml(st)}</b></p><small>Telefone: ${safeHtml(c.telefone||'Não configurado')}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
+  <div class="card"><a class="btn" href="/admin/consultas-assinatura/saude">🩺 Abrir saúde das integrações</a></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>💎 Controle de assinaturas</h2><p class="muted">Quando ativado, todos os comandos Yan e Dhru verificam a validade do assinante antes de iniciar. /comandos e /assinatura continuam disponíveis.</p><form method="post" action="/admin/consultas-assinatura/assinaturas/config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${assinaturaControle?'checked':''}> Exigir assinatura ativa para consultar</label><button class="btn green">💾 Salvar controle</button></form></div>
   <div class="card"><h2>💰 Planos de assinatura</h2><p class="muted">Planos padrão: 1 dia R$ 10, 3 dias R$ 13, 7 dias R$ 17, 15 dias R$ 30 e 30 dias R$ 50. Você pode editar ou criar novos.</p><form method="post" action="/admin/consultas-assinatura/plano/novo" class="forms-inline"><input name="nome" placeholder="Nome do plano" required><input name="dias" type="number" min="1" placeholder="Dias" required><input name="preco" placeholder="Preço" required><button class="btn green">➕ Novo plano</button></form><table style="margin-top:12px"><tr><th>ID</th><th>Configuração</th></tr>${assinaturaPlanosRows}</table></div>
-  <div class="card"><h2>👥 Assinantes do grupo</h2><p class="muted">Ative ou renove manualmente. Ao renovar uma assinatura ainda ativa, os dias são somados ao vencimento atual.</p><form method="post" action="/admin/consultas-assinatura/assinante/ativar" class="forms-inline"><input name="numero" placeholder="WhatsApp com DDD" required><input name="nome" placeholder="Nome do cliente" required><select name="plano_id" required><option value="">Escolha o plano...</option>${assinaturaPlanoOpts}</select><button class="btn green">✅ Ativar assinatura</button></form><table style="margin-top:14px"><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr>${assinaturaAssinantesRows}</table></div>
+  <div class="card"><h2>👥 Assinantes do grupo</h2><p class="muted">Na ativação manual, selecione um cliente já cadastrado no sistema. Ao renovar uma assinatura ativa, os dias são somados ao vencimento atual.</p><form method="post" action="/admin/consultas-assinatura/assinante/ativar" class="forms-inline"><select name="cliente_id" required><option value="">🔎 Selecione o cliente...</option>${assinaturaClienteOpts}</select><select name="plano_id" required><option value="">Escolha o plano...</option>${assinaturaPlanoOpts}</select><button class="btn green">✅ Ativar assinatura</button></form><table style="margin-top:14px"><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr>${assinaturaAssinantesRows}</table></div>
+  <div class="card"><h2>💳 Pagamento automático da assinatura</h2><p class="muted">Escolha qual gateway será usado pelo comando /assinar. O cliente não escolhe o provedor: o painel define.</p><form method="post" action="/admin/consultas-assinatura/pagamento-config" class="forms-inline"><select name="gateway"><option value="pixgo" ${assinaturaGateway==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${assinaturaGateway==='mercadopago'?'selected':''}>Mercado Pago</option></select><button class="btn green">💾 Salvar gateway</button></form><small>PixGo exige CPF/CNPJ cadastrado no cliente. Mercado Pago gera o PIX sem pedir documento no grupo.</small></div>
+  <div class="card"><h2>🎁 Promoção</h2><p class="muted">Aplique desconto percentual em um plano e deixe o bot anunciar automaticamente no grupo.</p><form method="post" action="/admin/consultas-assinatura/promocao-config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${promoCfg.ativo?'checked':''}> Ativar promoção</label><label>Plano promocional</label><select name="plano_id"><option value="">Selecione...</option>${assinaturaPlanos.filter(p=>Number(p.ativo)).map(p=>`<option value="${p.id}" ${Number(promoCfg.planoId)===Number(p.id)?'selected':''}>${safeHtml(p.nome)} — ${safeHtml(brl(p.preco))}</option>`).join('')}</select><label>Desconto (%)</label><input name="percentual" type="number" min="0" max="100" step="0.01" value="${safeHtml(String(promoCfg.percentual))}"><label>Início (opcional)</label><input name="inicio" type="datetime-local" value="${safeHtml(promoCfg.inicio?promoCfg.inicio.slice(0,16):'')}"><label>Fim (opcional)</label><input name="fim" type="datetime-local" value="${safeHtml(promoCfg.fim?promoCfg.fim.slice(0,16):'')}"><label>Anunciar a cada quantas horas?</label><input name="intervalo_horas" type="number" min="1" max="168" value="${safeHtml(String(promoCfg.intervaloHoras))}"><h3>Mensagens prontas</h3>${promoCfg.modelos.map((m,i)=>`<label>Modelo ${i+1}</label><textarea name="modelo_${i}" rows="4">${safeHtml(m)}</textarea>`).join('')}<div class="actions"><button class="btn green">💾 Salvar promoção</button><button class="btn" name="acao" value="restaurar">↩ Restaurar mensagens</button></div></form></div>
+  <div class="card"><h2>🔔 Renovação e indicação</h2><form method="post" action="/admin/consultas-assinatura/bonus-config"><label><input style="width:auto" type="checkbox" name="bonus_ativo" value="1" ${bonusRenovAtivo?'checked':''}> Bônus para renovação antes do vencimento</label><input name="bonus_dias" type="number" min="0" max="365" value="${bonusRenovDias}" placeholder="Dias de bônus"><label><input style="width:auto" type="checkbox" name="indicacao_ativa" value="1" ${indicacaoAtiva?'checked':''}> Sistema de indicação</label><input name="indicacao_bonus" type="number" min="0" max="365" value="${indicacaoBonus}" placeholder="Dias por indicação convertida"><button class="btn green">💾 Salvar regras</button></form><small>Comandos do cliente: /indicacao e /indicado NUMERO. O bônus da indicação só é liberado após a primeira assinatura paga do indicado.</small></div>
+  <div class="grid"><div class="card"><h3>Assinantes ativos</h3><p><b>${totalAtivos}</b></p></div><div class="card"><h3>Receita de assinaturas no mês</h3><p><b>${safeHtml(brl(receitaMes?.total||0))}</b></p></div><div class="card"><h3>Consultas Yan no mês</h3><p><b>${Number(consultasMes?.total||0)}</b></p></div></div>
+  <div class="card"><h2>🏆 Ranking de utilização</h2><table><tr><th>#</th><th>Cliente</th><th>Consultas</th><th>Último uso</th></tr>${rankingRows}</table></div>
+  <div class="card"><h2>💰 Histórico de pagamentos das assinaturas</h2><table><tr><th>Cliente</th><th>Plano</th><th>Valor</th><th>Gateway</th><th>Status</th><th>Data</th></tr>${pagamentosAssRows}</table></div>
   <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Digite parte do nome do serviço para filtrar as opções. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p>${dhruDataList}<form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline dhru-service-form"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id"><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table><script>(function(){var MAP=${JSON.stringify(dhruServiceMap)};function sync(i){var f=i.closest('form'),h=f&&f.querySelector('input[name=servico_id]');if(!h)return;var v=(i.value||'').trim();var id=MAP[v]||'';if(!id){var m=v.match(/\(#(\d+)\)\s*$/);if(m)id=m[1]}h.value=id||''}document.querySelectorAll('.dhru-service-search').forEach(function(i){i.addEventListener('input',function(){sync(i)});i.addEventListener('change',function(){sync(i)});i.addEventListener('blur',function(){sync(i)});sync(i)});document.querySelectorAll('.dhru-service-form').forEach(function(f){f.addEventListener('submit',function(e){var i=f.querySelector('.dhru-service-search'),h=f.querySelector('input[name=servico_id]');sync(i);if(!h.value){e.preventDefault();alert('Selecione um serviço Dhru da lista.')}})})})();</script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });
+
+app.get('/admin/consultas-assinatura/cliente/:id',async(req,res)=>{
+  const a=await get(`SELECT a.*,p.nome plano_nome FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id WHERE a.id=?`,[Number(req.params.id)]); if(!a)return res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent('Assinante não encontrado.'));
+  const pags=await all(`SELECT pg.*,p.nome plano_nome FROM consulta_assinatura_pagamentos pg LEFT JOIN consulta_assinatura_planos p ON p.id=pg.plano_id WHERE pg.cliente_numero=? ORDER BY pg.id DESC LIMIT 100`,[a.cliente_numero]);
+  const yan=await all(`SELECT comando,status,criado_em FROM consultas_assinatura WHERE cliente_jid=? ORDER BY id DESC LIMIT 100`,[a.cliente_jid]);
+  const dhru=await all(`SELECT entrada,status,criado_em FROM consulta_dhru_execucoes WHERE cliente_jid=? ORDER BY id DESC LIMIT 100`,[a.cliente_jid]);
+  const ph=pags.map(x=>`<tr><td>${dateBR(String(x.criado_em||'')+'Z')}</td><td>${safeHtml(x.plano_nome||'-')}</td><td>${safeHtml(brl(x.valor_pago||0))}</td><td>${safeHtml(nomeGateway(x.gateway))}</td><td>${safeHtml(x.status)}</td></tr>`).join('')||'<tr><td colspan="5">Sem pagamentos.</td></tr>';
+  const ch=[...yan.map(x=>({tipo:'Yan',cmd:x.comando,status:x.status,data:x.criado_em})),...dhru.map(x=>({tipo:'Dhru',cmd:x.entrada,status:x.status,data:x.criado_em}))].sort((x,y)=>String(y.data).localeCompare(String(x.data))).slice(0,100).map(x=>`<tr><td>${safeHtml(x.tipo)}</td><td>${safeHtml(x.cmd||'-')}</td><td>${safeHtml(x.status||'-')}</td><td>${safeHtml(dateBR(String(x.data||'')+'Z'))}</td></tr>`).join('')||'<tr><td colspan="4">Sem consultas.</td></tr>';
+  res.send(page('Assinante',`<h1>👤 ${safeHtml(a.cliente_nome||a.cliente_numero)}</h1><div class="grid"><div class="card"><h3>Status</h3><b>${safeHtml(consultaAssinaturaStatus(a))}</b></div><div class="card"><h3>Plano</h3><b>${safeHtml(a.plano_nome||'-')}</b></div><div class="card"><h3>Vencimento</h3><b>${safeHtml(dateBR(String(a.vencimento_em||'')+'Z'))}</b></div><div class="card"><h3>Consultas</h3><b>${Number(a.total_consultas||0)}</b></div></div><div class="card"><h2>Pagamentos</h2><table><tr><th>Data</th><th>Plano</th><th>Valor</th><th>Gateway</th><th>Status</th></tr>${ph}</table></div><div class="card"><h2>Consultas recentes</h2><table><tr><th>Origem</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${ch}</table></div><a class="btn" href="/admin/consultas-assinatura">← Voltar</a>`));
+});
+app.get('/admin/consultas-assinatura/saude',async(req,res)=>{
+  const grupo=await getConfig('consulta_wa_grupo',''); const wa=!!(await consultaObterSocketWhatsApp(grupo)); const tg=consultaLoginStatus()==='CONECTADO'; const pg=await getPagamentoConfig(); const dhruAtivo=(await getConfig('dhru_ativo','0'))==='1';
+  res.send(page('Saúde das integrações',`<h1>🩺 Saúde das integrações</h1><div class="grid"><div class="card"><h3>WhatsApp</h3><b>${wa?'🟢 CONECTADO':'🔴 DESCONECTADO'}</b></div><div class="card"><h3>Telegram / Yan</h3><b>${tg?'🟢 CONECTADO':'🔴 DESCONECTADO'}</b></div><div class="card"><h3>Dhru</h3><b>${dhruAtivo?'🟢 ATIVA':'🟡 VERIFICAR CONFIGURAÇÃO'}</b></div><div class="card"><h3>PixGo</h3><b>${pg.pixgoAtivo?'🟢 ATIVO':'🔴 DESATIVADO'}</b></div><div class="card"><h3>Mercado Pago</h3><b>${pg.mercadoPagoAtivo?'🟢 ATIVO':'🔴 DESATIVADO'}</b></div><div class="card"><h3>Fila</h3><b>${consultaFilaInteligente.length} aguardando</b></div></div><a class="btn" href="/admin/consultas-assinatura">← Voltar</a>`));
+});
+
 async function consultaDhruResolverServicoPainel(body){
   let sid=Number(body?.servico_id||0);
   if(sid){
@@ -9485,8 +9712,17 @@ app.post('/admin/consultas-assinatura/plano/:id/salvar',async(req,res)=>{
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/assinante/ativar',async(req,res)=>{
-  try{ const r=await consultaAssinaturaAtivarNumero(req.body.numero,req.body.nome,req.body.plano_id); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Assinatura ativada até ${dateBR(r.vencimento)}.`)); }
+  try{ const c=await get(`SELECT * FROM revendas WHERE id=?`,[Number(req.body.cliente_id||0)]); if(!c) throw new Error('Selecione um cliente cadastrado.'); const numero=normalizarNumeroWhatsApp(c.whatsapp||jidToNumber(c.jid)||''); if(!numero) throw new Error('O cliente selecionado não possui WhatsApp válido.'); const r=await consultaAssinaturaAtivarNumero(numero,c.nome,req.body.plano_id); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Assinatura de ${c.nome} ativada até ${dateBR(r.vencimento)}.`)); }
   catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/pagamento-config',async(req,res)=>{
+  try{ const g=['pixgo','mercadopago'].includes(String(req.body.gateway||''))?String(req.body.gateway):'mercadopago'; await setConfig('consulta_assinatura_gateway',g); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Pagamento das assinaturas: ${nomeGateway(g)}.`)); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/promocao-config',async(req,res)=>{
+  try{ if(req.body.acao==='restaurar'){await setConfig('consulta_promo_modelos_json',JSON.stringify(CONSULTA_PROMO_MODELOS_PADRAO));} else { const pct=Math.max(0,Math.min(100,Number(String(req.body.percentual||'0').replace(',','.'))||0)); await setConfig('consulta_promo_ativo',req.body.ativo==='1'?'1':'0'); await setConfig('consulta_promo_plano_id',String(Number(req.body.plano_id||0))); await setConfig('consulta_promo_percentual',String(pct)); await setConfig('consulta_promo_inicio',String(req.body.inicio||'')); await setConfig('consulta_promo_fim',String(req.body.fim||'')); await setConfig('consulta_promo_intervalo_horas',String(Math.max(1,Number(req.body.intervalo_horas||6)||6))); const ms=[0,1,2,3,4].map(i=>String(req.body[`modelo_${i}`]||'').trim()).filter(Boolean); await setConfig('consulta_promo_modelos_json',JSON.stringify(ms.length?ms:CONSULTA_PROMO_MODELOS_PADRAO)); } res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(req.body.acao==='restaurar'?'Mensagens promocionais restauradas.':'Promoção atualizada.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/bonus-config',async(req,res)=>{
+  try{ await setConfig('consulta_bonus_renovacao_ativo',req.body.bonus_ativo==='1'?'1':'0'); await setConfig('consulta_bonus_renovacao_dias',String(Math.max(0,Number(req.body.bonus_dias||0)||0))); await setConfig('consulta_indicacao_ativa',req.body.indicacao_ativa==='1'?'1':'0'); await setConfig('consulta_indicacao_bonus_dias',String(Math.max(0,Number(req.body.indicacao_bonus||0)||0))); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Regras de renovação e indicação atualizadas.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/assinante/:id/renovar',async(req,res)=>{
   try{ const r=await consultaAssinaturaRenovarRegistro(req.params.id,req.body.plano_id); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Assinatura renovada até ${dateBR(r.vencimento)}.`)); }
@@ -11926,6 +12162,11 @@ app.get('/admin/backup', async (req, res) => { const backs = listarBackups(); le
 app.post('/admin/backup/criar', async (req, res) => { await criarBackup(); res.redirect('/admin/backup'); });
 app.get('/admin/backup/download/:file', (req, res) => { const file = path.basename(req.params.file); res.download(path.join(BACKUP_DIR, file)); });
 app.post('/admin/backup/restaurar', async (req, res) => { const file = path.basename(req.body.file || ''); const origem = path.join(BACKUP_DIR, file); if (!fs.existsSync(origem)) return res.send(page('Erro', '<h1>Backup não encontrado</h1>')); criarBackup().then(() => db.close((err) => { if (err) console.log(err); fs.copyFileSync(origem, DB_PATH); console.log('✅ RESTAURADO:', origem); res.send(page('Restaurado', '<h1>✅ Backup restaurado</h1><p>O serviço será reiniciado para carregar o banco restaurado.</p>')); setTimeout(() => process.exit(0), 1500); })); });
+
+// V211 — workers comerciais das assinaturas.
+setInterval(()=>consultaAssinaturaAnunciarPromocao().catch(()=>{}),60*1000);
+setInterval(()=>consultaAssinaturaEnviarAlertas().catch(()=>{}),60*60*1000);
+setTimeout(()=>consultaAssinaturaEnviarAlertas().catch(()=>{}),90*1000);
 
 cron.schedule('0 2 * * *', async () => { try { await criarBackup(); } catch (e) { console.log('❌ BACKUP AUTOMÁTICO:', e); } }, { timezone: 'America/Sao_Paulo' });
 
