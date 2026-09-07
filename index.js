@@ -2030,6 +2030,35 @@ async function initDB() {
     await run(`INSERT OR IGNORE INTO consulta_dhru_comandos(comando,nome_exibicao,ativo) VALUES(?,?,1)`,[c,c.slice(1).toUpperCase()]);
   }
 
+  // V210 — controle de assinaturas do grupo de consultas.
+  await run(`CREATE TABLE IF NOT EXISTS consulta_assinatura_planos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    dias INTEGER NOT NULL,
+    preco REAL NOT NULL DEFAULT 0,
+    ativo INTEGER DEFAULT 1,
+    ordem INTEGER DEFAULT 0,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(dias)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS consulta_assinantes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cliente_numero TEXT NOT NULL UNIQUE,
+    cliente_jid TEXT,
+    cliente_nome TEXT,
+    plano_id INTEGER,
+    inicio_em TEXT,
+    vencimento_em TEXT,
+    status TEXT DEFAULT 'ATIVA',
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  const planosPadrao=[['1 dia',1,10,1],['3 dias',3,13,2],['7 dias',7,17,3],['15 dias',15,30,4],['30 dias',30,50,5]];
+  for(const [nome,dias,preco,ordem] of planosPadrao){
+    await run(`INSERT OR IGNORE INTO consulta_assinatura_planos(nome,dias,preco,ativo,ordem) VALUES(?,?,?,1,?)`,[nome,dias,preco,ordem]);
+  }
+
   // V201 — links temporários próprios para consultas /nome.
   // O cliente recebe somente a URL deste sistema; a URL original da Yan fica no servidor.
   await run(`CREATE TABLE IF NOT EXISTS consultas_links_temporarios (
@@ -9246,6 +9275,70 @@ async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,text
   }
 }
 
+
+// V210 — assinaturas: uma única verificação serve para comandos Yan e Dhru.
+async function consultaAssinaturaControleAtivo(){ return (await getConfig('consulta_assinaturas_controle_ativo','0'))==='1'; }
+function consultaAssinaturaSqlDate(d){ return new Date(d).toISOString().slice(0,19).replace('T',' '); }
+function consultaAssinaturaStatus(row){
+  if(!row) return 'SEM_ASSINATURA';
+  if(String(row.status||'').toUpperCase()==='SUSPENSA') return 'SUSPENSA';
+  const venc=new Date(String(row.vencimento_em||'').replace(' ','T')+'Z');
+  return venc.getTime()>Date.now()?'ATIVA':'VENCIDA';
+}
+async function consultaAssinaturaObterPorJid(jid){
+  const numero=jidToNumber(jid);
+  if(!numero) return null;
+  return await get(`SELECT a.*,p.nome plano_nome,p.dias plano_dias,p.preco plano_preco FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id WHERE a.cliente_numero=? LIMIT 1`,[numero]);
+}
+async function consultaAssinaturaPlanosAtivos(){ return await all(`SELECT * FROM consulta_assinatura_planos WHERE ativo=1 ORDER BY ordem,dias,id`); }
+async function consultaAssinaturaTextoPlanos(){
+  const ps=await consultaAssinaturaPlanosAtivos();
+  if(!ps.length) return '';
+  return '\n\n💎 Planos disponíveis:\n'+ps.map(p=>`• ${p.dias} ${Number(p.dias)===1?'dia':'dias'} — ${brl(p.preco)}`).join('\n');
+}
+async function consultaAssinaturaEnviarStatus(sock,grupo,jid,nome){
+  const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
+  const tag='@'+String(nome||'Cliente').trim().split(/\s+/)[0];
+  if(st==='ATIVA'){
+    const venc=dateBR(String(a.vencimento_em||'')+'Z');
+    await sock.sendMessage(grupo,{text:`👤 ${tag}\n✅ Assinatura ativa\n📦 Plano: ${a.plano_nome||'-'}\n📅 Vencimento: ${venc}`,mentions:[jid]});
+  }else{
+    const planos=await consultaAssinaturaTextoPlanos();
+    const motivo=st==='SUSPENSA'?'está suspensa':st==='VENCIDA'?'está vencida':'ainda não está ativa';
+    await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.${planos}`,mentions:[jid]});
+  }
+}
+async function consultaAssinaturaPodeConsultar(sock,grupo,jid,nome){
+  if(!(await consultaAssinaturaControleAtivo())) return true;
+  const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
+  if(st==='ATIVA') return true;
+  const tag='@'+String(nome||'Cliente').trim().split(/\s+/)[0];
+  const planos=await consultaAssinaturaTextoPlanos();
+  const motivo=st==='SUSPENSA'?'está suspensa':st==='VENCIDA'?'expirou':'ainda não está ativa';
+  await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.\nPara continuar utilizando as consultas, renove seu acesso.${planos}\n\nDigite /assinatura para consultar seu status.`,mentions:[jid]});
+  return false;
+}
+async function consultaAssinaturaRenovarRegistro(id,planoId,nomeNovo=''){
+  const a=await get(`SELECT * FROM consulta_assinantes WHERE id=?`,[Number(id)]); if(!a) throw new Error('Assinante não encontrado.');
+  const p=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]); if(!p) throw new Error('Plano inválido ou inativo.');
+  let base=new Date();
+  const atual=new Date(String(a.vencimento_em||'').replace(' ','T')+'Z');
+  if(String(a.status||'').toUpperCase()!=='SUSPENSA' && atual.getTime()>Date.now()) base=atual;
+  const fim=new Date(base.getTime()+Number(p.dias)*86400000);
+  const inicio=String(a.inicio_em||'')||consultaAssinaturaSqlDate(new Date());
+  await run(`UPDATE consulta_assinantes SET plano_id=?,cliente_nome=COALESCE(NULLIF(?,''),cliente_nome),inicio_em=?,vencimento_em=?,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[p.id,String(nomeNovo||'').trim(),inicio,consultaAssinaturaSqlDate(fim),a.id]);
+  return {assinante:a,plano:p,vencimento:fim};
+}
+async function consultaAssinaturaAtivarNumero(numeroBruto,nome,planoId){
+  const numero=normalizarNumeroWhatsApp(numeroBruto); if(!numero) throw new Error('Informe um número de WhatsApp válido com DDD.');
+  const p=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]); if(!p) throw new Error('Plano inválido ou inativo.');
+  const existente=await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[numero]);
+  if(existente) return await consultaAssinaturaRenovarRegistro(existente.id,p.id,nome);
+  const agora=new Date(), fim=new Date(agora.getTime()+Number(p.dias)*86400000);
+  const r=await run(`INSERT INTO consulta_assinantes(cliente_numero,cliente_jid,cliente_nome,plano_id,inicio_em,vencimento_em,status) VALUES(?,?,?,?,?,?,'ATIVA')`,[numero,numberToJid(numero),String(nome||'Cliente').trim(),p.id,consultaAssinaturaSqlDate(agora),consultaAssinaturaSqlDate(fim)]);
+  return {assinante:{id:r.lastID,cliente_numero:numero},plano:p,vencimento:fim};
+}
+
 async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!(await consultaAtivaConfig())) return false;
   const grupo=await getConfig('consulta_wa_grupo','');
@@ -9254,11 +9347,14 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   const participante=melhorJidCliente(msg,msg?.key?.participant||'');
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
+  const nomeCliente=msg?.pushName||'Cliente';
+  if(/^\/assinatura(?:\s|$)/i.test(cmd)){ await consultaAssinaturaEnviarStatus(socketAtual,grupo,participante,nomeCliente); return true; }
   const mapaDhru=await consultaDhruMapeamentoDoTexto(cmd);
-  if(mapaDhru) return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru);
+  if(mapaDhru){ if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true; return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru); }
   const validacao=consultaValidarComando(cmd);
   if(!validacao.ok){ await consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante); return true; }
   if(validacao.tutorial){ try{ await consultaEnviarTutorial(socketAtual,grupo,participante); }catch(e){ console.log('❌ V188 TUTORIAL PDF:',e.message); await socketAtual.sendMessage(grupo,{text:'⚠️ Não foi possível gerar o tutorial agora. Tente novamente em instantes.'}); } return true; }
+  if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true;
   if(consultaEmMemoria){ try{ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); }catch(_){} return true; }
   const tgGrupo=await getConfig('consulta_tg_grupo','');
   if(!tgGrupo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Integração de consultas ainda não está configurada pelo administrador.'}); return true; }
@@ -9323,6 +9419,12 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const dhruDataList=`<datalist id="dhru-servicos-lista">${dhruServicos.map(s=>`<option value="${safeHtml(dhruLabel(s))}"></option>`).join('')}</datalist>`;
   const dhruServiceMap=Object.fromEntries(dhruServicos.map(s=>[dhruLabel(s),Number(s.id)]));
   const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="forms-inline dhru-service-form"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" value="${safeHtml(dhruAtual(c.servico_id))}" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id" value="${Number(c.servico_id)||''}"><input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome comercial"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
+  const assinaturaControle=(await getConfig('consulta_assinaturas_controle_ativo','0'))==='1';
+  const assinaturaPlanos=await all(`SELECT * FROM consulta_assinatura_planos ORDER BY ordem,dias,id`);
+  const assinaturaAssinantes=await all(`SELECT a.*,p.nome plano_nome,p.dias plano_dias,p.preco plano_preco FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id ORDER BY a.id DESC LIMIT 200`);
+  const assinaturaPlanoOpts=assinaturaPlanos.filter(p=>Number(p.ativo)).map(p=>`<option value="${p.id}">${safeHtml(p.nome)} — ${p.dias}d — ${safeHtml(brl(p.preco))}</option>`).join('');
+  const assinaturaPlanosRows=assinaturaPlanos.map(p=>`<tr><td>#${p.id}</td><td><form method="post" action="/admin/consultas-assinatura/plano/${p.id}/salvar" class="forms-inline"><input name="nome" value="${safeHtml(p.nome)}" required><input name="dias" type="number" min="1" value="${Number(p.dias)}" required><input name="preco" value="${safeHtml(Number(p.preco).toFixed(2).replace('.',','))}" required><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(p.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('');
+  const assinaturaAssinantesRows=assinaturaAssinantes.map(a=>{const st=consultaAssinaturaStatus(a);return `<tr><td>${safeHtml(a.cliente_nome||'-')}<br><small>${safeHtml(a.cliente_numero||'-')}</small></td><td>${safeHtml(a.plano_nome||'-')}</td><td>${safeHtml(dateBR(String(a.vencimento_em||'')+'Z'))}</td><td><span class="pill">${safeHtml(st)}</span></td><td><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/renovar" class="forms-inline"><select name="plano_id">${assinaturaPlanoOpts}</select><button class="btn green">Renovar</button></form><form method="post" action="/admin/consultas-assinatura/assinante/${a.id}/suspender" style="margin-top:6px"><button class="btn red">Suspender</button></form></td></tr>`}).join('')||'<tr><td colspan="5">Nenhum assinante cadastrado.</td></tr>';
   const opts=['<option value="">Selecione o grupo...</option>',...grupos.map(g=>`<option value="${safeHtml(g.id)}" ${g.id===waGrupo?'selected':''}>${safeHtml(g.nome)} — ${safeHtml(g.id)}</option>`)].join('');
   const rows=hist.map(x=>`<tr><td>#${x.id}</td><td>${safeHtml(x.cliente_nome||'-')}</td><td>${safeHtml(x.dado_consulta||'-')}</td><td><span class="pill">${safeHtml(x.status||'-')}</span></td><td>${safeHtml(x.criado_em||'-')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma consulta registrada.</td></tr>';
   const statusWa=(await consultaObterSocketWhatsApp(waGrupo))?'CONECTADO':'DESCONECTADO';
@@ -9334,6 +9436,9 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
+  <div class="card"><h2>💎 Controle de assinaturas</h2><p class="muted">Quando ativado, todos os comandos Yan e Dhru verificam a validade do assinante antes de iniciar. /comandos e /assinatura continuam disponíveis.</p><form method="post" action="/admin/consultas-assinatura/assinaturas/config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${assinaturaControle?'checked':''}> Exigir assinatura ativa para consultar</label><button class="btn green">💾 Salvar controle</button></form></div>
+  <div class="card"><h2>💰 Planos de assinatura</h2><p class="muted">Planos padrão: 1 dia R$ 10, 3 dias R$ 13, 7 dias R$ 17, 15 dias R$ 30 e 30 dias R$ 50. Você pode editar ou criar novos.</p><form method="post" action="/admin/consultas-assinatura/plano/novo" class="forms-inline"><input name="nome" placeholder="Nome do plano" required><input name="dias" type="number" min="1" placeholder="Dias" required><input name="preco" placeholder="Preço" required><button class="btn green">➕ Novo plano</button></form><table style="margin-top:12px"><tr><th>ID</th><th>Configuração</th></tr>${assinaturaPlanosRows}</table></div>
+  <div class="card"><h2>👥 Assinantes do grupo</h2><p class="muted">Ative ou renove manualmente. Ao renovar uma assinatura ainda ativa, os dias são somados ao vencimento atual.</p><form method="post" action="/admin/consultas-assinatura/assinante/ativar" class="forms-inline"><input name="numero" placeholder="WhatsApp com DDD" required><input name="nome" placeholder="Nome do cliente" required><select name="plano_id" required><option value="">Escolha o plano...</option>${assinaturaPlanoOpts}</select><button class="btn green">✅ Ativar assinatura</button></form><table style="margin-top:14px"><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr>${assinaturaAssinantesRows}</table></div>
   <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Digite parte do nome do serviço para filtrar as opções. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p>${dhruDataList}<form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline dhru-service-form"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id"><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table><script>(function(){var MAP=${JSON.stringify(dhruServiceMap)};function sync(i){var f=i.closest('form'),h=f&&f.querySelector('input[name=servico_id]');if(!h)return;var v=(i.value||'').trim();var id=MAP[v]||'';if(!id){var m=v.match(/\(#(\d+)\)\s*$/);if(m)id=m[1]}h.value=id||''}document.querySelectorAll('.dhru-service-search').forEach(function(i){i.addEventListener('input',function(){sync(i)});i.addEventListener('change',function(){sync(i)});i.addEventListener('blur',function(){sync(i)});sync(i)});document.querySelectorAll('.dhru-service-form').forEach(function(f){f.addEventListener('submit',function(e){var i=f.querySelector('.dhru-service-search'),h=f.querySelector('input[name=servico_id]');sync(i);if(!h.value){e.preventDefault();alert('Selecione um serviço Dhru da lista.')}})})})();</script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
@@ -9356,6 +9461,41 @@ async function consultaDhruResolverServicoPainel(body){
   if(exato) return Number(exato.id);
   return 0;
 }
+
+
+app.post('/admin/consultas-assinatura/assinaturas/config',async(req,res)=>{
+  try{ await setConfig('consulta_assinaturas_controle_ativo',req.body.ativo==='1'?'1':'0'); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Controle de assinaturas atualizado.')); }
+  catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/plano/novo',async(req,res)=>{
+  try{
+    const nome=String(req.body.nome||'').trim(), dias=Number(req.body.dias||0), preco=Number(String(req.body.preco||'').replace(',','.'));
+    if(!nome||!Number.isInteger(dias)||dias<1||!Number.isFinite(preco)||preco<0) throw new Error('Dados do plano inválidos.');
+    const max=await get(`SELECT COALESCE(MAX(ordem),0) m FROM consulta_assinatura_planos`);
+    await run(`INSERT INTO consulta_assinatura_planos(nome,dias,preco,ativo,ordem) VALUES(?,?,?,1,?)`,[nome,dias,preco,Number(max?.m||0)+1]);
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Plano cadastrado.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/plano/:id/salvar',async(req,res)=>{
+  try{
+    const nome=String(req.body.nome||'').trim(), dias=Number(req.body.dias||0), preco=Number(String(req.body.preco||'').replace(',','.'));
+    if(!nome||!Number.isInteger(dias)||dias<1||!Number.isFinite(preco)||preco<0) throw new Error('Dados do plano inválidos.');
+    await run(`UPDATE consulta_assinatura_planos SET nome=?,dias=?,preco=?,ativo=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[nome,dias,preco,req.body.ativo==='1'?1:0,Number(req.params.id)]);
+    res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Plano atualizado.'));
+  }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/assinante/ativar',async(req,res)=>{
+  try{ const r=await consultaAssinaturaAtivarNumero(req.body.numero,req.body.nome,req.body.plano_id); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Assinatura ativada até ${dateBR(r.vencimento)}.`)); }
+  catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/assinante/:id/renovar',async(req,res)=>{
+  try{ const r=await consultaAssinaturaRenovarRegistro(req.params.id,req.body.plano_id); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Assinatura renovada até ${dateBR(r.vencimento)}.`)); }
+  catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
+app.post('/admin/consultas-assinatura/assinante/:id/suspender',async(req,res)=>{
+  try{ await run(`UPDATE consulta_assinantes SET status='SUSPENSA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[Number(req.params.id)]); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Assinatura suspensa.')); }
+  catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+});
 
 app.post('/admin/consultas-assinatura/dhru-comando/novo',async(req,res)=>{
   try{

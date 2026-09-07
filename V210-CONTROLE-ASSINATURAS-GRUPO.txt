@@ -1,0 +1,13 @@
+V210 — Controle de assinaturas do grupo
+Base: V209.
+
+Implementado:
+- Planos padrão: 1 dia R$10, 3 dias R$13, 7 dias R$17, 15 dias R$30, 30 dias R$50.
+- Planos editáveis e novos planos pelo painel.
+- Cadastro, ativação, renovação e suspensão manual de assinantes.
+- Renovação soma os dias ao vencimento atual quando a assinatura ainda está ativa.
+- Controle único para comandos Yan e Dhru.
+- /assinatura mostra status, plano e vencimento no grupo.
+- Assinatura vencida/ausente/suspensa impede iniciar consultas quando o controle estiver ativado.
+- /comandos continua disponível mesmo sem assinatura.
+- Controle vem DESATIVADO por segurança após o deploy; ative no painel depois de cadastrar os assinantes.
