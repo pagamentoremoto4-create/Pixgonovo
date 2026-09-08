@@ -1,0 +1,30 @@
+V215 — CONSULTAVIP COMO SEGUNDO BOT TELEGRAM
+
+- WhatsApp de consultas preservado.
+- Bot principal de vendas/eSIM preservado.
+- Segundo bot exclusivo CONSULTAVIP.
+- Token cadastrado e criptografado pelo painel.
+- Iniciar, parar e testar conexão pelo painel.
+- Inicialização automática configurável.
+- Planos individuais e planos para grupos.
+- Chaves de grupo de uso único, armazenadas somente como hash.
+- Ativação de grupo somente por administrador/criador.
+- Consultas por botões clicáveis.
+- Resultado entregue no privado do solicitante.
+- Painel de licenças, grupos, chaves e status.
+- Suspensão e reativação de licenças pelo painel.
+- Geração manual de chave pelo painel.
+- Pagamentos usando PixGo ou Mercado Pago já configurados.
+
+PAINEL:
+/admin/consultavip
+
+COMANDOS DO BOT:
+/start
+/menu
+/consultavip
+/ativar CHAVE
+
+BOTFATHER:
+- Allow Groups: ativado.
+- Group Privacy: desativado.

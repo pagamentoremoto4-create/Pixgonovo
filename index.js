@@ -2062,6 +2062,45 @@ async function initDB() {
     await run(`INSERT OR IGNORE INTO consulta_assinatura_planos(nome,dias,preco,ativo,ordem) VALUES(?,?,?,1,?)`,[nome,dias,preco,ordem]);
   }
 
+  // V214 — CONSULTAVIP no Telegram: licenças individuais e licenças por grupo.
+  await run(`CREATE TABLE IF NOT EXISTS consultavip_usuarios (
+    telegram_user_id TEXT PRIMARY KEY,
+    nome TEXT,
+    username TEXT,
+    iniciou_privado INTEGER DEFAULT 0,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS consultavip_licencas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tipo TEXT NOT NULL CHECK(tipo IN ('INDIVIDUAL','GRUPO')),
+    comprador_telegram_id TEXT NOT NULL,
+    telegram_user_id TEXT,
+    telegram_chat_id TEXT,
+    telegram_chat_titulo TEXT,
+    plano_id INTEGER NOT NULL,
+    inicio_em TEXT NOT NULL,
+    vencimento_em TEXT NOT NULL,
+    status TEXT DEFAULT 'ATIVA',
+    total_consultas INTEGER DEFAULT 0,
+    ultima_consulta_em TEXT,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_consultavip_individual ON consultavip_licencas(telegram_user_id) WHERE tipo='INDIVIDUAL'`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_consultavip_grupo ON consultavip_licencas(telegram_chat_id) WHERE tipo='GRUPO'`);
+  await run(`CREATE TABLE IF NOT EXISTS consultavip_chaves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chave_hash TEXT NOT NULL UNIQUE,
+    chave_final TEXT,
+    comprador_telegram_id TEXT NOT NULL,
+    plano_id INTEGER NOT NULL,
+    status TEXT DEFAULT 'DISPONIVEL',
+    usada_telegram_chat_id TEXT,
+    usada_telegram_user_id TEXT,
+    criada_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    usada_em TEXT
+  )`);
+
 
   // V211 — pagamentos, promoções, indicações, alertas e histórico das assinaturas.
   await run(`CREATE TABLE IF NOT EXISTS consulta_assinatura_pagamentos (
@@ -2490,7 +2529,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -6884,7 +6923,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   const gateway = sess.gateway || 'pixgo';
   await enviarMensagem('⏳ Gerando PIX...');
   const documento = gateway === 'pixgo' ? String(sess.documento_pix || '') : '';
-  const pix = await gerarPix(sess.valor_pix, `${chave.startsWith('tg:') ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
+  const pix = await gerarPix(sess.valor_pix, `${chave.startsWith('tg:')||chave.startsWith('cvtg:') ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
   await apagarSessaoPedido(chave);
   if (!pix) {
     await enviarMensagem(`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)}. Tente novamente ou escolha outra forma de pagamento.`);
@@ -6919,9 +6958,11 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
 
       if (!bufferQr.length) throw new Error('QR Code Base64 vazio');
 
-      if (String(chave).startsWith('tg:')) {
-        if (!tgBot) throw new Error('Telegram não inicializado');
-        await tgBot.sendPhoto(tgIdFromJid(chave), bufferQr, {
+      if (String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:')) {
+        const botDestino=String(chave).startsWith('cvtg:')?consultaVipBot:tgBot;
+        if (!botDestino) throw new Error('Telegram não inicializado');
+        const idDestino=String(chave).replace(/^(?:cvtg:|tg:)/,'');
+        await botDestino.sendPhoto(idDestino, bufferQr, {
           caption: '📷 Escaneie o QR Code para pagar'
         });
       } else {
@@ -6935,7 +6976,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
           caption: '📷 Escaneie o QR Code para pagar'
         });
       }
-      console.log(`✅ QR Code Mercado Pago enviado por ${String(chave).startsWith('tg:') ? 'Telegram' : 'WhatsApp'}`);
+      console.log(`✅ QR Code Mercado Pago enviado por ${String(chave).startsWith('tg:')||String(chave).startsWith('cvtg:') ? 'Telegram' : 'WhatsApp'}`);
     } catch (e) {
       // O copia e cola continua sendo enviado mesmo se a imagem falhar.
       console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message);
@@ -8531,6 +8572,70 @@ function consultaValidarComando(texto){
   }
   return {ok:false,tutorial:false};
 }
+
+// ===== V215 — CONSULTAVIP: segundo bot Telegram independente =====
+let consultaVipBot=null;
+let consultaVipBotStatus='DESCONECTADO';
+let consultaVipBotErro='';
+async function consultavipTokenSalvo(){return dhruDecrypt(await getConfig('consultavip_bot_token_enc',''));}
+async function consultavipPararBot(){
+  const atual=consultaVipBot; consultaVipBot=null; consultaVipBotStatus='DESCONECTADO';
+  if(atual)try{await atual.stopPolling({cancel:true});}catch(_){}
+}
+async function consultavipIniciarBot(){
+  if(!TelegramBot)throw new Error('Biblioteca do Telegram indisponível.');
+  const token=await consultavipTokenSalvo();if(!token)throw new Error('Cadastre o token do CONSULTAVIP no painel.');
+  await consultavipPararBot();
+  const bot=new TelegramBot(token,{polling:true});consultaVipBot=bot;consultaVipBotStatus='CONECTANDO';consultaVipBotErro='';
+  bot.on('polling_error',e=>{consultaVipBotErro=String(e?.message||e).slice(0,300);consultaVipBotStatus='ERRO';console.log('❌ CONSULTAVIP POLLING:',consultaVipBotErro);});
+  bot.onText(/\/start(?:@\w+)?/,async msg=>{try{await consultavipRegistrarUsuario(msg.from,String(msg.chat?.type)==='private');await bot.sendMessage(msg.chat.id,'👋 Bem-vindo ao CONSULTAVIP!');await consultavipMenu(msg.chat.id);}catch(e){console.log('❌ CONSULTAVIP START:',e.message);}});
+  bot.onText(/\/menu(?:@\w+)?/,async msg=>{try{await consultavipMenu(msg.chat.id);}catch(_){}});
+  bot.on('callback_query',async q=>{try{await consultavipTratarCallback(q);}catch(e){console.log('❌ CONSULTAVIP CALLBACK:',e.message);try{await bot.answerCallbackQuery(q.id,{text:'Erro interno.'});}catch(_){}}});
+  bot.on('message',async msg=>{try{if(/^\/(start|menu)(?:@\w+)?$/i.test(String(msg.text||'').trim()))return;await consultavipTratarMensagemTelegram(msg);}catch(e){console.log('❌ CONSULTAVIP MENSAGEM:',e.message);try{await bot.sendMessage(msg.chat.id,'❌ Erro interno. Tente novamente.');}catch(_){}}});
+  const me=await bot.getMe();consultaVipBotStatus='CONECTADO';await setConfig('consultavip_bot_username',String(me.username||''));console.log(`✅ CONSULTAVIP INICIADO: @${me.username||me.id}`);return me;
+}
+const consultavipSessoes=new Map();
+function consultavipChaveSessao(userId,chatId){return `${userId}:${chatId}`;}
+function consultavipHash(chave){return crypto.createHash('sha256').update(String(chave||'').trim().toUpperCase()).digest('hex');}
+function consultavipGerarChave(){const b=crypto.randomBytes(9).toString('hex').toUpperCase();return `CVIP-${b.slice(0,6)}-${b.slice(6,12)}-${b.slice(12,18)}`;}
+function consultavipMenuMarkup(){return {inline_keyboard:[
+  [{text:'🔎 Realizar consulta',callback_data:'cv_consultar'}],
+  [{text:'💎 Plano individual',callback_data:'cv_planos_individual'},{text:'👥 Plano para grupo',callback_data:'cv_planos_grupo'}],
+  [{text:'📅 Meu plano',callback_data:'cv_status'},{text:'📋 Comandos',callback_data:'cv_comandos'}],
+  [{text:'🤖 Adicionar ao grupo',callback_data:'cv_adicionar'},{text:'🛠 Suporte',callback_data:'cv_suporte'}]
+]};}
+async function consultavipMenu(chatId){return consultaVipBot.sendMessage(chatId,'🕵️🔎 *CONSULTAVIP*\n\nConsultas rápidas e automatizadas, com resultado entregue no privado.\n\nEscolha uma opção:',{parse_mode:'Markdown',reply_markup:consultavipMenuMarkup()});}
+async function consultavipRegistrarUsuario(from,privado=false){if(!from?.id)return;await run(`INSERT INTO consultavip_usuarios(telegram_user_id,nome,username,iniciou_privado,atualizado_em) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(telegram_user_id) DO UPDATE SET nome=excluded.nome,username=excluded.username,iniciou_privado=MAX(consultavip_usuarios.iniciou_privado,excluded.iniciou_privado),atualizado_em=CURRENT_TIMESTAMP`,[String(from.id),[from.first_name,from.last_name].filter(Boolean).join(' ')||'Cliente',from.username||'',privado?1:0]);}
+function consultavipStatusLicenca(l){if(!l)return 'SEM_PLANO';if(String(l.status).toUpperCase()==='SUSPENSA')return 'SUSPENSA';return Date.parse(String(l.vencimento_em).replace(' ','T')+'Z')>Date.now()?'ATIVA':'VENCIDA';}
+async function consultavipLicenca(userId,chat){
+  if(String(chat?.type||'')==='private') return get(`SELECT l.*,p.nome plano_nome,p.dias FROM consultavip_licencas l LEFT JOIN consulta_assinatura_planos p ON p.id=l.plano_id WHERE l.tipo='INDIVIDUAL' AND l.telegram_user_id=? LIMIT 1`,[String(userId)]);
+  return get(`SELECT l.*,p.nome plano_nome,p.dias FROM consultavip_licencas l LEFT JOIN consulta_assinatura_planos p ON p.id=l.plano_id WHERE l.tipo='GRUPO' AND l.telegram_chat_id=? LIMIT 1`,[String(chat?.id)]);
+}
+async function consultavipMostrarStatus(chatId,userId,chat){const l=await consultavipLicenca(userId,chat),st=consultavipStatusLicenca(l);const tipo=String(chat?.type)==='private'?'individual':'do grupo';return consultaVipBot.sendMessage(chatId,st==='ATIVA'?`✅ Plano ${tipo} ativo\n📦 ${l.plano_nome||'-'}\n📅 Vencimento: ${dateBR(String(l.vencimento_em)+'Z')}\n🔎 Consultas: ${Number(l.total_consultas||0)}`:`⚠️ O plano ${tipo} ${st==='VENCIDA'?'venceu':'não está ativo'}.`,{reply_markup:consultavipMenuMarkup()});}
+async function consultavipPlanos(chatId,tipo){const ps=await consultaAssinaturaPlanosAtivos();const linhas=ps.map(p=>[{text:`${p.nome} • ${brl(p.preco)}`,callback_data:`cv_comprar_${tipo}_${p.id}`}]);linhas.push([{text:'⬅️ Voltar',callback_data:'cv_menu'}]);return consultaVipBot.sendMessage(chatId,`💎 *Planos ${tipo==='GRUPO'?'para grupo':'individuais'}*\n\nO acesso é válido pelo período escolhido.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:linhas}});}
+async function consultavipComandos(chatId){const cs=CONSULTA_COMANDOS_VALIDOS.filter(c=>c.nome!=='SENHA');const extra=await all(`SELECT nome_exibicao,comando,exemplo FROM consulta_dhru_comandos WHERE ativo=1 ORDER BY id`).catch(()=>[]);const t=[...cs.map(c=>`• ${c.nome}: ${c.exemplo}`),...extra.map(c=>`• ${c.nome_exibicao}: ${c.exemplo||c.comando+' 350000000000000'}`)].join('\n');return consultaVipBot.sendMessage(chatId,`📋 *Comandos disponíveis*\n\n${t}\n\nPor segurança, consulta de senhas não está disponível no CONSULTAVIP.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'⬅️ Voltar',callback_data:'cv_menu'}]]}});}
+async function consultavipBotoesConsulta(chatId){const cs=CONSULTA_COMANDOS_VALIDOS.filter(c=>c.nome!=='SENHA');const rows=[];for(let i=0;i<cs.length;i+=2)rows.push(cs.slice(i,i+2).map((c,j)=>({text:`🔎 ${c.nome}`,callback_data:`cv_cmd_${i+j}`})));rows.push([{text:'⬅️ Voltar',callback_data:'cv_menu'}]);return consultaVipBot.sendMessage(chatId,'🔎 Escolha a consulta:',{reply_markup:{inline_keyboard:rows}});}
+async function consultavipEhAdminGrupo(chatId,userId){try{const m=await consultaVipBot.getChatMember(chatId,userId);return ['creator','administrator'].includes(String(m?.status));}catch(_){return false;}}
+async function consultavipAtivarGrupo(msg,chave){if(String(msg.chat.type)==='private')return consultaVipBot.sendMessage(msg.chat.id,'⚠️ A chave de grupo deve ser ativada dentro do grupo.');if(!(await consultavipEhAdminGrupo(msg.chat.id,msg.from.id)))return consultaVipBot.sendMessage(msg.chat.id,'⛔ Somente um administrador do grupo pode ativar a chave.');const h=consultavipHash(chave),k=await get(`SELECT c.*,p.dias,p.nome plano_nome FROM consultavip_chaves c JOIN consulta_assinatura_planos p ON p.id=c.plano_id WHERE c.chave_hash=? AND c.status='DISPONIVEL'`,[h]);if(!k)return consultaVipBot.sendMessage(msg.chat.id,'❌ Chave inválida ou já utilizada.');const agora=new Date(),fim=new Date(agora.getTime()+Number(k.dias)*86400000);await run('BEGIN IMMEDIATE TRANSACTION');try{await run(`INSERT INTO consultavip_licencas(tipo,comprador_telegram_id,telegram_chat_id,telegram_chat_titulo,plano_id,inicio_em,vencimento_em,status) VALUES('GRUPO',?,?,?,?,?,?,'ATIVA') ON CONFLICT(telegram_chat_id) WHERE tipo='GRUPO' DO UPDATE SET comprador_telegram_id=excluded.comprador_telegram_id,telegram_chat_titulo=excluded.telegram_chat_titulo,plano_id=excluded.plano_id,inicio_em=excluded.inicio_em,vencimento_em=excluded.vencimento_em,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP`,[k.comprador_telegram_id,String(msg.chat.id),msg.chat.title||'Grupo',k.plano_id,consultaAssinaturaSqlDate(agora),consultaAssinaturaSqlDate(fim)]);await run(`UPDATE consultavip_chaves SET status='UTILIZADA',usada_telegram_chat_id=?,usada_telegram_user_id=?,usada_em=CURRENT_TIMESTAMP WHERE id=?`,[String(msg.chat.id),String(msg.from.id),k.id]);await run('COMMIT');}catch(e){await run('ROLLBACK').catch(()=>{});throw e;}return consultaVipBot.sendMessage(msg.chat.id,`✅ CONSULTAVIP ativado neste grupo!\n📦 ${k.plano_nome}\n📅 Válido até ${dateBR(fim)}\n\nUse /consultavip para abrir os botões.`);}
+async function consultavipComprar(q,tipo,planoId){if(String(q.message.chat.type)!=='private')return consultaVipBot.sendMessage(q.message.chat.id,'⚠️ A compra deve ser feita no privado do bot.');const p=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]);if(!p)return consultaVipBot.sendMessage(q.message.chat.id,'Plano indisponível.');const {cliente}=await cadastrarClienteTelegram(q.from),ch=`cvtg:${q.from.id}`;const contexto={tipoCompra:`CONSULTAVIP_${tipo}`,planoId:p.id,telegramUserId:String(q.from.id),clienteNome:cliente.nome};await run(`INSERT OR REPLACE INTO consulta_assinatura_pagamentos(payment_id,cliente_numero,cliente_jid,cliente_nome,plano_id,valor_normal,valor_pago,gateway,status) VALUES(?,?,?,?,?,?,?,?,'PREPARANDO')`,[`CVPREP-${Date.now()}-${q.from.id}`,String(q.from.id),ch,cliente.nome,p.id,p.preco,p.preco,'']);return iniciarFluxoPagamento(ch,{valor_pix:Number(p.preco),tipo_pix:'ASSINATURA',contexto_assinatura:contexto},cliente,m=>consultaVipBot.sendMessage(q.message.chat.id,m));}
+async function consultavipExecutar(msg,cmd){if(/^\/senha\b/i.test(cmd))return consultaVipBot.sendMessage(msg.chat.id,'⛔ Essa consulta não está disponível.');const l=await consultavipLicenca(msg.from.id,msg.chat);if(consultavipStatusLicenca(l)!=='ATIVA')return consultaVipBot.sendMessage(msg.chat.id,'⚠️ Plano inativo. Abra /consultavip para contratar ou renovar.');const u=await get(`SELECT iniciou_privado FROM consultavip_usuarios WHERE telegram_user_id=?`,[String(msg.from.id)]);if(!u?.iniciou_privado)return consultaVipBot.sendMessage(msg.chat.id,'⚠️ Abra o bot no privado e toque em INICIAR antes da consulta. O resultado é entregue somente no privado.');if(consultaEmMemoria||consultaDhruEmMemoria)return consultaVipBot.sendMessage(msg.chat.id,'⏳ O sistema está concluindo outra consulta. Tente novamente em instantes.');const tgGrupo=await getConfig('consulta_tg_grupo','');if(!tgGrupo||!(await consultaTelegramConectarSalva()))return consultaVipBot.sendMessage(msg.chat.id,'⚠️ Integração de consultas indisponível no momento.');const dado=consultaExtrairDadoDoComando(cmd);const r=await run(`INSERT INTO consultas_assinatura(cliente_jid,cliente_nome,grupo_whatsapp,comando,dado_consulta,status) VALUES(?,?,?,?,?,'ENVIANDO_TELEGRAM')`,[`tg:${msg.from.id}`,msg.from.first_name||'Cliente',`tgchat:${msg.chat.id}`,cmd,dado]);consultaEmMemoria={id:r.lastID,canal:'TELEGRAM',telegram_entrega_id:String(msg.from.id),telegram_origem_chat_id:String(msg.chat.id),licenca_id:l.id,cliente_jid:`tg:${msg.from.id}`,cliente_nome:msg.from.first_name||'Cliente',grupo_whatsapp:`tgchat:${msg.chat.id}`,comando:cmd,dado_consulta:dado};try{await consultaVipBot.sendMessage(msg.chat.id,'⏳ Consulta recebida. O resultado será enviado no seu privado.');const ent=await consultaTelegramResolverGrupo(tgGrupo),env=await consultaTelegramCliente.sendMessage(ent,{message:cmd});consultaEmMemoria.telegram_entidade=ent;consultaEmMemoria.telegram_enviado_id=String(env?.id||'');await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=? WHERE id=?`,[String(env?.id||''),r.lastID]);await run(`UPDATE consultavip_licencas SET total_consultas=total_consultas+1,ultima_consulta_em=CURRENT_TIMESTAMP WHERE id=?`,[l.id]);consultaTelegramIniciarPolling();consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite excedido.')).catch(()=>{});},30000);}catch(e){await consultaFalhar(r.lastID,e);}return true;}
+async function consultavipTratarCallback(q){const d=String(q?.data||'');if(!d.startsWith('cv_'))return false;await consultaVipBot.answerCallbackQuery(q.id).catch(()=>{});await consultavipRegistrarUsuario(q.from,String(q.message?.chat?.type)==='private');const chatId=q.message.chat.id;if(d==='cv_menu')await consultavipMenu(chatId);else if(d==='cv_consultar')await consultavipBotoesConsulta(chatId);else if(d==='cv_planos_individual')await consultavipPlanos(chatId,'INDIVIDUAL');else if(d==='cv_planos_grupo')await consultavipPlanos(chatId,'GRUPO');else if(d==='cv_status')await consultavipMostrarStatus(chatId,q.from.id,q.message.chat);else if(d==='cv_comandos')await consultavipComandos(chatId);else if(d==='cv_adicionar'){let me={};try{me=await consultaVipBot.getMe();}catch(_){}const url=me.username?`https://t.me/${me.username}?startgroup=true`:'';await consultaVipBot.sendMessage(chatId,'🤖 Adicione o bot ao grupo, compre um plano de grupo e ative lá com:\n/ativar SUA-CHAVE',{reply_markup:{inline_keyboard:url?[[{text:'➕ Adicionar ao grupo',url}],[{text:'⬅️ Voltar',callback_data:'cv_menu'}]]:[[{text:'⬅️ Voltar',callback_data:'cv_menu'}]]}});}else if(d==='cv_suporte')await consultaVipBot.sendMessage(chatId,'🛠 Entre em contato com o administrador para suporte.',{reply_markup:{inline_keyboard:[[{text:'⬅️ Voltar',callback_data:'cv_menu'}]]}});else{let m=d.match(/^cv_comprar_(INDIVIDUAL|GRUPO)_(\d+)$/);if(m)await consultavipComprar(q,m[1],m[2]);else{m=d.match(/^cv_cmd_(\d+)$/);if(m){const c=CONSULTA_COMANDOS_VALIDOS.filter(x=>x.nome!=='SENHA')[Number(m[1])];if(c){consultavipSessoes.set(consultavipChaveSessao(q.from.id,chatId),{comando:c,expira:Date.now()+300000});await consultaVipBot.sendMessage(chatId,`✍️ Envie agora o dado para *${c.nome}*.\nExemplo: ${c.exemplo.replace(/^[\/.][a-z0-9_]+\s*/i,'')}`,{parse_mode:'Markdown'});}}}}return true;}
+async function consultavipTratarPagamentoMensagem(msg,txt){
+  if(String(msg.chat?.type)!=='private')return false;
+  const chave=`cvtg:${msg.from.id}`,sess=await carregarSessaoPedido(chave);if(!sess)return false;
+  const {cliente}=await cadastrarClienteTelegram(msg.from),enviar=m=>consultaVipBot.sendMessage(msg.chat.id,m);
+  if(sess.etapa==='aguardando_gateway_pix'){
+    const gateway=gatewayDaOpcao(txt);if(!gateway){await enviar('❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');return true;}
+    if(gateway==='pixgo'){const doc=await documentoPixCliente(cliente);if(doc){await finalizarGeracaoPix(chave,{...sess,gateway,documento_pix:doc},cliente,enviar);return true;}await salvarSessaoPedido(chave,{...sess,etapa:'aguardando_cpf_pix',gateway});await enviar('📄 Envie o CPF ou CNPJ do pagador, somente números.');return true;}
+    await finalizarGeracaoPix(chave,{...sess,gateway},cliente,enviar);return true;
+  }
+  if(sess.etapa==='aguardando_cpf_pix'){
+    const doc=onlyDigits(txt);if(!documentoPixValido(doc)){await enviar('❌ CPF/CNPJ inválido. Envie somente 11 ou 14 números.');return true;}
+    await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[doc,cliente.id]);await finalizarGeracaoPix(chave,{...sess,documento_pix:doc,gateway:'pixgo'},cliente,enviar);return true;
+  }
+  return false;
+}
+async function consultavipTratarMensagemTelegram(msg){await consultavipRegistrarUsuario(msg.from,String(msg.chat?.type)==='private');const txt=String(msg.text||'').trim();if(!txt)return false;if(await consultavipTratarPagamentoMensagem(msg,txt))return true;if(/^\/consultavip(?:@\w+)?$/i.test(txt)){await consultavipMenu(msg.chat.id);return true;}const ativ=txt.match(/^\/ativar(?:@\w+)?\s+(.+)$/i);if(ativ){await consultavipAtivarGrupo(msg,ativ[1]);return true;}const sKey=consultavipChaveSessao(msg.from.id,msg.chat.id),s=consultavipSessoes.get(sKey);if(s){consultavipSessoes.delete(sKey);if(s.expira<Date.now()){await consultaVipBot.sendMessage(msg.chat.id,'⌛ Esta solicitação expirou. Escolha novamente.');return true;}const prefix=(s.comando.exemplo.match(/^([\/.][a-z0-9_]+)/i)||[])[1]||'';const cmd=`${prefix} ${txt}`.trim(),v=consultaValidarComando(cmd);if(!v.ok){await consultaVipBot.sendMessage(msg.chat.id,`❌ Dado inválido. Exemplo correto: ${s.comando.exemplo}`);return true;}return consultavipExecutar(msg,cmd);}const v=consultaValidarComando(txt);if(v.ok&&!v.tutorial)return consultavipExecutar(msg,txt);return false;}
 async function consultaTutorialLinhas(){
   const linhas=[
     'CONSULTAS VIP - GUIA DE COMANDOS','',
@@ -8740,6 +8845,13 @@ async function consultaFalhar(id,erro){
   const msg=String(erro?.message||erro||'Erro desconhecido').slice(0,1000);
   try{ await run(`UPDATE consultas_assinatura SET status='ERRO',erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[msg,id]); }catch(_){}
   try{
+    if(consultaEmMemoria?.canal==='TELEGRAM'){
+      await consultaVipBot?.sendMessage(consultaEmMemoria.telegram_entrega_id,'❌ Não foi possível concluir sua consulta agora. Tente novamente em instantes.').catch(()=>{});
+      if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}
+      if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}
+      consultaEmMemoria=null;
+      return;
+    }
     const c=await get('SELECT * FROM consultas_assinatura WHERE id=?',[id]);
     const sock=await consultaObterSocketWhatsApp(c?.grupo_whatsapp||'');
     if(c?.grupo_whatsapp && sock){
@@ -8952,6 +9064,15 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   const semResultado=consultaRespostaSemResultado(texto);
   await run(`UPDATE consultas_assinatura SET status='RESULTADO_RECEBIDO',resultado_url=?,telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[link||'',messageId,ativo.id]);
   try{
+    if(ativo.canal==='TELEGRAM'){
+      const destino=String(ativo.telegram_entrega_id||'');
+      if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await consultaVipBot.sendMessage(destino,`✅ Consulta concluída\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
+      else if(semResultado){await consultaVipBot.sendMessage(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
+      else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);await consultaVipBot.sendDocument(destino,pdf,{caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
+      await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+      if(ativo.telegram_origem_chat_id!==destino)await consultaVipBot.sendMessage(ativo.telegram_origem_chat_id,'✅ Consulta concluída e enviada no privado.').catch(()=>{});
+      if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}consultaEmMemoria=null;return;
+    }
     if(link){
       // V202: qualquer comando que receber um link válido da Yan entrega somente
       // um link temporário do próprio sistema. A URL original da Yan fica no servidor.
@@ -9453,6 +9574,22 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
 async function consultaAssinaturaConfirmarPagamento(paymentId,jid,valorPix,gateway,contextoJson){
   let ctx={}; try{ctx=typeof contextoJson==='string'?JSON.parse(contextoJson||'{}'):(contextoJson||{});}catch(_){}
   const p=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=?`,[Number(ctx.planoId||0)]); if(!p) throw new Error('Plano da assinatura não encontrado');
+  const tipoCv=String(ctx.tipoCompra||'').toUpperCase();
+  if(tipoCv==='CONSULTAVIP_INDIVIDUAL'||tipoCv==='CONSULTAVIP_GRUPO'){
+    const uid=String(ctx.telegramUserId||tgIdFromJid(jid)||''); if(!uid)throw new Error('Cliente Telegram não identificado');
+    if(tipoCv==='CONSULTAVIP_INDIVIDUAL'){
+      const ex=await get(`SELECT * FROM consultavip_licencas WHERE tipo='INDIVIDUAL' AND telegram_user_id=?`,[uid]);
+      const base=consultavipStatusLicenca(ex)==='ATIVA'?new Date(String(ex.vencimento_em).replace(' ','T')+'Z'):new Date(),fim=new Date(base.getTime()+Number(p.dias)*86400000);
+      await run(`INSERT INTO consultavip_licencas(tipo,comprador_telegram_id,telegram_user_id,plano_id,inicio_em,vencimento_em,status) VALUES('INDIVIDUAL',?,?,?,?,?,'ATIVA') ON CONFLICT(telegram_user_id) WHERE tipo='INDIVIDUAL' DO UPDATE SET comprador_telegram_id=excluded.comprador_telegram_id,plano_id=excluded.plano_id,vencimento_em=excluded.vencimento_em,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP`,[uid,uid,p.id,consultaAssinaturaSqlDate(new Date()),consultaAssinaturaSqlDate(fim)]);
+      await consultaVipBot?.sendMessage(uid,`✅ Pagamento confirmado!\n\n💎 Plano individual: ${p.nome}\n📅 Válido até: ${dateBR(fim)}\n\nToque abaixo para consultar.`,{reply_markup:consultavipMenuMarkup()}).catch(()=>{});
+    }else{
+      const chave=consultavipGerarChave();await run(`INSERT INTO consultavip_chaves(chave_hash,chave_final,comprador_telegram_id,plano_id,status) VALUES(?,?,?,?,'DISPONIVEL')`,[consultavipHash(chave),chave.slice(-6),uid,p.id]);
+      await consultaVipBot?.sendMessage(uid,`✅ Pagamento confirmado!\n\n👥 Plano para grupo: ${p.nome}\n🔑 Sua chave de ativação (uso único):\n\n${chave}\n\nAdicione o bot ao grupo e um administrador deve enviar:\n/ativar ${chave}\n\n⚠️ Guarde esta mensagem. Por segurança, a chave completa não fica armazenada.`,{reply_markup:{inline_keyboard:[[{text:'🤖 Adicionar bot ao grupo',callback_data:'cv_adicionar'}]]}}).catch(()=>{});
+    }
+    await run(`UPDATE consulta_assinatura_pagamentos SET status='PAGO',confirmado_em=CURRENT_TIMESTAMP WHERE payment_id=?`,[String(paymentId)]).catch(()=>{});
+    await run(`INSERT INTO pagamentos(revenda_id,revenda_nome,cliente_jid,cliente_numero,valor,origem) VALUES(NULL,?,?,?,?,?)`,[ctx.clienteNome||'Cliente Telegram',`tg:${uid}`,uid,Number(valorPix||0),`${gateway}_consultavip`]);
+    notificarPainel('pix','💎 CONSULTAVIP pago',`${ctx.clienteNome||uid} • ${p.nome} • ${brl(valorPix)}`); return;
+  }
   const numero=normalizarNumeroWhatsApp(ctx.clienteNumero||jidToNumber(jid)||'');
   const existente=numero?await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[numero]):null;
   const estavaAtiva=consultaAssinaturaStatus(existente)==='ATIVA';
@@ -9624,6 +9761,29 @@ function consultaLoginStatus(){
   return 'DESCONECTADO';
 }
 
+app.get('/admin/consultavip',async(req,res)=>{
+  const token=await consultavipTokenSalvo(),username=await getConfig('consultavip_bot_username',''),auto=(await getConfig('consultavip_bot_auto','0'))==='1';
+  const planos=await consultaAssinaturaPlanosAtivos();
+  const licencas=await all(`SELECT l.*,p.nome plano_nome FROM consultavip_licencas l LEFT JOIN consulta_assinatura_planos p ON p.id=l.plano_id ORDER BY l.id DESC LIMIT 200`);
+  const chaves=await all(`SELECT c.*,p.nome plano_nome FROM consultavip_chaves c LEFT JOIN consulta_assinatura_planos p ON p.id=c.plano_id ORDER BY c.id DESC LIMIT 100`);
+  const opts=planos.map(p=>`<option value="${p.id}">${safeHtml(p.nome)} — ${p.dias} dias — ${safeHtml(brl(p.preco))}</option>`).join('');
+  const lr=licencas.map(l=>`<tr><td>#${l.id}</td><td>${safeHtml(l.tipo)}</td><td>${safeHtml(l.telegram_user_id||l.telegram_chat_titulo||l.telegram_chat_id||'-')}</td><td>${safeHtml(l.plano_nome||'-')}</td><td>${safeHtml(dateBR(String(l.vencimento_em||'')+'Z'))}</td><td>${safeHtml(consultavipStatusLicenca(l))}</td><td><form method="post" action="/admin/consultavip/licenca/${l.id}/status"><button class="btn ${String(l.status)==='SUSPENSA'?'green':'red'}" name="status" value="${String(l.status)==='SUSPENSA'?'ATIVA':'SUSPENSA'}">${String(l.status)==='SUSPENSA'?'Reativar':'Suspender'}</button></form></td></tr>`).join('')||'<tr><td colspan="7">Nenhuma licença.</td></tr>';
+  const kr=chaves.map(k=>`<tr><td>#${k.id}</td><td>••••-${safeHtml(k.chave_final||'')}</td><td>${safeHtml(k.plano_nome||'-')}</td><td>${safeHtml(k.status)}</td><td>${safeHtml(k.usada_telegram_chat_id||'-')}</td><td>${safeHtml(k.criada_em||'-')}</td></tr>`).join('')||'<tr><td colspan="6">Nenhuma chave.</td></tr>';
+  res.send(page('CONSULTAVIP',`<h1>🕵️🔎 CONSULTAVIP</h1><p class="muted">Segundo bot Telegram independente. O WhatsApp e o bot de vendas continuam funcionando normalmente.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
+  <div class="grid"><div class="card"><h3>Status</h3><p><b>${safeHtml(consultaVipBotStatus)}</b></p><small>${safeHtml(consultaVipBotErro||'Sem erros')}</small></div><div class="card"><h3>Bot</h3><p><b>${username?'@'+safeHtml(username):'Não identificado'}</b></p><small>Token: ${token?consultaSegredoMask(token):'Não cadastrado'}</small></div><div class="card"><h3>Licenças</h3><p><b>${licencas.filter(x=>consultavipStatusLicenca(x)==='ATIVA').length} ativas</b></p></div></div>
+  <div class="card"><h2>🤖 Configurar o segundo bot</h2><form method="post" action="/admin/consultavip/salvar-token"><label>Token fornecido pelo BotFather</label><input type="password" name="token" placeholder="${token?'Deixe vazio para manter o token atual':'Cole o token aqui'}"><label><input style="width:auto" type="checkbox" name="auto" value="1" ${auto?'checked':''}> Iniciar automaticamente com o servidor</label><button class="btn green">💾 Salvar e conectar</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultavip/iniciar"><button class="btn green">▶ Iniciar</button></form><form method="post" action="/admin/consultavip/parar"><button class="btn red">■ Parar</button></form><form method="post" action="/admin/consultavip/testar"><button class="btn">🧪 Testar conexão</button></form></div><small>Depois de criar o bot no BotFather, cole o token somente aqui. Não coloque no GitHub ou no Render.</small></div>
+  <div class="card"><h2>💎 Planos</h2><p>Os mesmos planos abaixo atendem o WhatsApp, o individual e os grupos. Para editar preços e dias:</p><a class="btn" href="/admin/consultas-assinatura">Abrir planos e consultas</a></div>
+  <div class="card"><h2>🔑 Gerar chave de grupo manualmente</h2><form method="post" action="/admin/consultavip/chave"><label>ID Telegram do comprador</label><input name="telegram_user_id" required placeholder="123456789"><label>Plano</label><select name="plano_id" required>${opts}</select><button class="btn green">Gerar chave</button></form></div>
+  <div class="card"><h2>👤 Clientes e grupos</h2><table><tr><th>ID</th><th>Tipo</th><th>Cliente/Grupo</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ação</th></tr>${lr}</table></div>
+  <div class="card"><h2>🗝️ Chaves</h2><table><tr><th>ID</th><th>Final</th><th>Plano</th><th>Status</th><th>Grupo</th><th>Criação</th></tr>${kr}</table></div>`));
+});
+app.post('/admin/consultavip/salvar-token',async(req,res)=>{try{const novo=String(req.body.token||'').trim();if(novo)await setConfig('consultavip_bot_token_enc',dhruEncrypt(novo));await setConfig('consultavip_bot_auto',req.body.auto==='1'?'1':'0');await consultavipIniciarBot();res.redirect('/admin/consultavip?ok='+encodeURIComponent('Bot salvo e conectado.'));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/consultavip/iniciar',async(req,res)=>{try{await consultavipIniciarBot();res.redirect('/admin/consultavip?ok='+encodeURIComponent('CONSULTAVIP iniciado.'));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/consultavip/parar',async(req,res)=>{await consultavipPararBot();res.redirect('/admin/consultavip?ok='+encodeURIComponent('CONSULTAVIP parado.'));});
+app.post('/admin/consultavip/testar',async(req,res)=>{try{if(!consultaVipBot)throw new Error('Bot desconectado.');const me=await consultaVipBot.getMe();res.redirect('/admin/consultavip?ok='+encodeURIComponent(`Conexão OK: @${me.username||me.id}`));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/consultavip/chave',async(req,res)=>{try{const uid=String(req.body.telegram_user_id||'').replace(/\D/g,''),p=await get('SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1',[Number(req.body.plano_id)]);if(!uid||!p)throw new Error('Comprador ou plano inválido.');const chave=consultavipGerarChave();await run(`INSERT INTO consultavip_chaves(chave_hash,chave_final,comprador_telegram_id,plano_id,status) VALUES(?,?,?,?,'DISPONIVEL')`,[consultavipHash(chave),chave.slice(-6),uid,p.id]);res.send(page('Chave criada',`<h1>✅ Chave criada</h1><div class="card"><p>Copie agora. A chave completa não poderá ser consultada novamente:</p><h2>${safeHtml(chave)}</h2><p>Ativação: <b>/ativar ${safeHtml(chave)}</b></p><a class="btn" href="/admin/consultavip">Voltar</a></div>`));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
+app.post('/admin/consultavip/licenca/:id/status',async(req,res)=>{const st=req.body.status==='ATIVA'?'ATIVA':'SUSPENSA';await run('UPDATE consultavip_licencas SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[st,Number(req.params.id)]);res.redirect('/admin/consultavip?ok='+encodeURIComponent('Licença atualizada.'));});
+
 app.get('/admin/consultas-assinatura', async (req,res)=>{
   const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','30');
   const c=await consultaTelegramCredenciais();
@@ -9665,7 +9825,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   const authExtra=st==='AGUARDANDO_CODIGO'?`<div class="card"><h2>🔐 Código do Telegram</h2><p>O código foi enviado pelo Telegram para sua conta. Digite abaixo.</p><form method="post" action="/admin/consultas-assinatura/telegram-codigo"><label>Código recebido</label><input name="codigo" inputmode="numeric" autocomplete="one-time-code" required><button class="btn green">Conectar</button></form></div>`:st==='AGUARDANDO_SENHA'?`<div class="card"><h2>🔐 Verificação em duas etapas</h2><p>Essa conta possui senha 2FA.${consultaTelegramLogin?.hint?` Dica: ${safeHtml(consultaTelegramLogin.hint)}`:''}</p><form method="post" action="/admin/consultas-assinatura/telegram-senha"><label>Senha de duas etapas</label><input type="password" name="senha" required><button class="btn green">Finalizar conexão</button></form></div>`:'';
   res.send(page('Consultas por assinatura',`<h1>🔎 Consultas por assinatura</h1><p class="muted">Fluxo WhatsApp → sua conta Telegram → Yan Buscas → PDF → grupo WhatsApp. A sessão Telegram fica salva no banco/persistent disk, sem variáveis novas no Render.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
   <div class="grid"><div class="card"><h3>WhatsApp</h3><p><b>${statusWa}</b></p><small>Grupo: ${safeHtml(waGrupo||'Nenhum')}</small></div><div class="card"><h3>Conta Telegram</h3><p><b>${safeHtml(st)}</b></p><small>Telefone: ${safeHtml(c.telefone||'Não configurado')}</small></div><div class="card"><h3>Fila</h3><p><b>${consultaEmMemoria?'OCUPADA':'LIVRE'}</b></p><small>${consultaEmMemoria?`Consulta #${consultaEmMemoria.id}`:'Aguardando cliente'}</small></div></div>
-  <div class="card"><a class="btn" href="/admin/consultas-assinatura/saude">🩺 Abrir saúde das integrações</a></div>
+  <div class="card"><a class="btn green" href="/admin/consultavip">🕵️🔎 Abrir painel CONSULTAVIP</a> <a class="btn" href="/admin/consultas-assinatura/saude">🩺 Abrir saúde das integrações</a></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
   <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
@@ -12213,6 +12373,9 @@ server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA 
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()
   .then(async () => {
+    if((await getConfig('consultavip_bot_auto','0'))==='1'){
+      try{await consultavipIniciarBot();}catch(e){consultaVipBotErro=e.message;consultaVipBotStatus='ERRO';console.log('❌ CONSULTAVIP START:',e.message);}
+    }
     // Aguarda o servidor/banco estabilizarem e restaura as sessões sem intervenção manual.
     await new Promise(r => setTimeout(r, 2500));
     await iniciarTodasSessoesWhatsAppSalvas();
