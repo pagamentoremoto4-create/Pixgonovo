@@ -7884,6 +7884,8 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
 
+    registrarSaudacaoEntradaGrupoConsultas(socketAtual);
+
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       // V96: mensagens FROMME sincronizadas do celular podem chegar como append,
       // não apenas notify. Processa o comando do admin antes do filtro de type.
@@ -8433,6 +8435,8 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       }
     });
 
+
+    registrarSaudacaoEntradaGrupoConsultas(socketAtual);
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
@@ -9491,6 +9495,40 @@ const CONSULTA_PROMO_MODELOS_PADRAO = [
 const consultaAssinaturaAntiSpam = new Map();
 const consultaFilaInteligente = [];
 let consultaFilaProcessando = false;
+const consultaSocketsComSaudacao = new WeakSet();
+const consultaSaudacoesRecentes = new Map();
+
+function registrarSaudacaoEntradaGrupoConsultas(socketAtual){
+  if(!socketAtual?.ev || consultaSocketsComSaudacao.has(socketAtual)) return;
+  consultaSocketsComSaudacao.add(socketAtual);
+  socketAtual.ev.on('group-participants.update',async atualizacao=>{
+    try{
+      if(String(atualizacao?.action||'').toLowerCase()!=='add') return;
+      const grupoConfigurado=String(await getConfig('consulta_wa_grupo','')||'').trim();
+      const grupoEvento=String(atualizacao?.id||'').trim();
+      if(!grupoConfigurado || grupoEvento!==grupoConfigurado) return;
+      const jidDoBot=String(socketAtual?.user?.id||'').split(':')[0].split('@')[0];
+      const participantes=Array.isArray(atualizacao?.participants)?atualizacao.participants:[];
+      for(const participanteRaw of participantes){
+        const participante=typeof participanteRaw==='string'?participanteRaw:String(participanteRaw?.id||participanteRaw?.jid||'');
+        if(!participante) continue;
+        const idVisivel=String(participante).split(':')[0].split('@')[0];
+        if(!idVisivel || idVisivel===jidDoBot) continue;
+        const chave=`${grupoEvento}:${participante}`;
+        const agora=Date.now(), ultima=consultaSaudacoesRecentes.get(chave)||0;
+        if(agora-ultima<60000) continue;
+        consultaSaudacoesRecentes.set(chave,agora);
+        setTimeout(()=>consultaSaudacoesRecentes.delete(chave),65000);
+        await socketAtual.sendMessage(grupoEvento,{
+          text:`👋 Olá, @${idVisivel}! Seja bem-vindo(a) ao *ConsultaVIP*! 🔍\n\nAqui você encontra consultas rápidas e automatizadas, disponíveis 24 horas por dia.\n\n💎 Para consultar sua assinatura e ver os planos disponíveis, envie: */assinatura*\n\n📌 Leia as regras do grupo e, se precisar de ajuda, fale com o administrador.`,
+          mentions:[participante]
+        });
+      }
+    }catch(e){
+      console.log('⚠️ SAUDAÇÃO CONSULTAVIP:',e.message);
+    }
+  });
+}
 
 async function consultaAssinaturaGateway(){
   const g=String(await getConfig('consulta_assinatura_gateway','mercadopago')).toLowerCase();
