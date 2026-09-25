@@ -9512,6 +9512,83 @@ const consultaFilaInteligente = [];
 let consultaFilaProcessando = false;
 const consultaSocketsComSaudacao = new WeakSet();
 const consultaSaudacoesRecentes = new Map();
+const consultaMenuSessoes = new Map();
+const CONSULTA_MENU_TEMPO_MS = 10 * 60 * 1000;
+
+function consultaMenuChave(grupo,jid){ return `${String(grupo||'')}:${String(jid||'')}`; }
+function consultaMenuSalvar(grupo,jid,dados={}){
+  consultaMenuSessoes.set(consultaMenuChave(grupo,jid),{...dados,expiraEm:Date.now()+CONSULTA_MENU_TEMPO_MS});
+}
+function consultaMenuObter(grupo,jid){
+  const chave=consultaMenuChave(grupo,jid), atual=consultaMenuSessoes.get(chave);
+  if(!atual || Number(atual.expiraEm||0)<Date.now()){ consultaMenuSessoes.delete(chave); return null; }
+  return atual;
+}
+function consultaMenuTexto(jid){
+  const numero=normalizarNumeroWhatsApp(jidToNumber(jid)||String(jid||''))||'cliente';
+  return `🔍 *BEM-VINDO(A) AO CONSULTAVIP*\n\nOlá, @${numero}! Nosso sistema de consultas está disponível 24 horas por dia.\n\nSelecione uma opção:\n\n*1 — Planos e valores*\n*2 — Situação da assinatura*\n*3 — Comandos de consulta*\n*4 — Tutorial de utilização*\n*5 — Atendimento e suporte*\n\nPara continuar, responda somente com o número da opção.`;
+}
+async function consultaMenuAbrir(sock,grupo,jid){
+  consultaMenuSalvar(grupo,jid,{etapa:'MENU'});
+  await sock.sendMessage(grupo,{text:consultaMenuTexto(jid),mentions:jid?[jid]:[]});
+  return true;
+}
+async function consultaMenuExibirPlanos(sock,grupo,jid){
+  const planos=await consultaAssinaturaPlanosAtivos();
+  if(!planos.length){
+    await sock.sendMessage(grupo,{text:'⚠️ Nenhum plano está disponível no momento.\n\nDigite *0* para voltar ao menu.'});
+    consultaMenuSalvar(grupo,jid,{etapa:'PLANOS',planos:[]});
+    return true;
+  }
+  const linhas=[];
+  for(let i=0;i<planos.length;i++){
+    const preco=await consultaAssinaturaPrecoPlano(planos[i]);
+    linhas.push(preco.promo?`*${i+1} — ${planos[i].nome}* (${planos[i].dias} dias) — ${brl(preco.normal)} por *${brl(preco.final)}*`:`*${i+1} — ${planos[i].nome}* (${planos[i].dias} dias) — *${brl(preco.final)}*`);
+  }
+  consultaMenuSalvar(grupo,jid,{etapa:'PLANOS',planos:planos.map(p=>Number(p.id))});
+  await sock.sendMessage(grupo,{text:`💎 *PLANOS E VALORES*\n\n${linhas.join('\n')}\n\nResponda com o número do plano para gerar o PIX.\nDigite *0* para voltar ao menu.`});
+  return true;
+}
+async function consultaMenuExibirComandos(sock,grupo,jid){
+  const comandos=CONSULTA_COMANDOS_VALIDOS.filter(c=>c.nome!=='SENHA').map(c=>`• *${c.nome}:* ${c.exemplo}`);
+  const extras=await all(`SELECT nome_exibicao,comando,exemplo FROM consulta_dhru_comandos WHERE ativo=1 ORDER BY id`).catch(()=>[]);
+  for(const c of extras){
+    const exemplo=String(c.exemplo||'').trim()||`${c.comando} DADO`;
+    comandos.push(`• *${c.nome_exibicao||c.comando}:* ${exemplo}`);
+  }
+  await sock.sendMessage(grupo,{text:`🔎 *COMANDOS DE CONSULTA*\n\n${comandos.join('\n')}\n\nDigite */menu* para abrir o menu novamente.`,mentions:jid?[jid]:[]});
+  consultaMenuSalvar(grupo,jid,{etapa:'MENU'});
+  return true;
+}
+async function consultaMenuTratarResposta({sock,grupo,jid,nome,cmd}){
+  if(/^\/menu(?:\s|$)/i.test(cmd)) return await consultaMenuAbrir(sock,grupo,jid);
+  const sessao=consultaMenuObter(grupo,jid);
+  if(!sessao) return false;
+  if(cmd==='0') return await consultaMenuAbrir(sock,grupo,jid);
+  if(sessao.etapa==='PLANOS'){
+    if(!/^\d+$/.test(cmd)) return false;
+    const posicao=Number(cmd)-1, planoId=Array.isArray(sessao.planos)?sessao.planos[posicao]:null;
+    if(!planoId){ await sock.sendMessage(grupo,{text:'⚠️ Opção inválida. Escolha um dos planos exibidos ou digite *0* para voltar.'}); return true; }
+    const plano=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[planoId]);
+    if(!plano){ await sock.sendMessage(grupo,{text:'⚠️ Esse plano não está mais disponível. Digite *1* no menu para atualizar a lista.'}); return await consultaMenuAbrir(sock,grupo,jid); }
+    consultaMenuSessoes.delete(consultaMenuChave(grupo,jid));
+    return await consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano);
+  }
+  if(!/^[1-5]$/.test(cmd)){
+    if(!/^[/.]/.test(cmd)){ await sock.sendMessage(grupo,{text:'⚠️ Para usar o menu, responda somente com um número de *1 a 5*.\nDigite */menu* para visualizar as opções novamente.'}); return true; }
+    return false;
+  }
+  if(cmd==='1') return await consultaMenuExibirPlanos(sock,grupo,jid);
+  if(cmd==='2'){ await consultaAssinaturaEnviarStatus(sock,grupo,jid,nome); consultaMenuSalvar(grupo,jid,{etapa:'MENU'}); return true; }
+  if(cmd==='3') return await consultaMenuExibirComandos(sock,grupo,jid);
+  if(cmd==='4'){
+    try{ await consultaEnviarTutorial(sock,grupo,jid); }catch(e){ console.log('❌ MENU TUTORIAL PDF:',e.message); await sock.sendMessage(grupo,{text:'⚠️ Não foi possível gerar o tutorial agora. Tente novamente em instantes.'}); }
+    consultaMenuSalvar(grupo,jid,{etapa:'MENU'}); return true;
+  }
+  const suporte=String(await getConfig('telegram_suporte','')||'').trim().replace(/^https?:\/\/t\.me\//i,'').replace(/^@/,'');
+  await sock.sendMessage(grupo,{text:suporte?`🆘 *ATENDIMENTO E SUPORTE*\n\nFale com nosso atendimento:\nhttps://t.me/${suporte}\n\nDigite */menu* para voltar ao menu principal.`:'🆘 *ATENDIMENTO E SUPORTE*\n\nEntre em contato com o administrador do grupo.\n\nDigite */menu* para voltar ao menu principal.'});
+  consultaMenuSalvar(grupo,jid,{etapa:'MENU'}); return true;
+}
 
 function registrarSaudacaoEntradaGrupoConsultas(socketAtual,sessao=null){
   if(!socketAtual?.ev || consultaSocketsComSaudacao.has(socketAtual)) return;
@@ -9536,10 +9613,7 @@ function registrarSaudacaoEntradaGrupoConsultas(socketAtual,sessao=null){
         if(agora-ultima<60000) continue;
         consultaSaudacoesRecentes.set(chave,agora);
         setTimeout(()=>consultaSaudacoesRecentes.delete(chave),65000);
-        await socketAtual.sendMessage(grupoEvento,{
-          text:`👋 Olá, @${idVisivel}! Seja bem-vindo(a) ao *ConsultaVIP*! 🔍\n\nAqui você encontra consultas rápidas e automatizadas, disponíveis 24 horas por dia.\n\n💎 Para consultar sua assinatura e ver os planos disponíveis, envie: */assinatura*\n\n📌 Leia as regras do grupo e, se precisar de ajuda, fale com o administrador.`,
-          mentions:[participante]
-        });
+        await consultaMenuAbrir(socketAtual,grupoEvento,participante);
       }
     }catch(e){
       console.log('⚠️ SAUDAÇÃO CONSULTAVIP:',e.message);
@@ -9747,6 +9821,7 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   const cmd=String(texto||'').trim(); if(!cmd) return true;
   const nomeCliente=msg?.pushName||'Cliente';
   if(!consultaAssinaturaSpamOk(participante,cmd)){ await socketAtual.sendMessage(grupo,{text:'⚠️ Aguarde um instante antes de repetir o mesmo comando.'}); return true; }
+  if(await consultaMenuTratarResposta({sock:socketAtual,grupo,jid:participante,nome:nomeCliente,cmd})) return true;
   if(/^\/assinatura(?:\s|$)/i.test(cmd)){ await consultaAssinaturaEnviarStatus(socketAtual,grupo,participante,nomeCliente); return true; }
   if(/^\/assinar(?:\s|$)/i.test(cmd)){
     const termo=String(cmd.replace(/^\/assinar\s*/i,'')).trim(); if(!termo){ await socketAtual.sendMessage(grupo,{text:'⚠️ Informe o plano. Exemplo: /assinar 30'}); return true; }
