@@ -1675,6 +1675,7 @@ async function initDB() {
 
   await addColumnIfMissing('whatsapp_sessoes', 'auto_ativar_clientes_grupo', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('whatsapp_sessoes', 'grupos_ativacao_json', "TEXT DEFAULT '[]'");
+  await addColumnIfMissing('whatsapp_sessoes', 'funcao_consultas', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('revendas', 'ativado_por', "TEXT DEFAULT ''");
   await addColumnIfMissing('revendas', 'ativado_grupo_id', "TEXT DEFAULT ''");
   await addColumnIfMissing('revendas', 'ativado_grupo_nome', "TEXT DEFAULT ''");
@@ -7654,6 +7655,7 @@ function criarRuntimeSessaoWhatsApp(row) {
   base.funcaoBot = normalizarFuncaoCheckbox(row.funcao_bot);
   base.funcaoGrupos = normalizarFuncaoCheckbox(row.funcao_grupos);
   base.funcaoStatus = normalizarFuncaoCheckbox(row.funcao_status);
+  base.funcaoConsultas = normalizarFuncaoCheckbox(row.funcao_consultas);
   base.autoAtivarClientesGrupo = normalizarFuncaoCheckbox(row.auto_ativar_clientes_grupo);
   try { base.gruposAtivacao = JSON.parse(row.grupos_ativacao_json || '[]'); } catch (_) { base.gruposAtivacao = []; }
   if (!Array.isArray(base.gruposAtivacao)) base.gruposAtivacao = [];
@@ -7699,7 +7701,7 @@ function emitirStatusSessaoMulti(sessao) {
   io.emit('whatsapp-multi-status', {
     id: sessao.id, status: sessao.status, numero: sessao.numero || '', erro: sessao.erro || '',
     conectado: !!sessao.conectado, qr: !!sessao.qr,
-    funcoes: { bot: !!sessao.funcaoBot, grupos: !!sessao.funcaoGrupos, status: !!sessao.funcaoStatus }
+    funcoes: { bot: !!sessao.funcaoBot, grupos: !!sessao.funcaoGrupos, status: !!sessao.funcaoStatus, consultas: !!sessao.funcaoConsultas }
   });
 }
 
@@ -7884,7 +7886,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
       } catch (e) { sessao.status = 'ERRO'; sessao.erro = e.message; emitirStatusSessaoMulti(sessao); }
     });
 
-    registrarSaudacaoEntradaGrupoConsultas(socketAtual);
+    registrarSaudacaoEntradaGrupoConsultas(socketAtual, sessao);
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       // V96: mensagens FROMME sincronizadas do celular podem chegar como append,
@@ -7896,7 +7898,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
           if (jidPrincipal.endsWith('@g.us')) {
             const textoGrupo = textoMensagemBaileys(msg?.message || {});
-            if (await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
+            if (sessao.funcaoConsultas && await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
             continue;
           }
 
@@ -7936,6 +7938,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
 function descricaoFuncoesSessao(sessao) {
   const f=[];
   if (sessao.funcaoBot) f.push('Bot de Serviços');
+  if (sessao.funcaoConsultas) f.push('Grupo ConsultaVIP');
   if (sessao.funcaoGrupos) f.push('Anúncios em Grupos');
   if (sessao.funcaoStatus) f.push('Anúncios no Status');
   return f.join(' + ') || 'Sem função';
@@ -7948,6 +7951,14 @@ async function obterSessaoBotConectada() {
 async function obterSessaoGruposConectada() {
   if (!whatsappSessoesCarregadas) { try { await carregarSessoesWhatsApp(); } catch (_) {} }
   return Array.from(whatsappSessoes.values()).find(s => s.ativo && s.funcaoGrupos && s.conectado && s.socket) || null;
+}
+async function obterSessaoConsultasConectada() {
+  if (!whatsappSessoesCarregadas) { try { await carregarSessoesWhatsApp(); } catch (_) {} }
+  return Array.from(whatsappSessoes.values()).find(s => s.ativo && s.funcaoConsultas && s.conectado && s.socket) || null;
+}
+async function haSessaoConsultasConfigurada() {
+  const row = await get('SELECT id FROM whatsapp_sessoes WHERE ativo=1 AND funcao_consultas=1 LIMIT 1');
+  return !!row;
 }
 async function obterSessoesStatusConectadas() {
   if (!whatsappSessoesCarregadas) { try { await carregarSessoesWhatsApp(); } catch (_) {} }
@@ -8436,7 +8447,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     });
 
 
-    registrarSaudacaoEntradaGrupoConsultas(socketAtual);
+    registrarSaudacaoEntradaGrupoConsultas(socketAtual, null);
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
@@ -8448,7 +8459,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
           if (jidPrincipal.endsWith('@g.us')) {
             const textoGrupo = textoMensagemBaileys(msg?.message || {});
-            if (await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
+            if (!(await haSessaoConsultasConfigurada()) && await consultaReceberWhatsAppGrupo({ socketAtual, msg, texto: textoGrupo })) continue;
             continue;
           }
 
@@ -8530,8 +8541,12 @@ function consultaSegredoMask(t){ t=String(t||''); return t ? `${'•'.repeat(10)
 async function consultaObterSocketWhatsApp(grupo=''){
   const candidatos=[];
   if(consultaEmMemoria?.socket) candidatos.push(consultaEmMemoria.socket);
-  if(whatsappSocket) candidatos.push(whatsappSocket);
-  try{ for(const x of whatsappSessoes.values()) if(x?.conectado&&x?.socket) candidatos.push(x.socket); }catch(_){}
+  const dedicada=await obterSessaoConsultasConectada();
+  if(dedicada?.socket) candidatos.push(dedicada.socket);
+  if(!(await haSessaoConsultasConfigurada())){
+    if(whatsappSocket) candidatos.push(whatsappSocket);
+    try{ for(const x of whatsappSessoes.values()) if(x?.conectado&&x?.socket) candidatos.push(x.socket); }catch(_){}
+  }
   const unicos=[...new Set(candidatos.filter(Boolean))];
   if(!grupo) return unicos[0]||null;
   for(const sock of unicos){ try{ await sock.groupMetadata(grupo); return sock; }catch(_){} }
@@ -9498,12 +9513,14 @@ let consultaFilaProcessando = false;
 const consultaSocketsComSaudacao = new WeakSet();
 const consultaSaudacoesRecentes = new Map();
 
-function registrarSaudacaoEntradaGrupoConsultas(socketAtual){
+function registrarSaudacaoEntradaGrupoConsultas(socketAtual,sessao=null){
   if(!socketAtual?.ev || consultaSocketsComSaudacao.has(socketAtual)) return;
   consultaSocketsComSaudacao.add(socketAtual);
   socketAtual.ev.on('group-participants.update',async atualizacao=>{
     try{
       if(String(atualizacao?.action||'').toLowerCase()!=='add') return;
+      if(sessao){ if(!sessao.funcaoConsultas) return; }
+      else if(await haSessaoConsultasConfigurada()) return;
       const grupoConfigurado=String(await getConfig('consulta_wa_grupo','')||'').trim();
       const grupoEvento=String(atualizacao?.id||'').trim();
       if(!grupoConfigurado || grupoEvento!==grupoConfigurado) return;
@@ -11993,6 +12010,7 @@ app.get('/admin/whatsapp', async (req, res) => {
     const status = sessao.conectado ? '🟢 CONECTADO' : sessao.status === 'AGUARDANDO_QR' ? '🟡 AGUARDANDO QR CODE' : sessao.status === 'REGERANDO_QR' ? '🟠 GERANDO NOVO QR CODE' : `🔴 ${safeHtml(sessao.status || 'DESCONECTADO')}`;
     const funcoes = [
       sessao.funcaoBot ? '<span class="pill">🤖 Bot de Serviços</span>' : '',
+      sessao.funcaoConsultas ? '<span class="pill">🔍 Grupo ConsultaVIP</span>' : '',
       sessao.funcaoGrupos ? '<span class="pill">📢 Anúncios em Grupos</span>' : '',
       sessao.funcaoStatus ? '<span class="pill">🟢 Anúncios no Status</span>' : ''
     ].filter(Boolean).join(' ');
@@ -12001,23 +12019,23 @@ app.get('/admin/whatsapp', async (req, res) => {
 
   const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(x.status || '')));
   const autoRefresh = emConexao ? `<script>setTimeout(()=>{if(!document.hidden)location.reload()},8000)</script>` : '';
-  res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Um mesmo número pode ter uma, duas ou as três funções. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
+  res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>🔍 <b>Grupo ConsultaVIP</b> — assinaturas, comandos, consultas e saudações do grupo.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. As demais funções podem ser combinadas. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
 });
 
 app.get('/admin/whatsapp/adicionar', async (req, res) => {
-  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Você pode marcar uma, duas ou as três opções. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
+  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1"> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
 });
 
 app.post('/admin/whatsapp/adicionar', async (req, res) => {
   const nome = String(req.body.nome || '').trim().slice(0,80);
-  const bot = req.body.funcao_bot ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
-  if (!nome || (!bot && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="/admin/whatsapp/adicionar">Voltar</a>'));
+  const bot = req.body.funcao_bot ? 1 : 0, consultas = req.body.funcao_consultas ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
+  if (!nome || (!bot && !consultas && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="/admin/whatsapp/adicionar">Voltar</a>'));
   const key = `wa-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   const dir = pastaCanonicaSessaoWhatsApp(key);
   fs.mkdirSync(dir, { recursive: true });
-  const r = await run(`INSERT INTO whatsapp_sessoes (nome,session_key,session_dir,funcao_bot,funcao_grupos,funcao_status,ativo) VALUES (?,?,?,?,?,?,1)`, [nome,key,dir,bot,grupos,status]);
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [r.lastID]);
-  criarRuntimeSessaoWhatsApp(row);
+  if (consultas) await run('UPDATE whatsapp_sessoes SET funcao_consultas=0, atualizado_em=CURRENT_TIMESTAMP WHERE funcao_consultas=1');
+  const r = await run(`INSERT INTO whatsapp_sessoes (nome,session_key,session_dir,funcao_bot,funcao_consultas,funcao_grupos,funcao_status,ativo) VALUES (?,?,?,?,?,?,?,1)`, [nome,key,dir,bot,consultas,grupos,status]);
+  await carregarSessoesWhatsApp();
   res.redirect(`/admin/whatsapp/${r.lastID}/editar?novo=1`);
 });
 
@@ -12059,20 +12077,20 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1" ${sessao.funcaoConsultas?'checked':''}> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Ao marcar Grupo ConsultaVIP, esta sessão substitui automaticamente qualquer outra que esteja nessa função.</p>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
   const id = Number(req.params.id);
   const nome = String(req.body.nome || '').trim().slice(0,80);
-  const bot = req.body.funcao_bot ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
+  const bot = req.body.funcao_bot ? 1 : 0, consultas = req.body.funcao_consultas ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
   const autoAtivar = bot && req.body.auto_ativar_clientes_grupo ? 1 : 0;
   const gruposBody = req.body.grupos_ativacao == null ? [] : (Array.isArray(req.body.grupos_ativacao) ? req.body.grupos_ativacao : [req.body.grupos_ativacao]);
   const gruposAtivacao = [...new Set(gruposBody.map(x => String(x || '').trim()).filter(x => x.endsWith('@g.us')))];
-  if (!nome || (!bot && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="javascript:history.back()">Voltar</a>'));
-  await run('UPDATE whatsapp_sessoes SET nome=?,funcao_bot=?,funcao_grupos=?,funcao_status=?,auto_ativar_clientes_grupo=?,grupos_ativacao_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome,bot,grupos,status,autoAtivar,JSON.stringify(gruposAtivacao),id]);
-  const row = await get('SELECT * FROM whatsapp_sessoes WHERE id=?', [id]);
-  if (row) criarRuntimeSessaoWhatsApp(row);
+  if (!nome || (!bot && !consultas && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="javascript:history.back()">Voltar</a>'));
+  if (consultas) await run('UPDATE whatsapp_sessoes SET funcao_consultas=0, atualizado_em=CURRENT_TIMESTAMP WHERE id<>? AND funcao_consultas=1', [id]);
+  await run('UPDATE whatsapp_sessoes SET nome=?,funcao_bot=?,funcao_consultas=?,funcao_grupos=?,funcao_status=?,auto_ativar_clientes_grupo=?,grupos_ativacao_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome,bot,consultas,grupos,status,autoAtivar,JSON.stringify(gruposAtivacao),id]);
+  await carregarSessoesWhatsApp();
   res.redirect(`/admin/whatsapp/${id}/editar`);
 });
 
