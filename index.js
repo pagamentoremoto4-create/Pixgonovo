@@ -1858,6 +1858,12 @@ async function initDB() {
   await addColumnIfMissing('pedidos', 'bloqueio_assumido_em', 'TEXT');
   await addColumnIfMissing('pedidos', 'bloqueio_atualizado_em', 'TEXT');
   await addColumnIfMissing('pedidos', 'bloqueio_finalizado_por', 'TEXT');
+  // Campos opcionais de uso interno em pedidos de IMEI; não são enviados ao cliente.
+  await addColumnIfMissing('pedidos', 'interno_nome', 'TEXT');
+  await addColumnIfMissing('pedidos', 'interno_cpf', 'TEXT');
+  await addColumnIfMissing('pedidos', 'interno_protocolo', 'TEXT');
+  await addColumnIfMissing('pedidos', 'interno_linha_acesso', 'TEXT');
+  await addColumnIfMissing('pedidos', 'interno_observacao', 'TEXT');
 
   await run(`CREATE TABLE IF NOT EXISTS operadores_bloqueio_tim (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2438,7 +2444,7 @@ function normalizarNomeServico(v) {
 function operadorPage(title, body, operador=null) {
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title><style>
   *{box-sizing:border-box}body{margin:0;background:#030807;color:#e8f5ec;font-family:Arial,Helvetica,sans-serif}.wrap{max-width:1180px;margin:auto;padding:18px}.head{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 0 20px;border-bottom:1px solid #123220}.brand{font-weight:900;color:#39ff14;letter-spacing:.5px}.card{background:#07110b;border:1px solid #173c23;border-radius:14px;padding:16px;margin:14px 0;box-shadow:0 8px 30px rgba(0,0,0,.35)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.pedido{background:#050b07;border:1px solid #15311e;border-radius:12px;padding:15px}.pedido h3{margin:0 0 8px}.muted{color:#91a79a}.pill{display:inline-block;padding:6px 9px;border:1px solid #285a37;border-radius:999px;background:#0b1a10;font-weight:800}.btn{display:inline-block;border:0;border-radius:10px;padding:10px 12px;font-weight:900;cursor:pointer;text-decoration:none;margin:3px;background:#183522;color:#fff}.btn.green{background:#39ff14;color:#031006}.btn.orange{background:#f59e0b;color:#1b1200}.btn.blue{background:#2563eb;color:#fff}.btn.red{background:#7f1d1d}.btn.gray{background:#1f2937}.btn:disabled{opacity:.4;cursor:not-allowed}form.inline{display:inline}input{width:100%;padding:12px;border-radius:10px;border:1px solid #244c30;background:#020604;color:#fff;margin:6px 0 12px}label{font-weight:800}.msg{padding:12px;border-radius:10px;background:#0b1a10;border:1px solid #285a37;margin:12px 0}.warn{border-color:#7c5b12;background:#171206}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}@media(max-width:680px){.head{align-items:flex-start;flex-direction:column}.btn{width:100%;text-align:center}form.inline{display:block;width:100%}.actions{display:block}.actions form{margin:6px 0}}
-  </style>${operador?'<script src="/socket.io/socket.io.js"></script>':''}</head><body><div class="wrap"><div class="head"><div><div class="brand">CENTRALUNLOCKER</div><small class="muted">Painel exclusivo — Bloqueio TIM</small></div>${operador?`<div><b>👤 ${safeHtml(operador.nome)}</b> &nbsp; <a class="btn gray" href="/bloqueio-tim/logout">Sair</a></div>`:''}</div>${body}</div>${operador?`<script>(function(){let enviando=false,timer=null;document.addEventListener('submit',function(){enviando=true;});const socket=io();socket.on('bloqueio-tim-update',function(){if(enviando)return;clearTimeout(timer);timer=setTimeout(function(){location.reload();},250);});})();</script>`:''}</body></html>`;
+  </style>${operador?'<script src="/socket.io/socket.io.js"></script>':''}</head><body><div class="wrap"><div class="head"><div><div class="brand">CENTRALUNLOCKER</div><small class="muted">Painel exclusivo — Bloqueio TIM</small></div>${operador?`<div><b>👤 ${safeHtml(operador.nome)}</b> &nbsp; <a class="btn gray" href="/bloqueio-tim/logout">Sair</a></div>`:''}</div>${body}</div>${operador?`<script>(function(){let enviando=false,editando=false,timer=null;document.addEventListener('submit',function(){enviando=true;});document.addEventListener('input',function(e){if(e.target.closest('#imei-interno-form'))editando=true;});const socket=io();socket.on('bloqueio-tim-update',function(){if(enviando||editando)return;clearTimeout(timer);timer=setTimeout(function(){location.reload();},250);});})();</script>`:''}</body></html>`;
 }
 
 
@@ -9562,7 +9568,10 @@ async function consultaMenuExibirComandos(sock,grupo,jid){
 }
 async function consultaMenuTratarResposta({sock,grupo,jid,nome,cmd}){
   if(/^\/menu(?:\s|$)/i.test(cmd)) return await consultaMenuAbrir(sock,grupo,jid);
-  const sessao=consultaMenuObter(grupo,jid);
+  // O WhatsApp pode identificar a mesma pessoa por telefone ou por LID.
+  // Por isso, as opções principais também funcionam sem depender da sessão em memória.
+  // Isso mantém o menu operante após reconexões e reinícios do servidor.
+  const sessao=consultaMenuObter(grupo,jid) || (/^[1-5]$/.test(cmd)?{etapa:'MENU'}:null);
   if(!sessao) return false;
   if(cmd==='0') return await consultaMenuAbrir(sock,grupo,jid);
   if(sessao.etapa==='PLANOS'){
@@ -9890,6 +9899,9 @@ function consultaLoginStatus(){
   if(consultaTelegramLogin?.fase) return consultaTelegramLogin.fase;
   return 'DESCONECTADO';
 }
+
+// Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
+app.use('/admin', basicAuth);
 
 app.get('/admin/consultavip',async(req,res)=>{
   const token=await consultavipTokenSalvo(),username=await getConfig('consultavip_bot_username',''),auto=(await getConfig('consultavip_bot_auto','0'))==='1';
@@ -10434,11 +10446,50 @@ function isPedidoEsimManual(o) {
     !['FINALIZADO', 'CANCELADO'].includes(status)
   );
 }
+function pedidoTemEntradaImei(p) {
+  return normalizarTipoEntrada(p?.tipo_entrada) === 'IMEI';
+}
+async function pedidoImeiInterno(id) {
+  if (!/^\d+$/.test(String(id))) return null;
+  const p = await get('SELECT p.*, s.nome AS nome_catalogo FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?', [Number(id)]);
+  return p && pedidoTemEntradaImei(p) ? p : null;
+}
+const CAMPOS_INTERNOS_IMEI = [
+  ['Nome', 'interno_nome', 'nome', 120],
+  ['CPF', 'interno_cpf', 'cpf', 14],
+  ['Protocolo', 'interno_protocolo', 'protocolo', 80],
+  ['Linha de acesso', 'interno_linha_acesso', 'linha_acesso', 80],
+  ['Observação interna', 'interno_observacao', 'observacao', 2000]
+];
+function formularioInternoImei(p, base) {
+  const campos = CAMPOS_INTERNOS_IMEI.map(([titulo, coluna, nome, limite]) => {
+    const valor = safeHtml(p[coluna] || '');
+    return nome === 'observacao'
+      ? `<div><label for="imei-${nome}">${titulo}</label><textarea id="imei-${nome}" name="${nome}" maxlength="${limite}" rows="4" style="width:100%">${valor}</textarea></div>`
+      : `<div><label for="imei-${nome}">${titulo}</label><input id="imei-${nome}" name="${nome}" value="${valor}" maxlength="${limite}" autocomplete="off"></div>`;
+  }).join('');
+  return `<div class="card"><h2>🔒 Dados internos do pedido #${p.id}</h2><p>Serviço: <b>${safeHtml(p.servico_nome || p.nome_catalogo || '-')}</b> · IMEI: <b>${safeHtml(p.entrada_valor || p.imei || '-')}</b> · Status: <b>${safeHtml(p.status)}</b></p><p class="muted">Campos opcionais. Apenas a equipe tem acesso. Você pode salvar ou alterar mesmo após finalizar o serviço.</p><form id="imei-interno-form" method="post" action="${base}/salvar"><div class="form-grid">${campos}</div><div class="actions"><button class="btn green" type="submit">💾 Salvar dados internos</button><a class="btn" href="${base}/baixar">⬇️ Baixar informações em TXT</a></div></form><p class="muted">O arquivo contém as informações já salvas neste pedido.</p></div>`;
+}
+async function salvarInternoImei(req, res, p, volta) {
+  const valores = CAMPOS_INTERNOS_IMEI.map(([, , nome, limite]) =>
+    (typeof req.body?.[nome] === 'string' ? req.body[nome] : '').trim().slice(0, limite));
+  await run(`UPDATE pedidos SET interno_nome=?, interno_cpf=?, interno_protocolo=?, interno_linha_acesso=?, interno_observacao=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [...valores, p.id]);
+  res.redirect(volta);
+}
+function baixarInternoImei(res, p) {
+  const preenchidos = CAMPOS_INTERNOS_IMEI.map(([titulo, coluna]) => [titulo, String(p[coluna] || '').trim()]).filter(([, valor]) => valor);
+  if (!preenchidos.length) return res.status(400).send('Preencha e salve pelo menos um dado interno antes de baixar.');
+  const linhas = [`Pedido #${p.id}`, `Serviço: ${p.servico_nome || p.nome_catalogo || '-'}`, `IMEI: ${p.entrada_valor || p.imei || '-'}`, `Status: ${p.status || '-'}`, '', 'DADOS INTERNOS', ...preenchidos.map(([titulo, valor]) => `${titulo}: ${valor}`), ''];
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="pedido-${p.id}-imei.txt"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  return res.send('\uFEFF' + linhas.join('\n'));
+}
 function pedidoActions(o, back = '/admin/pedidos') {
   const botaoQr = isPedidoEsimManual(o)
     ? `<a class="btn purple" href="/admin/pedido/${o.id}/entregar-esim">📤 Enviar QR Code</a>`
     : '';
-  return `${botaoQr}
+  return `${pedidoTemEntradaImei(o) ? `<a class="btn" href="/admin/pedido/${o.id}/dados-internos">🔒 Dados internos</a>` : ''}${botaoQr}
   <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao">
     <select name="acao" required>
       <option value="">Escolher ação</option>
@@ -10475,6 +10526,22 @@ app.get('/admin/pedidos', async (req, res) => {
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
   <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, Telegram ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
   res.send(page('Pedidos', html));
+});
+app.get('/admin/pedido/:id/dados-internos', async (req, res) => {
+  const p = await pedidoImeiInterno(req.params.id);
+  if (!p) return res.status(404).send('Pedido de IMEI não encontrado.');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(page('Dados internos do pedido', `<h1>🔒 Pedido #${p.id}</h1>${req.query.ok ? '<div class="card">✅ Dados internos salvos.</div>' : ''}${formularioInternoImei(p, `/admin/pedido/${p.id}/dados-internos`)}<a class="btn gray" href="/admin/servico/${p.servico_id}/imeis">← Voltar aos pedidos</a>`));
+});
+app.post('/admin/pedido/:id/dados-internos/salvar', async (req, res) => {
+  const p = await pedidoImeiInterno(req.params.id);
+  if (!p) return res.status(404).send('Pedido de IMEI não encontrado.');
+  return salvarInternoImei(req, res, p, `/admin/pedido/${p.id}/dados-internos?ok=1`);
+});
+app.get('/admin/pedido/:id/dados-internos/baixar', async (req, res) => {
+  const p = await pedidoImeiInterno(req.params.id);
+  if (!p) return res.status(404).send('Pedido de IMEI não encontrado.');
+  return baixarInternoImei(res, p);
 });
 app.post('/admin/pedido/:id/acao', async (req, res) => {
   const acao = String(req.body.acao || '').toLowerCase();
@@ -11663,7 +11730,7 @@ app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
         : `<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/aguardando"><button class="btn orange">⏳ AGUARDANDO BLOQUEIO</button></form>`;
       botoes=`${botaoRealizando}${botaoFila}<form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/realizado"><input type="hidden" name="aba" value="${aba}"><button class="btn green" onclick="return confirm('Confirma que este bloqueio foi realizado?')">✅ BLOQUEIO REALIZADO</button></form><form class="inline" method="post" action="/bloqueio-tim/pedido/${p.id}/cancelar" onsubmit="var m=prompt('Qual o motivo do cancelamento deste IMEI?');if(m===null)return false;m=m.trim();if(!m){alert('Digite o motivo do cancelamento.');return false;}this.elements.motivo.value=m;return confirm('Confirma o cancelamento deste pedido?');"><input type="hidden" name="motivo" value=""><input type="hidden" name="aba" value="${aba}"><button class="btn red">❌ CANCELAR</button></form>`;
     }
-    cards+=`<div class="pedido"><h3>📱 ${safeHtml(p.entrada_valor||p.imei||'-')}</h3><div><span class="pill">${estado}</span></div><p style="font-size:18px;font-weight:700;margin:10px 0">💰 Valor: ${safeHtml(brl(Number(p.valor||0)))}</p><p class="muted">Pedido #${p.id} · Cliente: ${safeHtml(p.revenda_nome||p.cliente_nome||'-')} · ${safeHtml(dateBR(p.enviado_em||p.criado_em))}</p>${dono?`<p class="muted">Operador: <b>${safeHtml(p.bloqueio_operador_nome||'-')}</b>${p.bloqueio_assumido_em?' · desde '+safeHtml(dateBR(p.bloqueio_assumido_em)):''}</p>`:''}${lock}<div class="actions">${botoes}</div></div>`;
+    cards+=`<div class="pedido"><h3>📱 ${safeHtml(p.entrada_valor||p.imei||'-')}</h3><div><span class="pill">${estado}</span></div><p style="font-size:18px;font-weight:700;margin:10px 0">💰 Valor: ${safeHtml(brl(Number(p.valor||0)))}</p><p class="muted">Pedido #${p.id} · Cliente: ${safeHtml(p.revenda_nome||p.cliente_nome||'-')} · ${safeHtml(dateBR(p.enviado_em||p.criado_em))}</p>${dono?`<p class="muted">Operador: <b>${safeHtml(p.bloqueio_operador_nome||'-')}</b>${p.bloqueio_assumido_em?' · desde '+safeHtml(dateBR(p.bloqueio_assumido_em)):''}</p>`:''}${lock}<div class="actions">${!outro?`<a class="btn blue" href="/bloqueio-tim/pedido/${p.id}/dados-internos">🔒 Dados internos</a>`:''}${botoes}</div></div>`;
   }
   const msg=req.query.msg?`<div class="msg">${safeHtml(req.query.msg)}</div>`:'';
   const tabs=`<div class="card" style="padding:10px"><a class="btn ${aba==='principal'?'green':'gray'}" href="/bloqueio-tim?aba=principal">📋 PRINCIPAL (${Number(contPrincipal?.qtd||0)})</a><a class="btn ${aba==='aguardando'?'orange':'gray'}" href="/bloqueio-tim?aba=aguardando">⏳ AGUARDANDO BLOQUEIO (${Number(contAguardando?.qtd||0)})</a></div>`;
@@ -11672,6 +11739,26 @@ app.get('/bloqueio-tim', operadorBloqueioAuth, async (req,res)=>{
 });
 
 async function pedidoBloqueioTim(id){return get(`SELECT p.*,s.nome AS nome_catalogo FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[id]);}
+async function pedidoImeiDoOperador(req, res) {
+  const p = await pedidoImeiInterno(req.params.id);
+  if (!p || normalizarNomeServico(p.nome_catalogo) !== 'bloqueio tim') { res.status(404).send('Pedido de Bloqueio TIM não encontrado.'); return null; }
+  if (['FINALIZADO', 'CANCELADO'].includes(String(p.status || '').toUpperCase()) && !Number(p.bloqueio_operador_id || 0)) { res.status(403).send('Este pedido não está atribuído ao operador.'); return null; }
+  if (Number(p.bloqueio_operador_id || 0) && Number(p.bloqueio_operador_id) !== Number(req.operadorBloqueio.id)) { res.status(403).send('Este pedido está atribuído a outro operador.'); return null; }
+  return p;
+}
+app.get('/bloqueio-tim/pedido/:id/dados-internos', operadorBloqueioAuth, async (req, res) => {
+  const p = await pedidoImeiDoOperador(req, res); if (!p) return;
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.send(operadorPage('Dados internos do pedido', `${req.query.ok ? '<div class="msg">✅ Dados internos salvos.</div>' : ''}${formularioInternoImei(p, `/bloqueio-tim/pedido/${p.id}/dados-internos`)}<a class="btn gray" href="/bloqueio-tim">← Voltar à fila</a>`, req.operadorBloqueio));
+});
+app.post('/bloqueio-tim/pedido/:id/dados-internos/salvar', operadorBloqueioAuth, async (req, res) => {
+  const p = await pedidoImeiDoOperador(req, res); if (!p) return;
+  return salvarInternoImei(req, res, p, `/bloqueio-tim/pedido/${p.id}/dados-internos?ok=1`);
+});
+app.get('/bloqueio-tim/pedido/:id/dados-internos/baixar', operadorBloqueioAuth, async (req, res) => {
+  const p = await pedidoImeiDoOperador(req, res); if (!p) return;
+  return baixarInternoImei(res, p);
+});
 function redirectBloqueioTim(res,msg='',aba=''){const a=aba==='aguardando'?'aguardando':'principal';res.redirect('/bloqueio-tim?aba='+a+(msg?'&msg='+encodeURIComponent(msg):''));}
 app.post('/bloqueio-tim/pedido/:id/realizando', operadorBloqueioAuth, async (req,res)=>{
   const p=await pedidoBloqueioTim(req.params.id); if(!p||normalizarNomeServico(p.nome_catalogo)!=='bloqueio tim') return redirectBloqueioTim(res,'Pedido inválido.');
@@ -12433,26 +12520,19 @@ app.post('/admin/dhru/produtos/lote',async(req,res)=>{try{let ids=req.body.ids||
 app.post('/api/dhru/feedback',async(req,res)=>{try{const sec=String(req.query.secret||'');if(!sec||sec!==(await dhruCallbackSecret()))return res.status(403).json({ok:false});const r=await processarFeedbackDhru(req.body||{});res.json({ok:true,...r});}catch(e){console.log('❌ DHRU feedback:',e.message);res.status(400).json({ok:false,error:e.message});}});
 
 app.get('/admin/config', async (req, res) => {
-  const suporteTelegram = await getTelegramSuporte();
+  try {
+  const suporteTelegram = String(await getConfig('telegram_suporte', '') || '').trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '');
   const temasHtml = temasPainelHtml();
-  const iaCfg = await configuracaoIAWhatsApp();
-  const iaCard = `<div class="card"><h2>🤖 IA do Bot de Serviços</h2><p class="muted">A IA responde somente perguntas livres no Bot de Serviços e consulta automaticamente produtos, preços, categorias, estoque e campanhas ativas no banco. PIX, pedidos e menus continuam no fluxo normal.</p><p><b>Chave API:</b> ${process.env.OPENAI_API_KEY ? 'Configurada ✅' : 'Não configurada ❌'}</p><form method="post" action="/admin/config/ia"><label>Status</label><select name="ia_ativa"><option value="1" ${iaCfg.ativa?'selected':''}>Ativada</option><option value="0" ${!iaCfg.ativa?'selected':''}>Desativada</option></select><label>Modelo</label><input name="ia_modelo" value="${safeHtml(iaCfg.modelo)}"><label>Máximo de tokens por resposta</label><input type="number" min="200" max="1500" name="ia_max_tokens" value="${iaCfg.maxTokens}"><label>Instruções da atendente</label><textarea name="ia_instrucao" rows="12">${safeHtml(iaCfg.instrucao)}</textarea><button class="btn green">Salvar IA</button></form><p class="mini-help">No Render, adicione OPENAI_API_KEY. Nunca coloque a chave diretamente no código.</p></div>`;
-  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid">${iaCard}<div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Aparência do painel</h2><p class="muted">Temas completos, pré-visualização e intensidade da foto de fundo.</p><p><a class="btn green" href="/admin/temas">Abrir Temas do Painel</a></p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional. Os 5 temas já possuem banner exclusivo automático; use esta opção somente se quiser substituir manualmente a imagem auxiliar do painel.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
-});
-app.post('/admin/config/ia', async (req, res) => {
-  await setConfig('ia_ativa', String(req.body.ia_ativa || '0') === '1' ? '1' : '0');
-  await setConfig('ia_modelo', String(req.body.ia_modelo || 'gpt-5-mini').trim().slice(0, 80));
-  await setConfig('ia_max_tokens', String(Math.max(200, Math.min(1500, Number(req.body.ia_max_tokens || 300)))));
-  const instrucao = String(req.body.ia_instrucao || IA_INSTRUCAO_PADRAO).trim().slice(0, 8000);
-  await setConfig('ia_instrucao', instrucao || IA_INSTRUCAO_PADRAO);
-  historicoIAWhatsApp.clear();
-  notificarPainel('ia', '🤖 Configuração da IA atualizada', (await getConfig('ia_ativa','0')) === '1' ? 'Ativada no WhatsApp' : 'Desativada');
-  res.redirect('/admin/config');
+  res.send(page('Configurações', `<h1>⚙️ Configurações</h1><div class="grid"><div class="card"><h2>Dados do sistema</h2><p><b>Admin:</b> ${safeHtml(ADMIN_NUMBER)}</p><p><b>DB:</b> ${safeHtml(DB_PATH)}</p><p><b>Status Telegram:</b> ${tgBot ? 'Conectado ✅' : 'Desconectado ❌'}</p><p><b>Tema atual:</b> ${safeHtml(TEMAS_PAINEL[temaAtual()].nome)}</p></div><div class="card"><h2>🆘 Suporte do cliente</h2><p class="muted">Esse usuário será usado no botão Suporte do Telegram.</p><form method="post" action="/admin/config/suporte"><label>Telegram do suporte</label><input name="telegram_suporte" value="@${safeHtml(suporteTelegram)}" placeholder="@alinesantos3360"><p class="mini-help">Aceita @usuario ou https://t.me/usuario</p><button class="btn green">Salvar suporte</button></form><p><b>Link atual:</b> <a href="https://t.me/${safeHtml(suporteTelegram)}" target="_blank">https://t.me/${safeHtml(suporteTelegram)}</a></p></div><div class="card"><h2>🎨 Aparência do painel</h2><p class="muted">Temas completos, pré-visualização e intensidade da foto de fundo.</p><p><a class="btn green" href="/admin/temas">Abrir Temas do Painel</a></p><div class="theme-grid">${temasHtml}</div></div><div class="card"><h2>🖼️ Banner personalizado</h2><p class="muted">Opcional. Os 5 temas já possuem banner exclusivo automático; use esta opção somente se quiser substituir manualmente a imagem auxiliar do painel.</p><img class="image-preview" src="/img/hacker.png?v=${Date.now()}" onerror="this.style.display='none'"><br><br><form method="post" action="/admin/config/hacker-image"><input id="hackerFile" type="file" accept="image/png,image/jpeg,image/webp"><input id="hackerData" type="hidden" name="imageData"><br><button class="btn green" id="sendBtn" disabled>Salvar banner manual</button></form><p class="mini-help">A troca manual fica somente aqui em Configurações.</p><script>const f=document.getElementById('hackerFile'),d=document.getElementById('hackerData'),b=document.getElementById('sendBtn');f&&f.addEventListener('change',()=>{const file=f.files&&f.files[0];if(!file)return;const r=new FileReader();r.onload=()=>{d.value=r.result;b.disabled=false;b.textContent='Salvar banner manual';};b.disabled=true;b.textContent='Carregando imagem...';r.readAsDataURL(file);});</script></div></div>`));
+  } catch (e) {
+    console.error('❌ ERRO AO ABRIR CONFIGURAÇÕES:', e);
+    res.status(500).send('Não foi possível abrir Configurações. Consulte os logs do servidor.');
+  }
 });
 app.post('/admin/config/theme', async (req, res) => { const theme = String(req.body.theme || 'central-hacker-pro'); if (TEMAS_PAINEL[theme]) { PAINEL_TEMA = theme; await setConfig('painel_tema', theme); notificarPainel('tema', '🎨 Tema alterado', TEMAS_PAINEL[theme].nome); } res.redirect('/admin/temas?ok='+encodeURIComponent('Tema aplicado e salvo')); });
 app.post('/admin/config/suporte', async (req, res) => {
-  const usuario = normalizarTelegramSuporte(req.body.telegram_suporte || '');
-  if (usuario) {
+  const usuario = String(req.body.telegram_suporte || '').trim().replace(/^https?:\/\/t\.me\//i, '').replace(/^@/, '').split(/[/?#]/)[0].trim();
+  if (/^[a-zA-Z0-9_]{5,32}$/.test(usuario)) {
     await setConfig('telegram_suporte', usuario);
     notificarPainel('config', '🆘 Suporte atualizado', `@${usuario}`);
   }
