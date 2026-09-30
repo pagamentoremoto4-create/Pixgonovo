@@ -4540,14 +4540,17 @@ async function menuConsultasPrivado(from,cliente){
   if(await consultaAssinaturaControleAtivo()){
     const a=await consultaAssinaturaObterPorJid(jid),st=consultaAssinaturaStatus(a);
     if(st!=='ATIVA'){
-      const motivo=st==='VENCIDA'?'venceu':st==='SUSPENSA'?'está suspensa':'ainda não está ativa';
-      await enviarTexto(from,`🔒 *ACESSO ÀS CONSULTAS*
-
-Sua assinatura ${motivo}.
-
-Para utilizar as consultas, renove/ative seu acesso.
-
-0️⃣ ⬅️ Menu principal`);return;
+      const planos=await consultaAssinaturaPlanosAtivos();
+      const titulo=st==='VENCIDA'?'⚠️ *SUA ASSINATURA EXPIROU*':'🔐 *ACESSO ÀS CONSULTAS*';
+      const intro=st==='VENCIDA'?'Escolha um plano abaixo para renovar seu acesso:':'Você ainda não possui uma assinatura ativa.\n\nEscolha um plano para liberar a Central de Consultas:';
+      if(!planos.length){ await enviarTexto(from,`${titulo}\n\n${intro}\n\n⚠️ Nenhum plano está disponível no momento.\n\n0️⃣ ⬅️ Menu principal`); return; }
+      const linhas=[];
+      for(let i=0;i<planos.length;i++){
+        const pr=await consultaAssinaturaPrecoPlano(planos[i]);
+        linhas.push(pr.promo?`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • ${brl(pr.normal)} → *${brl(pr.final)}*`:`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • *${brl(pr.final)}*`);
+      }
+      await salvarSessaoPedido(from,{etapa:'consulta_assinatura_planos_privado',planoIds:planos.map(p=>Number(p.id))});
+      await enviarTexto(from,`${titulo}\n\n${intro}\n\n💎 *PLANOS DISPONÍVEIS*\n\n${linhas.join('\n')}\n\nDigite o número do plano para gerar o PIX.\n0️⃣ ⬅️ Menu principal`);return;
     }
   }
   const ps=await consultasPrivadasProdutos();
@@ -5068,6 +5071,20 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(opcao==='1'){ await menuConsultasPrivado(from,cliente); return; }
     if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'menu'}); await enviarMenuServicosWhatsApp(from,cliente); return; }
     await enviarMenuWhatsApp(from,cliente,false,true); return;
+  }
+  if(sess?.etapa==='consulta_assinatura_planos_privado'){
+    if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
+    if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha um dos planos exibidos ou digite 0 para voltar.');return;}
+    const planoId=Array.isArray(sess.planoIds)?sess.planoIds[Number(opcao)-1]:null;
+    const plano=planoId?await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]):null;
+    if(!plano){await enviarTexto(from,'⚠️ Plano indisponível. Abra a opção Realizar Consulta novamente.');return;}
+    const jid=numberToJid(numeroNorm);
+    const sockPrivado={sendMessage:async(_dest,conteudo)=>{
+      if(conteudo?.text) return await enviarTexto(from,conteudo.text.replace(/@\d+/g,String(cliente?.nome||nome||'Cliente').split(/\s+/)[0]));
+      if(conteudo?.image) return await enviarMidiaWhatsApp(from,conteudo.image,conteudo.caption||'');
+    }};
+    await consultaAssinaturaGerarPixGrupo(sockPrivado,from,jid,cliente?.nome||nome||'Cliente',plano);
+    return;
   }
   if(sess?.etapa==='consulta_privada_menu'){
     if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
