@@ -2402,6 +2402,7 @@ async function initDB() {
   await run(`INSERT OR IGNORE INTO categorias_produtos (nome) SELECT DISTINCT COALESCE(NULLIF(TRIM(categoria),''),'eSIM') FROM esim_planos`);
 
   await ggsoma.init();
+  await premium.init();
   PAINEL_TEMA = await getConfig('painel_tema', 'central-hacker-pro');
   if (!TEMAS_PAINEL[PAINEL_TEMA]) { PAINEL_TEMA = 'central-hacker-pro'; await setConfig('painel_tema', PAINEL_TEMA); }
   PAINEL_BG_MODE = await getConfig('painel_bg_mode', 'soft');
@@ -2559,6 +2560,7 @@ function clientePage(title, body, cliente=null) {
 }
 
 function clienteEntradaHtml(s) {
+  if(s.api_provider==='PREMIUM')return '<input type="hidden" name="entrada" value="1"><input type="hidden" name="premiumToken" value="'+crypto.randomUUID()+'"><p>Compra de 1 unidade. Entrega em texto no privado e no histórico.</p>';
   if(s.api_provider==='GGSOMA')return '<input type="hidden" name="entrada" value="1"><input type="hidden" name="ggsomaToken" value="'+crypto.randomUUID()+'"><p>Compra de 1 unidade. A entrega ficará disponível no histórico.</p>';
   const tipo = normalizarTipoEntrada(s.tipo_entrada);
   const label = safeHtml(labelEntradaServico(s));
@@ -2576,7 +2578,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -2824,7 +2826,7 @@ function categoriaWhatsAppPt(nome, apiProvider='') {
   return x||original;
 }
 async function categoriasServicosWhatsApp(){
-  const rows=await all(`SELECT categoria,api_provider,COUNT(*) qtd FROM servicos_catalogo WHERE ativo=1 GROUP BY categoria,api_provider ORDER BY CASE WHEN api_provider='DHRU' THEN 1 ELSE 0 END,categoria COLLATE NOCASE`);
+  const rows=await all(`SELECT categoria,api_provider,COUNT(*) qtd FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'PREMIUM' GROUP BY categoria,api_provider ORDER BY CASE WHEN api_provider='DHRU' THEN 1 ELSE 0 END,categoria COLLATE NOCASE`);
   const mapa=[];
   const nomeLocal=await nomeCategoriaLocalWhatsApp();
   for(const r of rows){
@@ -2915,6 +2917,7 @@ async function confirmarCompraGgsoma(from,cliente,servico,texto){
 }
 async function iniciarServicoWhatsApp(from,cliente,servico){
   if(!servico)return false;
+  if(servico.api_provider==='PREMIUM'){const p=await get('SELECT id FROM premium_products WHERE catalogo_id=?',[servico.id]);if(p)await premium.show(from,cliente,p.id);return true;}
   if(servico.api_provider==='GGSOMA'){
     await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
     await enviarTexto(from,`🛒 ${nomeServicoWhatsApp(servico)}\n\n💰 ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n1️⃣ Confirmar compra (1 unidade)\n0️⃣ Voltar`);return true;
@@ -2968,7 +2971,7 @@ async function listarServicosCategoriaTexto(revenda,cat){
   }else if(String(cat.api_provider||'').toUpperCase()==='DHRU'){
     rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(categoria,'Serviços')=? AND COALESCE(api_provider,'')='DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`,[cat.categoria]);
   }else{
-    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'') NOT IN ('DHRU','GGSOMA') ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
+    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'') NOT IN ('DHRU','GGSOMA','PREMIUM') ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
   }
   let texto=`📂 *${cat.nome}*
 
@@ -3959,6 +3962,7 @@ function tecladoTelegramMenu() {
     reply_markup: {
       inline_keyboard: [
         [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
+        [{ text: '⭐ Assinaturas Premium', callback_data: 'menu_premium' }],
         [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
         [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🧾 Cadastrar PIX', callback_data: 'menu_cadastrar_pix' }],
         [{ text: '🆘 Suporte', callback_data: 'menu_suporte' }, { text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
@@ -3983,7 +3987,7 @@ function montarLinhasBotoes(items, prefixo, nomeCampo='nome') {
   return linhas;
 }
 async function enviarServicosBotoesTelegram(chatId, cliente) {
-  const servicos = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
+  const servicos = await all("SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'PREMIUM' ORDER BY id ASC");
   if (!servicos.length) {
     await tgBot.sendMessage(chatId, '❌ Nenhum serviço cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
     return;
@@ -4033,6 +4037,7 @@ function normalizarOpcaoTelegram(texto) {
   return t.replace(/[️⃣\s]/g, '').slice(0, 20);
 }
 async function processarMensagemTelegram(msg) {
+  if(await premium.adminMessage(msg))return;
   if (!msg?.from?.id || !msg?.chat?.id) return;
   const fromAdmin = tgJid(msg.from.id);
   const sessAdmin = adminSessao.get(fromAdmin);
@@ -4157,6 +4162,8 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
+  const sessPremiumTelegram=await carregarSessaoPedido(from);
+  if(['premium_list','premium_product'].includes(sessPremiumTelegram?.etapa)){if(texto==='0'){await apagarSessaoPedido(from);await enviarMenuTelegram(msg.chat.id,cliente);return;}if(sessPremiumTelegram.etapa==='premium_product'&&texto==='1'){await premium.confirm(from,cliente,sessPremiumTelegram.productId,sessPremiumTelegram.token);return;}await enviarTexto(from,'Use os botões Comprar e Voltar.');return;}
   const sessPixDocumentoTelegram = await carregarSessaoPedido(from);
   if (sessPixDocumentoTelegram?.etapa === 'pix_documento_input') {
     const documento = onlyDigits(textoOriginal);
@@ -4479,6 +4486,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 6️⃣ 💰 *ADICIONAR SALDO*
 7️⃣ ❌ *CANCELAMENTO*
 8️⃣ 💬 *SUPORTE*
+9️⃣ ⭐ *ASSINATURAS PREMIUM*
 
 💬 Digite a opção desejada.`;
 }
@@ -5258,7 +5266,9 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     return;
   }
 
+  if(await premium.waMessage(from,cliente,sess,textoOriginal))return;
   if (sess?.etapa === 'menu') {
+    if(opcao==='9'){await premium.list(from,cliente);return;}
     if (opcao === '1') {
       const cat=await categoriaLocalWhatsAppObjeto();
       if(!cat){await enviarTexto(from,'🚫 Blacklist Brazil\n\nNenhum serviço disponível no momento.');return;}
@@ -5599,6 +5609,7 @@ function adminTelegramKeyboard() {
     [{ text: '📢 Mensagens', callback_data: 'admin_mensagens' }, { text: '🖼️ Banners', callback_data: 'admin_banners' }],
     [{ text: '📣 Anúncios automáticos', callback_data: 'admin_campanhas' }],
     [{ text: '📊 Relatórios', callback_data: 'admin_relatorios' }, { text: '⚙️ Configurações', callback_data: 'admin_configuracoes' }],
+    [{ text: '⭐ Assinaturas Premium', callback_data: 'admpr_menu' }],
     [{ text: '📥 Estoque', callback_data: 'admin_estoque' }, { text: '💾 Backup', callback_data: 'admin_backup' }],
     [{ text: '🛒 Menu do cliente', callback_data: 'admin_menucliente' }]
   ] };
@@ -5704,6 +5715,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           return;
         }
         await tgBot.answerCallbackQuery(q.id);
+        if(await premium.adminCallback(chatId,q.from.id,data))return;
         const adminKey=tgJid(q.from.id);
         if(data==='admprod_novo'){ adminSessao.set(adminKey,{etapa:'produto_novo_nome'}); await tgBot.sendMessage(chatId,'➕ Digite o nome do novo produto:'); return; }
         let m=data.match(/^admprod_(nome|preco|desc|foto|cat|toggle)_(\d+)$/);
@@ -5743,14 +5755,16 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|device_(?:iphone|android)_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|device_(?:iphone|android)_\d+)$/.test(data);
       if (ehBotaoCliente) {
+        if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
         const from = tgJid(q.from.id);
         await tgBot.answerCallbackQuery(q.id);
+        if(await premium.clientCallback(from,cliente,data))return;
 
         if (data === 'menu_voltar') {
-          pedidoSessao.delete(from);
+          await apagarSessaoPedido(from);
           return enviarMenuTelegram(chatId, cliente);
         }
         if (data === 'menu_servicos') {
@@ -5854,6 +5868,7 @@ Exemplo: 50`);
         if (servMatch) {
           const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
           if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+          if(servico.api_provider==='PREMIUM'){const p=await get('SELECT id FROM premium_products WHERE catalogo_id=?',[servico.id]);if(p)return premium.show(from,cliente,p.id,true);return;}
           if(servico.api_provider==='GGSOMA')return iniciarServicoWhatsApp(from,cliente,servico);
           await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
           if (servico.api_provider === 'DHRU') {
@@ -6828,6 +6843,7 @@ async function cancelarPedidoComEstorno(id, motivo = 'Não informado') {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
   if (!pedido) return { ok:false, erro:'Pedido não encontrado' };
   const prov=await get('SELECT api_provider FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+  if(prov?.api_provider==='PREMIUM')return {ok:false,erro:'Assinaturas entregues automaticamente não podem ser canceladas por este fluxo.'};
   if(prov?.api_provider==='GGSOMA')return {ok:false,erro:'Pedidos digitais são conciliados automaticamente pela GGSOMA.'};
 
   if (pedido.status === 'CANCELADO') {
@@ -7047,7 +7063,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   if (paymentId) {
     const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : (sess.tipo_pix === 'ASSINATURA' ? 'ASSINATURA' : 'SALDO');
     const contextoJson = tipoPagamento === 'SERVICO'
-      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, ggsomaToken: sess.ggsomaToken, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
+      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, ggsomaToken: sess.ggsomaToken, premiumId:sess.premiumId, premiumToken:sess.premiumToken, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
       : (tipoPagamento === 'ASSINATURA' ? JSON.stringify(sess.contexto_assinatura || {}) : null);
     await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
@@ -7224,6 +7240,9 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
   const servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [contexto.servicoId]);
   if (!cliente || !servico) return false;
+  if(servico.api_provider==='PREMIUM'){
+    try{await premium.purchase(cliente,contexto.premiumId,jid,contexto.premiumToken);}catch(e){await enviarTexto(jid,String(e.message).includes('PREMIUM_OUT_OF_STOCK')?'⛔ A assinatura esgotou. O valor pago permanece na sua carteira.':String(e.message).includes('PREMIUM_INSUFFICIENT_BALANCE')?'Saldo insuficiente para concluir. O valor pago permanece na sua carteira.':'Não foi possível concluir a assinatura. O valor pago permanece na carteira.');}return true;
+  }
   if(servico.api_provider==='GGSOMA'){await ggsoma.purchase(cliente,servico,jid,contexto.ggsomaToken||('pix-'+crypto.createHash('sha256').update(String(contextoJson)).digest('hex')));return true;}
   const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const invalidos=tipoEntrada==='IMEI'?contexto.entradas.filter(i=>!imeiLuhnValido(i)):[];
@@ -10056,6 +10075,9 @@ function consultaLoginStatus(){
 app.use('/admin', basicAuth);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
 ggsoma.routes(app);
+const premium = require('./premium')({run,get,all,DATA_DIR,addColumnIfMissing,precoDaRevenda,brl,safeHtml,page,clienteAuth,clientePage,multer,finalizarPedido,enviarParaCanaisCliente,enviarTexto,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuWhatsApp(from,cliente);}});
+premium.routes(app);
+
 
 
 app.get('/admin/consultavip',async(req,res)=>{
@@ -10472,6 +10494,11 @@ app.get('/cliente/servico/:id', clienteAuth, async (req,res)=>{
 });
 app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);if(!s)return clienteRedirect(res,'/cliente/servicos','erro','Serviço indisponível.');
+  if(s.api_provider==='PREMIUM'){
+    const token=String(req.body.premiumToken||'');if(!/^[a-f0-9-]{36}$/.test(token))return res.sendStatus(400);
+    const pr=await get('SELECT id FROM premium_products WHERE catalogo_id=?',[s.id]);
+    try{const id=await premium.purchase(req.cliente,pr.id,clienteDestinoPrincipal(req.cliente),token);return clienteRedirect(res,'/cliente/historico','ok',`Assinatura registrada: #${id}.`);}catch(e){return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',String(e.message).includes('PREMIUM_OUT_OF_STOCK')?'Produto esgotado.':String(e.message).includes('PREMIUM_INSUFFICIENT_BALANCE')?'Saldo insuficiente. Adicione saldo para comprar.':e.message);}
+  }
   if(s.api_provider==='GGSOMA'){
     const token=String(req.body.ggsomaToken||'');if(!/^[a-f0-9-]{36}$/.test(token))return res.sendStatus(400);
     try{const id=await ggsoma.purchase(req.cliente,s,clienteDestinoPrincipal(req.cliente),token);return clienteRedirect(res,'/cliente/historico','ok',`Pedido #${id} registrado.`);}catch(e){return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',String(e.message).includes('GGSOMA_CUSTOMER_BALANCE')?'Saldo insuficiente. Adicione saldo para comprar.':e.message);}
@@ -10518,7 +10545,7 @@ app.get('/cliente/historico', clienteAuth, async (req,res)=>{
   const cr=await all('SELECT UPPER(status) status,COUNT(*) qtd FROM pedidos WHERE revenda_id=? GROUP BY UPPER(status)',[req.cliente.id]);const cont={TODOS:0,PENDENTE:0,'EM PROCESSO':0,FINALIZADO:0,CANCELADO:0};for(const x of cr){cont.TODOS+=Number(x.qtd||0);if(cont[x.status]!==undefined)cont[x.status]=Number(x.qtd||0)}
   const baseQ=new URLSearchParams();if(filtros.busca)baseQ.set('busca',filtros.busca);if(filtros.periodo&&filtros.periodo!=='todos')baseQ.set('periodo',filtros.periodo);const href=st=>{const q=new URLSearchParams(baseQ);if(st)q.set('status',st);return '/cliente/historico?'+q.toString()};
   const tabs=[['','Todos'],['PENDENTE','Pendentes'],['EM PROCESSO','Em processo'],['FINALIZADO','Finalizados'],['CANCELADO','Cancelados']].map(([st,n])=>`<a class="cu-tab ${(filtros.status||'')===st?'active':''}" href="${href(st)}">${n} (${cont[st||'TODOS']})</a>`).join('');
-  const linhas=pedidos.map(p=>{const valor=safeHtml(p.imei||p.entrada_valor||'-'),st=String(p.status||'').toUpperCase(),cancel=st==='PENDENTE'&&Number(p.cancelamento_permitido)?`<form method="post" action="/cliente/pedido/${p.id}/cancelar" style="display:inline"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><button class="cu-btn danger small" data-confirm="Deseja cancelar o pedido #${p.id}?">Cancelar</button></form>`:'';return `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-code">${valor}</span></td><td>${brl(p.valor||0)}</td><td><span class="cu-badge ${st.replace(/ /g,'-')}">${safeHtml(st)}</span></td><td>${dateBR(p.criado_em)}</td><td>${p.api_provider==='GGSOMA'&&st==='FINALIZADO'?`<a class="cu-btn small" href="/cliente/ggsoma/${p.id}">Ver entrega</a>`:`<a class="cu-btn small" href="/cliente/pedido/${p.id}/resultado">Baixar</a>`} ${cancel}</td></tr>`}).join('')||'<tr><td colspan="7" class="cu-empty">Nenhum pedido encontrado.</td></tr>';
+  const linhas=pedidos.map(p=>{const valor=safeHtml(p.imei||p.entrada_valor||'-'),st=String(p.status||'').toUpperCase(),cancel=st==='PENDENTE'&&Number(p.cancelamento_permitido)?`<form method="post" action="/cliente/pedido/${p.id}/cancelar" style="display:inline"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><button class="cu-btn danger small" data-confirm="Deseja cancelar o pedido #${p.id}?">Cancelar</button></form>`:'';return `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-code">${valor}</span></td><td>${brl(p.valor||0)}</td><td><span class="cu-badge ${st.replace(/ /g,'-')}">${safeHtml(st)}</span></td><td>${dateBR(p.criado_em)}</td><td>${p.api_provider==='PREMIUM'&&st==='FINALIZADO'?`<a class="cu-btn small" href="/cliente/premium/${p.id}">Ver entrega</a>`:p.api_provider==='GGSOMA'&&st==='FINALIZADO'?`<a class="cu-btn small" href="/cliente/ggsoma/${p.id}">Ver entrega</a>`:`<a class="cu-btn small" href="/cliente/pedido/${p.id}/resultado">Baixar</a>`} ${cancel}</td></tr>`}).join('')||'<tr><td colspan="7" class="cu-empty">Nenhum pedido encontrado.</td></tr>';
   const exportQ=new URLSearchParams(req.query);exportQ.delete('formato');const copiar=pedidos.map(p=>String(p.imei||p.entrada_valor||'').trim()).filter(Boolean).join('\n');
   res.send(clientePage('Histórico',`<h1>Histórico de pedidos</h1>${clienteAviso(req)}<div class="cu-tabs">${tabs}</div><div class="cu-card"><form class="cu-filter"><div><label>Buscar pedido, IMEI ou serviço</label><input name="busca" value="${safeHtml(filtros.busca)}"></div><div><label>Período</label><select name="periodo"><option value="todos">Todos</option><option value="hoje" ${filtros.periodo==='hoje'?'selected':''}>Hoje</option><option value="7" ${filtros.periodo==='7'?'selected':''}>7 dias</option><option value="30" ${filtros.periodo==='30'?'selected':''}>30 dias</option></select></div>${filtros.status?`<input type="hidden" name="status" value="${safeHtml(filtros.status)}">`:''}<button class="cu-btn primary">Filtrar</button></form><div class="cu-actions" style="margin-top:14px"><button type="button" class="cu-btn" data-copy="#cuImeis">Copiar IMEIs</button><a class="cu-btn" href="/cliente/historico/export?formato=txt&${exportQ}">Baixar TXT</a><a class="cu-btn" href="/cliente/historico/export?formato=csv&${exportQ}">Baixar CSV</a></div><textarea id="cuImeis" hidden>${safeHtml(copiar)}</textarea></div><div class="cu-card cu-table-wrap"><table class="cu-table"><tr><th>ID</th><th>Serviço</th><th>IMEI/entrada</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>${linhas}</table></div>`,req.cliente));
 });

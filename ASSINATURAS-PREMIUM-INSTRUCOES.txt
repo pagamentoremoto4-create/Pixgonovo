@@ -1,0 +1,48 @@
+ASSINATURAS PREMIUM — ESTOQUE PRÓPRIO EM TEXTO
+
+Instale esta versão do projeto no servidor que já executa o seu bot. A integração GGSOMA permanece separada. Assinaturas Premium não depende da chave GGSOMA nem de compras no fornecedor.
+
+ACESSO DOS CLIENTES
+WhatsApp: menu > 9 — ASSINATURAS PREMIUM > produto > 1 — Comprar.
+Telegram: menu > botão Assinaturas Premium > produto > botão Comprar.
+
+A categoria começa com Gemini Pro — 18 meses, preço R$ 100,00 e estoque real ZERO. O número 241 apresentado no exemplo não foi cadastrado como estoque. A quantidade só aumenta quando você adiciona os textos.
+
+O card mostra nome, preço em reais, duração em português, quantidade disponível, entrega instantânea, tipo de conteúdo e descrição. O preço e os demais dados podem ser alterados no painel ou Telegram administrativo.
+
+PAINEL ADMINISTRATIVO
+Abra Assinaturas Premium (/admin/premium).
+- Cadastrar novo produto: nome, preço, duração, tipo de entrega e descrição.
+- Alterar os dados ou ativar/desativar um produto.
+- Adicionar estoque: cole o texto completo de UMA unidade e salve. Várias linhas continuam sendo UMA unidade. Repita para adicionar mais unidades.
+- Foto: PNG ou JPG de até 5 MB, opcional e destinada à apresentação no Telegram. A foto não é o estoque.
+
+TELEGRAM DO ADMINISTRADOR
+Abra /admin > Assinaturas Premium > produto.
+- Adicionar texto ao estoque: cada mensagem de texto vale uma unidade. Envie os textos um a um; digite FINALIZAR para encerrar.
+- Foto: envie a imagem quando o bot pedir.
+- Preço, nome, duração, descrição e tipo de entrega: escolha o botão e envie o novo valor.
+- Novo produto: informe o nome; o preço inicial será R$ 100,00 e pode ser editado em seguida.
+O cadastro administrativo funciona no privado do administrador já autorizado.
+
+CADASTRO SILENCIOSO
+Criar ou editar produtos, adicionar estoque e colocar/trocar fotos NÃO envia mensagens aos clientes. Somente o administrador recebe as confirmações das operações feitas pelo Telegram. Não há divulgação automática dessa categoria.
+
+PAGAMENTO E ENTREGA
+Compra de uma unidade por vez, usando saldo disponível. Se faltar saldo, o bot oferece o fluxo PIX existente, e a confirmação do pagamento conclui a compra. A carteira do cliente e o estoque são atualizados na mesma operação SQLite: uma unidade não pode ser vendida em dois canais.
+
+Depois da compra, o comprador recebe o texto no privado. A entrega também pode ser acessada no site autenticado, em Histórico > Ver entrega. Credenciais e links ficam protegidos no banco e não são enviados em avisos para grupos.
+
+Se o estoque acabar antes da confirmação do PIX, o valor pago permanece na carteira do cliente; nenhuma assinatura é debitada. Se o envio privado falhar, o sistema guarda a unidade para esse comprador e tenta novamente após reinício, sem outra cobrança.
+
+A foto aparece junto do card no Telegram. Para descrições maiores que o limite da legenda, o bot envia a foto seguida do texto com os botões.
+
+Não existe reembolso PIX externo automático nem cancelamento genérico de uma assinatura já comprada. O estoque fornecido deve conter conteúdo válido e atualizado; o sistema envia o texto cadastrado.
+
+DADOS PERSISTENTES
+Preserve o banco e a pasta premium do diretório de dados, incluindo premium/secret.key, nas atualizações e backups. A chave local é criada automaticamente, sem novas configurações no Render.
+
+VALIDAÇÃO
+npm run test:premium
+npm run test:ggsoma
+Os testes usam serviços simulados e SQLite real. Nenhuma compra real ou transmissão aos clientes foi feita durante a implementação.
