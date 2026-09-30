@@ -22,10 +22,25 @@ module.exports=function createPremium(d){
  }
  function meta(p){try{return JSON.parse(p.json||'{}')}catch(_){return {}}}
  function stock(p){const m=meta(p);return Number(m.stock?.count||0)}
- function deliveryLabel(p){const t=String(meta(p).deliveryType||'').toUpperCase();return t==='LINK'?'Link':t==='COUPON'?'Código':t==='READY_ACCOUNT'?'Conta pronta':'Entrega digital'}
+ function deliveryLabel(p){const t=String(meta(p).deliveryType||'').toUpperCase();return t==='LINK'?'Link automático':t==='COUPON'?'Código automático':t==='READY_ACCOUNT'?'Conta automática':'Entrega digital'}
+ function durationLabel(p){
+  const days=Number(meta(p).durationDays||0);
+  if(!days)return '';
+  if(days%30===0)return `${days/30} ${days/30===1?'mês':'meses'}`;
+  return `${days} ${days===1?'dia':'dias'}`;
+ }
+ function customerDescription(p){
+  const m=meta(p);
+  const raw=String(m.description||m.descricao||m.details||m.instructions||'').trim();
+  if(!raw)return '';
+  return raw.replace(/GGSOMA/gi,'').replace(/\n{3,}/g,'\n\n').trim();
+ }
  async function card(p,client){
-  const m=meta(p),price=await d.precoDaRevenda(client.id,p.id),qty=stock(p);
-  return `📦 ${p.nome}\n\n💰 ${d.brl(price)}\n⏱ Duração: ${m.durationDays?m.durationDays+' dias':'Conforme produto'}\n📦 Estoque GGSOMA: ${qty} ${qty===1?'unidade':'unidades'}\n⚡ Entrega: Automática após o pagamento\n🎁 Você recebe: ${deliveryLabel(p)}${p.descricao?'\n\n'+p.descricao:''}`;
+  const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),duration=durationLabel(p),description=customerDescription(p);
+  const title=duration && !String(p.nome).toLowerCase().includes(duration.toLowerCase()) ? `${p.nome} — ${duration}` : p.nome;
+  let text=`⭐ *${title}*\n\n💰 *${d.brl(price)}* • 📦 *${qty} ${qty===1?'disponível':'disponíveis'}*\n⚡ *Entrega instantânea — ${deliveryLabel(p)}*`;
+  if(description)text+=`\n\n${description}`;
+  return text;
  }
  async function list(from,client,telegram=false){
   const rows=await products(true);await d.salvarSessaoPedido(from,{etapa:'premium_list',ids:rows.map(x=>x.id)});
