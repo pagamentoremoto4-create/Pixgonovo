@@ -45,6 +45,8 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_IMG_DIR = path.join(PUBLIC_DIR, 'img');
 const HACKER_IMAGE_PATH = path.join(PUBLIC_IMG_DIR, 'hacker.png');
 const ESIM_DIR = process.env.ESIM_DIR || path.join(DATA_DIR, 'esim');
+const CONSULTAVIP_MEDIA_DIR = path.join(DATA_DIR, 'consultavip-media');
+fs.mkdirSync(CONSULTAVIP_MEDIA_DIR, { recursive: true });
 
 // Mantém os QR Codes eSIM acessíveis pela URL /esim/arquivo.png,
 // mas os arquivos ficam salvos em /data/esim.
@@ -297,6 +299,18 @@ async function apagarSessaoPedido(chave) {
   pedidoSessao.delete(chave);
   try { await run('DELETE FROM pedido_sessoes WHERE chave=?', [chave]); } catch (_) {}
 }
+
+const uploadConsultaVip = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, CONSULTAVIP_MEDIA_DIR),
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname || '.jpg') || '.jpg').toLowerCase();
+      cb(null, `entrada_${Date.now()}${ext}`);
+    }
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype || ''))
+});
 
 const uploadEsim = multer({
   storage: multer.diskStorage({
@@ -4503,7 +4517,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 
 O que deseja fazer?
 
-1️⃣ 🔎 *REALIZAR CONSULTA*
+1️⃣ 🔎 *CONSULTAVIP*
 2️⃣ 🛒 *SERVIÇOS*
 
 💬 Digite a opção desejada.`;
@@ -4535,14 +4549,28 @@ async function enviarMenuServicosWhatsApp(from, cliente){
 async function consultasPrivadasProdutos(){
   return await all(`SELECT d.*,s.id AS servico_id,COALESCE(NULLIF(s.nome_exibicao,''),d.nome) AS nome_cliente FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE s.api_provider='DHRU' AND COALESCE(s.ativo,0)=1 ORDER BY nome_cliente COLLATE NOCASE`);
 }
-async function menuConsultasPrivado(from,cliente){
+async function enviarEntradaConsultaVip(from,cliente){
+  const primeiroNome=String(cliente?.nome||'Cliente').trim().split(/\s+/)[0]||'Cliente';
+  const titulo=String(await getConfig('consultavip_entrada_titulo','SEJA BEM-VINDO AO CONSULTAVIP')).trim()||'SEJA BEM-VINDO AO CONSULTAVIP';
+  const mensagem=String(await getConfig('consultavip_entrada_mensagem','Sua central de consultas privadas.')).trim();
+  const foto=String(await getConfig('consultavip_entrada_foto','')).trim();
+  const texto=`🔎 *${titulo}*\n\nOlá, *${primeiroNome}*! 👋\n${mensagem?`\n${mensagem}\n`:''}\n🔐 Verificando seu acesso...`;
+  if(foto && fs.existsSync(foto)){
+    const ok=await enviarImagem(from,foto,texto);
+    if(ok)return;
+  }
+  await enviarTexto(from,texto);
+}
+async function menuConsultasPrivado(from,cliente,mostrarEntrada=false){
+  if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente);
   const jid=numberToJid(normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||from.replace(/^wa:/,'')));
+  let assinatura=null, statusAss='DESATIVADO';
   if(await consultaAssinaturaControleAtivo()){
-    const a=await consultaAssinaturaObterPorJid(jid),st=consultaAssinaturaStatus(a);
-    if(st!=='ATIVA'){
+    assinatura=await consultaAssinaturaObterPorJid(jid); statusAss=consultaAssinaturaStatus(assinatura);
+    if(statusAss!=='ATIVA'){
       const planos=await consultaAssinaturaPlanosAtivos();
-      const titulo=st==='VENCIDA'?'⚠️ *SUA ASSINATURA EXPIROU*':'🔐 *ACESSO ÀS CONSULTAS*';
-      const intro=st==='VENCIDA'?'Escolha um plano abaixo para renovar seu acesso:':'Você ainda não possui uma assinatura ativa.\n\nEscolha um plano para liberar a Central de Consultas:';
+      const titulo=statusAss==='VENCIDA'?'⚠️ *SEU CONSULTAVIP EXPIROU*':'🔐 *ATIVE SEU CONSULTAVIP*';
+      const intro=statusAss==='VENCIDA'?'Para continuar utilizando o ConsultaVIP, escolha um plano para renovar seu acesso:':'Você ainda não possui uma assinatura ativa.\n\nEscolha um plano para liberar o ConsultaVIP:';
       if(!planos.length){ await enviarTexto(from,`${titulo}\n\n${intro}\n\n⚠️ Nenhum plano está disponível no momento.\n\n0️⃣ ⬅️ Menu principal`); return; }
       const linhas=[];
       for(let i=0;i<planos.length;i++){
@@ -4554,21 +4582,16 @@ async function menuConsultasPrivado(from,cliente){
     }
   }
   const ps=await consultasPrivadasProdutos();
-  if(!ps.length){await enviarTexto(from,`🔎 *CENTRAL DE CONSULTAS*
-
-Nenhuma consulta está disponível no momento.
-
-0️⃣ ⬅️ Menu principal`);return;}
+  if(!ps.length){await enviarTexto(from,`🔎 *CONSULTAVIP*\n\nNenhuma consulta está disponível no momento.\n\n0️⃣ ⬅️ Menu principal`);return;}
   const lista=ps.slice(0,40).map((x,i)=>`${i+1}️⃣ ${dhruNomeServicoPt(x.nome_cliente||x.nome)}`).join('\n');
   await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaIds:ps.slice(0,40).map(x=>Number(x.servico_id))});
-  await enviarTexto(from,`🔎 *CENTRAL DE CONSULTAS*
-
-Escolha a consulta desejada:
-
-${lista}
-
-📋 As consultas são incluídas na sua assinatura.
-0️⃣ ⬅️ Menu principal`);
+  let acesso='';
+  if(statusAss==='ATIVA' && assinatura?.vencimento_em){
+    const fim=new Date(String(assinatura.vencimento_em).replace(' ','T')+'Z');
+    const dias=Math.max(0,Math.ceil((fim.getTime()-Date.now())/86400000));
+    acesso=`\n🟢 *Acesso ativo* • ${dias} dia${dias===1?'':'s'} restante${dias===1?'':'s'}\n`;
+  }
+  await enviarTexto(from,`🔎 *CONSULTAVIP*${acesso}\nEscolha a consulta desejada:\n\n${lista}\n\n📋 Consultas incluídas na sua assinatura.\n0️⃣ ⬅️ Menu principal`);
 }
 
 async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false) {
@@ -5068,7 +5091,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   let sess = await carregarSessaoPedido(from);
 
   if(sess?.etapa==='hub_menu'){
-    if(opcao==='1'){ await menuConsultasPrivado(from,cliente); return; }
+    if(opcao==='1'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'menu'}); await enviarMenuServicosWhatsApp(from,cliente); return; }
     await enviarMenuWhatsApp(from,cliente,false,true); return;
   }
@@ -5077,7 +5100,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha um dos planos exibidos ou digite 0 para voltar.');return;}
     const planoId=Array.isArray(sess.planoIds)?sess.planoIds[Number(opcao)-1]:null;
     const plano=planoId?await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]):null;
-    if(!plano){await enviarTexto(from,'⚠️ Plano indisponível. Abra a opção Realizar Consulta novamente.');return;}
+    if(!plano){await enviarTexto(from,'⚠️ Plano indisponível. Abra o ConsultaVIP novamente.');return;}
     const jid=numberToJid(numeroNorm);
     const sockPrivado={sendMessage:async(_dest,conteudo)=>{
       if(conteudo?.text) return await enviarTexto(from,conteudo.text.replace(/@\d+/g,String(cliente?.nome||nome||'Cliente').split(/\s+/)[0]));
@@ -10223,12 +10246,29 @@ app.get('/admin/consultavip',async(req,res)=>{
   const kr=chaves.map(k=>`<tr><td>#${k.id}</td><td>••••-${safeHtml(k.chave_final||'')}</td><td>${safeHtml(k.plano_nome||'-')}</td><td>${safeHtml(k.status)}</td><td>${safeHtml(k.usada_telegram_chat_id||'-')}</td><td>${safeHtml(k.criada_em||'-')}</td></tr>`).join('')||'<tr><td colspan="6">Nenhuma chave.</td></tr>';
   res.send(page('CONSULTAVIP',`<h1>🕵️🔎 CONSULTAVIP</h1><p class="muted">Segundo bot Telegram independente. O WhatsApp e o bot de vendas continuam funcionando normalmente.</p>${req.query.ok?`<div class="card"><b>✅ ${safeHtml(req.query.ok)}</b></div>`:''}${req.query.erro?`<div class="card"><b>❌ ${safeHtml(req.query.erro)}</b></div>`:''}
   <div class="grid"><div class="card"><h3>Status</h3><p><b>${safeHtml(consultaVipBotStatus)}</b></p><small>${safeHtml(consultaVipBotErro||'Sem erros')}</small></div><div class="card"><h3>Bot</h3><p><b>${username?'@'+safeHtml(username):'Não identificado'}</b></p><small>Token: ${token?consultaSegredoMask(token):'Não cadastrado'}</small></div><div class="card"><h3>Licenças</h3><p><b>${licencas.filter(x=>consultavipStatusLicenca(x)==='ATIVA').length} ativas</b></p></div></div>
+  <div class="card"><h2>🖼️ Entrada do ConsultaVIP no WhatsApp</h2><p>Personalize a foto e a mensagem mostradas quando o cliente entra no ConsultaVIP. A assinatura é verificada logo depois.</p><form method="post" action="/admin/consultavip/entrada" enctype="multipart/form-data"><label>Foto de entrada (opcional)</label><input type="file" name="foto" accept="image/*"><label>Título</label><input name="titulo" value="${safeHtml(await getConfig('consultavip_entrada_titulo','SEJA BEM-VINDO AO CONSULTAVIP'))}" maxlength="80"><label>Mensagem</label><textarea name="mensagem" rows="4" maxlength="500">${safeHtml(await getConfig('consultavip_entrada_mensagem','Sua central de consultas privadas.'))}</textarea><label><input style="width:auto" type="checkbox" name="remover_foto" value="1"> Remover foto atual</label><button class="btn green">💾 Salvar entrada</button></form><small>A foto fica salva no disco persistente e pode ser trocada sem alterar o código.</small></div>
   <div class="card"><h2>🤖 Configurar o segundo bot</h2><form method="post" action="/admin/consultavip/salvar-token"><label>Token fornecido pelo BotFather</label><input type="password" name="token" placeholder="${token?'Deixe vazio para manter o token atual':'Cole o token aqui'}"><label><input style="width:auto" type="checkbox" name="auto" value="1" ${auto?'checked':''}> Iniciar automaticamente com o servidor</label><button class="btn green">💾 Salvar e conectar</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultavip/iniciar"><button class="btn green">▶ Iniciar</button></form><form method="post" action="/admin/consultavip/parar"><button class="btn red">■ Parar</button></form><form method="post" action="/admin/consultavip/testar"><button class="btn">🧪 Testar conexão</button></form></div><small>Depois de criar o bot no BotFather, cole o token somente aqui. Não coloque no GitHub ou no Render.</small></div>
   <div class="card"><h2>💎 Planos</h2><p>Os mesmos planos abaixo atendem o WhatsApp, o individual e os grupos. Para editar preços e dias:</p><a class="btn" href="/admin/consultas-assinatura">Abrir planos e consultas</a></div>
   <div class="card"><h2>➕ Liberar plano individual manualmente</h2><p>O cliente precisa ter aberto o bot CONSULTAVIP no privado e enviado /start. Se já tiver um plano ativo, os dias serão acrescentados ao vencimento atual.</p><form method="post" action="/admin/consultavip/licenca-individual"><label>ID Telegram do cliente</label><input name="telegram_user_id" inputmode="numeric" pattern="[0-9]+" required placeholder="123456789"><label>Plano e duração</label><select name="plano_id" required>${opts}</select><button class="btn green" ${planos.length?'':'disabled'}>✅ Liberar acesso</button></form></div>
   <div class="card"><h2>🔑 Gerar chave de grupo manualmente</h2><form method="post" action="/admin/consultavip/chave"><label>ID Telegram do comprador</label><input name="telegram_user_id" required placeholder="123456789"><label>Plano</label><select name="plano_id" required>${opts}</select><button class="btn green">Gerar chave</button></form></div>
   <div class="card"><h2>👤 Clientes e grupos</h2><table><tr><th>ID</th><th>Tipo</th><th>Cliente/Grupo</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ação</th></tr>${lr}</table></div>
   <div class="card"><h2>🗝️ Chaves</h2><table><tr><th>ID</th><th>Final</th><th>Plano</th><th>Status</th><th>Grupo</th><th>Criação</th></tr>${kr}</table></div>`));
+});
+
+app.post('/admin/consultavip/entrada',uploadConsultaVip.single('foto'),async(req,res)=>{
+  try{
+    const titulo=String(req.body.titulo||'SEJA BEM-VINDO AO CONSULTAVIP').trim().slice(0,80);
+    const mensagem=String(req.body.mensagem||'Sua central de consultas privadas.').trim().slice(0,500);
+    const antiga=String(await getConfig('consultavip_entrada_foto','')).trim();
+    let foto=antiga;
+    if(req.body.remover_foto==='1') foto='';
+    if(req.file?.path) foto=req.file.path;
+    await setConfig('consultavip_entrada_titulo',titulo||'SEJA BEM-VINDO AO CONSULTAVIP');
+    await setConfig('consultavip_entrada_mensagem',mensagem);
+    await setConfig('consultavip_entrada_foto',foto);
+    if(antiga && antiga!==foto && antiga.startsWith(CONSULTAVIP_MEDIA_DIR) && fs.existsSync(antiga)) try{fs.unlinkSync(antiga)}catch(_){}
+    res.redirect('/admin/consultavip?ok='+encodeURIComponent('Entrada do ConsultaVIP atualizada.'));
+  }catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultavip/salvar-token',async(req,res)=>{try{const novo=String(req.body.token||'').trim();if(novo)await setConfig('consultavip_bot_token_enc',dhruEncrypt(novo));await setConfig('consultavip_bot_auto',req.body.auto==='1'?'1':'0');await consultavipIniciarBot();res.redirect('/admin/consultavip?ok='+encodeURIComponent('Bot salvo e conectado.'));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/consultavip/iniciar',async(req,res)=>{try{await consultavipIniciarBot();res.redirect('/admin/consultavip?ok='+encodeURIComponent('CONSULTAVIP iniciado.'));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
