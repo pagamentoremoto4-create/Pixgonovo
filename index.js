@@ -10075,7 +10075,7 @@ function consultaLoginStatus(){
 app.use('/admin', basicAuth);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
 ggsoma.routes(app);
-const premium = require('./premium')({run,get,all,DATA_DIR,addColumnIfMissing,precoDaRevenda,brl,safeHtml,page,clienteAuth,clientePage,multer,finalizarPedido,enviarParaCanaisCliente,enviarTexto,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuWhatsApp(from,cliente);}});
+const premium = require('./premium')({run,get,all,ggsoma,precoDaRevenda,brl,enviarTexto,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuWhatsApp(from,cliente);}});
 premium.routes(app);
 
 
