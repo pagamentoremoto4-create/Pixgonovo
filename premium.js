@@ -33,6 +33,31 @@ module.exports=function createPremium(d){
  function cleanCustomerText(value){
   return String(value||'').replace(/GGSOMA/gi,'').replace(/\r/g,'').replace(/\n{3,}/g,'\n\n').trim();
  }
+ function apiText(m){
+  // GGSOMA can place the commercial copy in different/nested fields depending on the product/provider.
+  // Search only description-like fields; never expose the raw JSON or internal supplier metadata.
+  const preferred=['description','descricao','details','detail','instructions','instruction','productDescription','product_description','longDescription','long_description','notes','note','features','benefits'];
+  const found=[]; const seen=new Set();
+  function add(v){
+   if(Array.isArray(v)){for(const x of v)add(x);return;}
+   if(v&&typeof v==='object'){
+    for(const k of preferred)if(Object.prototype.hasOwnProperty.call(v,k))add(v[k]);
+    for(const [k,x] of Object.entries(v))if(!preferred.includes(k)&&x&&typeof x==='object')add(x);
+    return;
+   }
+   if(typeof v==='string'){const x=cleanCustomerText(v);if(x.length>=8&&!seen.has(x)){seen.add(x);found.push(x);}}
+  }
+  add(m);return found.sort((a,b)=>b.length-a.length)[0]||'';
+ }
+ function customerTitle(p){
+  const m=meta(p);let name=String(m.name||p.nome||'Produto').trim();
+  name=name.replace(/^\s*(?:link\s+to\s+receive|receive|get)\s+/i,'').trim();
+  name=name.replace(/\b(\d+)\s*months?\b/ig,(_,n)=>`${n} ${Number(n)===1?'Mês':'Meses'}`);
+  name=name.replace(/\b(\d+)\s*days?\b/ig,(_,n)=>`${n} ${Number(n)===1?'Dia':'Dias'}`);
+  const duration=durationLabel(p);
+  if(duration&&!name.toLowerCase().includes(duration.toLowerCase()))name+=` — ${duration}`;
+  return name;
+ }
  function looksEnglish(text){
   const t=String(text||'').toLowerCase();
   if(!t)return false;
@@ -53,21 +78,20 @@ module.exports=function createPremium(d){
  }
  async function customerDescription(p){
   const m=meta(p);
-  const raw=m.description||m.descricao||m.details||m.instructions||'';
-  return translateToPortuguese(raw);
+  return translateToPortuguese(apiText(m));
  }
  async function card(p,client){
-  const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),duration=durationLabel(p),description=await customerDescription(p);
-  const title=duration && !String(p.nome).toLowerCase().includes(duration.toLowerCase()) ? `${p.nome} — ${duration}` : p.nome;
+  const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),description=await customerDescription(p);
+  const title=customerTitle(p);
   let text=`⭐ *${title}*\n\n💰 *${d.brl(price)}* • 📦 *${qty} ${qty===1?'disponível':'disponíveis'}*\n⚡ *Entrega instantânea — ${deliveryLabel(p)}*`;
-  if(description)text+=`\n\n${description}`;
+  if(description)text+=`\n\n📝 *Descrição*\n${description}`;
   return text;
  }
  async function list(from,client,telegram=false){
   const rows=await products(true);await d.salvarSessaoPedido(from,{etapa:'premium_list',ids:rows.map(x=>x.id)});
-  if(telegram)return d.bot().sendMessage(d.tgId(from),'⭐ Assinaturas Premium\n\nEscolha um produto:',{reply_markup:{inline_keyboard:[...rows.map(p=>[{text:`${p.nome} · ${stock(p)>0?'Disponível':'Esgotado'}`,callback_data:'prem_show_'+p.id}]),[{text:'⬅️ Voltar',callback_data:'menu_voltar'}]]}});
+  if(telegram)return d.bot().sendMessage(d.tgId(from),'⭐ Assinaturas Premium\n\nEscolha um produto:',{reply_markup:{inline_keyboard:[...rows.map(p=>[{text:`${customerTitle(p)} · ${stock(p)>0?'Disponível':'Esgotado'}`,callback_data:'prem_show_'+p.id}]),[{text:'⬅️ Voltar',callback_data:'menu_voltar'}]]}});
   let text='⭐ *Assinaturas Premium*\n\n';
-  for(let i=0;i<rows.length;i++){const p=rows[i];text+=`${i+1}️⃣ ${p.nome}\n💰 ${d.brl(await d.precoDaRevenda(client.id,p.id))} · 📦 ${stock(p)} disponíveis\n\n`;}
+  for(let i=0;i<rows.length;i++){const p=rows[i];text+=`${i+1}️⃣ ${customerTitle(p)}\n💰 ${d.brl(await d.precoDaRevenda(client.id,p.id))} · 📦 ${stock(p)} disponíveis\n\n`;}
   await d.enviarTexto(from,text+(rows.length?'':'Nenhum produto ativado no momento.\n\n')+'0️⃣ Voltar');
  }
  async function show(from,client,id,telegram=false){
