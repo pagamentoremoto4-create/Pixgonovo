@@ -1480,8 +1480,33 @@ function timUnlockPedidoConsultaInline(o){
   return `<tr class="tim-dhru-inline"><td colspan="${colsp}"><div class="card" style="margin:8px 0"><b>🔎 Consulta Dhru — Pedido #${o.id}</b><p><b>IMEI:</b> ${safeHtml(o.imei||o.entrada_valor||'-')}</p>${timUnlockResultadoHtml(c)}<div style="margin-top:12px">${acoes}</div></div></td></tr>`;
 }
 
+
+function mascararNomeGrupo(nome){return String(nome||'Cliente').trim().split(/\s+/).filter(Boolean).map(p=>p.length<=3?p[0]+'**':p.slice(0,3)+'*'.repeat(Math.min(5,p.length-3))).join(' ');}
+async function nomeConsultaExecucao(row){const x=await get(`SELECT COALESCE(NULLIF(s.nome_exibicao,''),d.nome,s.nome,'Consulta') nome FROM servicos_catalogo s LEFT JOIN dhru_products d ON d.catalogo_id=s.id WHERE s.id=?`,[Number(row?.servico_id||0)]);return dhruNomeServicoPt(x?.nome||'Consulta');}
+async function avisarGrupoMovimentacao(tipo,nome,item){
+  const grupo=String(await getConfig('consulta_wa_grupo','')||'').trim(); if(!grupo)return;
+  const sock=await consultaObterSocketWhatsApp(grupo); if(!sock)return;
+  const titulo=tipo==='consulta'?'🔎 *CONSULTA REALIZADA*':'🛒 *NOVO SERVIÇO*';
+  await sock.sendMessage(grupo,{text:`${titulo}\n\n👤 Cliente: *${mascararNomeGrupo(nome)}*\n${tipo==='consulta'?'🔍 Consulta':'⚙️ Serviço'}: *${String(item||'-')}*\n\n✅ ${tipo==='consulta'?'Concluída':'Pedido realizado'} com sucesso!`});
+}
+
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
+  const pm=reference.match(/^private-(\d+)$/i);
+  if(pm){
+    const execId=Number(pm[1]),row=await get('SELECT * FROM consulta_dhru_execucoes WHERE id=?',[execId]);
+    if(!row) throw new Error('consulta privada não encontrada');
+    const status=String(body?.status||'').toLowerCase(),orderId=String(body?.order_id||body?.order_uuid||'').trim();
+    const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+    const ok=['success','completed','complete','done'].includes(status),fail=['rejected','reject','failed','failure','cancelled','canceled'].includes(status);
+    await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finalizado_em END WHERE id=?`,[orderId,ok?'CONCLUIDA':fail?'ERRO':(status.toUpperCase()||'PROCESSANDO'),replay,replay,fail?replay:'',ok||fail,execId]);
+    if(ok&&replay){
+      const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');
+      if(numero) await enviarTexto(`wa:${numero}`,`✅ *CONSULTA CONCLUÍDA*\n\n${traduzirResultadoDhruPt(replay)}`);
+      try{await avisarGrupoMovimentacao('consulta',row.cliente_nome||'Cliente',await nomeConsultaExecucao(row));}catch(_){}
+    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
+    return {consultaPrivadaId:execId,status,replay};
+  }
   const gm=reference.match(/^group-(\d+)$/i);
   if(gm){
     const execId=Number(gm[1]);
@@ -4470,10 +4495,22 @@ function extrairMensagemWhatsApp(body) {
 
 function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
   const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
-  const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
+  const primeiroNome = nome.split(/\s+/)[0] || 'Cliente';
+  const saudacao = semSaudacao ? '' : `👋 Olá, *${primeiroNome}*!
 
 `;
-  return `${saudacao}📋 *MENU PRINCIPAL*
+  return `${saudacao}🏠 *CENTRAL DE ATENDIMENTO*
+
+O que deseja fazer?
+
+1️⃣ 🔎 *REALIZAR CONSULTA*
+2️⃣ 🛒 *SERVIÇOS*
+
+💬 Digite a opção desejada.`;
+}
+
+function menuServicosWhatsAppTexto(cliente, pendentes=0) {
+  return `🛒 *CENTRAL DE SERVIÇOS*
 
 💰 Saldo: ${brl(cliente?.saldo || 0)}
 📦 Pedidos: ${Number(pendentes || 0)}
@@ -4488,7 +4525,47 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 8️⃣ 💬 *SUPORTE*
 9️⃣ ⭐ *ASSINATURAS PREMIUM*
 
-💬 Digite a opção desejada.`;
+0️⃣ ⬅️ *MENU PRINCIPAL*`;
+}
+async function enviarMenuServicosWhatsApp(from, cliente){
+  const p=await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE", "EM PROCESSO")',[cliente.id]);
+  await enviarTexto(from,menuServicosWhatsAppTexto(cliente,Number(p?.qtd||0)));
+}
+
+async function consultasPrivadasProdutos(){
+  return await all(`SELECT d.*,s.id AS servico_id,COALESCE(NULLIF(s.nome_exibicao,''),d.nome) AS nome_cliente FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE s.api_provider='DHRU' AND COALESCE(s.ativo,0)=1 ORDER BY nome_cliente COLLATE NOCASE`);
+}
+async function menuConsultasPrivado(from,cliente){
+  const jid=numberToJid(normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||from.replace(/^wa:/,'')));
+  if(await consultaAssinaturaControleAtivo()){
+    const a=await consultaAssinaturaObterPorJid(jid),st=consultaAssinaturaStatus(a);
+    if(st!=='ATIVA'){
+      const motivo=st==='VENCIDA'?'venceu':st==='SUSPENSA'?'está suspensa':'ainda não está ativa';
+      await enviarTexto(from,`🔒 *ACESSO ÀS CONSULTAS*
+
+Sua assinatura ${motivo}.
+
+Para utilizar as consultas, renove/ative seu acesso.
+
+0️⃣ ⬅️ Menu principal`);return;
+    }
+  }
+  const ps=await consultasPrivadasProdutos();
+  if(!ps.length){await enviarTexto(from,`🔎 *CENTRAL DE CONSULTAS*
+
+Nenhuma consulta está disponível no momento.
+
+0️⃣ ⬅️ Menu principal`);return;}
+  const lista=ps.slice(0,40).map((x,i)=>`${i+1}️⃣ ${dhruNomeServicoPt(x.nome_cliente||x.nome)}`).join('\n');
+  await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaIds:ps.slice(0,40).map(x=>Number(x.servico_id))});
+  await enviarTexto(from,`🔎 *CENTRAL DE CONSULTAS*
+
+Escolha a consulta desejada:
+
+${lista}
+
+📋 As consultas são incluídas na sua assinatura.
+0️⃣ ⬅️ Menu principal`);
 }
 
 async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false) {
@@ -4835,7 +4912,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
 
   if (autoAtivadoPorGrupo) {
     await apagarSessaoPedido(from);
-    await salvarSessaoPedido(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'hub_menu' });
     await enviarTexto(from, `👋 Olá, *${String(cliente.nome || 'Cliente').trim()}*!\n\nSeu acesso foi liberado automaticamente.\n\nSelecione uma das opções do menu:`);
     await enviarMenuWhatsApp(from, cliente, true, true);
     return;
@@ -4857,7 +4934,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   if (inativoHa12Horas) {
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
-    await salvarSessaoPedido(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'hub_menu' });
     console.log(`🕛 V157 MENU 12H: +${numeroNorm} voltou após 12h ou mais sem interação.`);
     await enviarMenuWhatsApp(from, cliente, false);
     return;
@@ -4942,7 +5019,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   if (palavrasMenu.includes(comandoMenu)) {
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
-    await salvarSessaoPedido(from, { etapa: 'menu' });
+    await salvarSessaoPedido(from, { etapa: 'hub_menu' });
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
@@ -4986,6 +5063,42 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
 
   let sess = await carregarSessaoPedido(from);
+
+  if(sess?.etapa==='hub_menu'){
+    if(opcao==='1'){ await menuConsultasPrivado(from,cliente); return; }
+    if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'menu'}); await enviarMenuServicosWhatsApp(from,cliente); return; }
+    await enviarMenuWhatsApp(from,cliente,false,true); return;
+  }
+  if(sess?.etapa==='consulta_privada_menu'){
+    if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
+    if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha uma das consultas exibidas ou digite 0 para voltar.');return;}
+    const sid=Array.isArray(sess.consultaIds)?sess.consultaIds[Number(opcao)-1]:null;
+    const prod=sid?await dhruProductForService(sid):null;
+    if(!prod){await enviarTexto(from,'⚠️ Consulta indisponível. Abra o menu novamente.');return;}
+    const fs=dhruFieldsUsuario(prod).filter(f=>f.required!==false);
+    await salvarSessaoPedido(from,{etapa:'consulta_privada_campos',servicoId:Number(sid),produtoUuid:prod.product_uuid,campos:fs,indice:0,valores:{}});
+    if(!fs.length){await enviarTexto(from,'⚠️ Essa consulta não possui campo de entrada configurado.');return;}
+    await enviarTexto(from,`🔎 *${dhruNomeServicoPt(prod.nome||'Consulta')}*
+
+${dhruPromptCampo(fs[0],0,fs.length)}
+
+0️⃣ Cancelar`);return;
+  }
+  if(sess?.etapa==='consulta_privada_campos'){
+    if(opcao==='0'){await menuConsultasPrivado(from,cliente);return;}
+    const campos=Array.isArray(sess.campos)?sess.campos:[],i=Number(sess.indice||0),f=campos[i];
+    if(!f){await menuConsultasPrivado(from,cliente);return;}
+    const valores={...(sess.valores||{})}; valores[String(f.name)]=textoOriginal;
+    if(i+1<campos.length){await salvarSessaoPedido(from,{...sess,etapa:'consulta_privada_campos',indice:i+1,valores});await enviarTexto(from,dhruPromptCampo(campos[i+1],i+1,campos.length)+'\n\n0️⃣ Cancelar');return;}
+    try{
+      const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(NULL,?,?,?,?,?,'ENVIANDO')`,[Number(sess.servicoId),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
+      const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(sess.produtoUuid,valores,ref);
+      await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
+      await salvarSessaoPedido(from,{etapa:'hub_menu'});
+      await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+    }catch(e){await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`);}
+    return;
+  }
 
   const etapasComVoltarProprio = new Set(['servico_categoria','online_categorias','online_busca','historico_menu','historico_lista','conta_menu','conta_dados','suporte_menu','pix_cadastro_menu']);
   if (opcao === '0' && sess && sess.etapa !== 'menu' && !etapasComVoltarProprio.has(sess.etapa)) {
@@ -5268,6 +5381,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
 
   if(await premium.waMessage(from,cliente,sess,textoOriginal))return;
   if (sess?.etapa === 'menu') {
+    if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     if(opcao==='9'){await premium.list(from,cliente);return;}
     if (opcao === '1') {
       const cat=await categoriaLocalWhatsAppObjeto();
@@ -9787,7 +9901,9 @@ function registrarSaudacaoEntradaGrupoConsultas(socketAtual,sessao=null){
         if(agora-ultima<60000) continue;
         consultaSaudacoesRecentes.set(chave,agora);
         setTimeout(()=>consultaSaudacoesRecentes.delete(chave),65000);
-        await consultaMenuAbrir(socketAtual,grupoEvento,participante);
+        const botNumero=normalizarNumeroWhatsApp(jidDoBot||'');
+        const link=botNumero?`https://wa.me/${botNumero}`:'fale com o administrador para acessar o bot';
+        await socketAtual.sendMessage(grupoEvento,{text:`👋 *SEJA BEM-VINDO(A)!*\n\n📢 Aqui você acompanha novidades, avisos e divulgações dos nossos serviços.\n\n🔎 Consultas e 🛒 Serviços agora são realizados diretamente no privado.\n🔒 Os resultados das consultas são entregues somente ao cliente.\n\n🤖 *ACESSAR O BOT*\n👉 ${link}`});
       }
     }catch(e){
       console.log('⚠️ SAUDAÇÃO CONSULTAVIP:',e.message);
