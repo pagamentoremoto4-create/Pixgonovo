@@ -1,0 +1,34 @@
+GGSOMA — CONFIGURAÇÃO PELO PAINEL
+
+1. Instale esta versão do projeto no servidor que já executa o seu bot.
+2. Abra o painel administrativo e clique em GGSOMA API (/admin/ggsoma).
+3. Gere a chave no bot Telegram do fornecedor, cole no painel e salve.
+4. Clique em Testar conexão e consultar saldo.
+5. Sincronize o catálogo. Defina o preço em reais de cada produto e marque Vender este produto.
+6. Ative a integração para liberar compras automáticas.
+
+Não é necessário cadastrar variáveis GGSOMA no Render. O endereço oficial já está configurado no código. A instalação da versão atualizada no servidor continua sendo necessária.
+
+O custo do fornecedor e seu saldo são em USD. O preço de venda é definido manualmente em reais, considerando câmbio e sua margem. Produtos novos começam fora do catálogo de vendas até você definir preço e ativar.
+
+FLUXO
+WhatsApp: Serviços Online > categoria digital > produto > 1 para confirmar.
+Telegram: Serviços > produto > 1 para confirmar.
+Site: Serviços > produto > Confirmar solicitação.
+
+Compra por unidade. O cliente precisa ter saldo suficiente. No bot, o fluxo existente de pagamento PIX pode completar o saldo; a confirmação do pagamento dispara a compra. No site, adicione saldo antes de comprar.
+
+Entrega LINK, COUPON ou READY_ACCOUNT enviada em privado. No site, Histórico > Ver entrega. O fornecedor debita o saldo da sua carteira no Telegram GGSOMA.
+
+O catálogo é atualizado a cada 120 segundos quando a integração está ativa. A atualização preserva o preço de venda escolhido. Produtos removidos pelo fornecedor são desativados. Estoque é conferido novamente antes da primeira compra.
+
+Timeout e erros temporários: o pedido permanece em processo, com saldo reservado, e o sistema repete a mesma solicitação com o mesmo externalOrderId. Não cancele nem crie outro pedido para substituir uma tentativa ainda não conciliada. A área GGSOMA mostra status e código de rastreio de falhas.
+
+Rejeição definitiva, como falta de estoque/saldo do fornecedor: o pedido é cancelado e o valor volta à carteira do cliente. Não há reembolso PIX externo automático.
+
+A chave API e o conteúdo de entrega são criptografados. Preserve o banco de dados e o arquivo ggsoma-secret.key no diretório de dados persistente nas reinstalações e backups. Esse arquivo é criado automaticamente; nenhuma variável de ambiente nova é necessária.
+
+TESTES
+npm run test:ggsoma (Node + Python 3)
+Testes simulados cobrem cobrança única, timeout e reinício, confirmação concorrente, estorno, saldo insuficiente, criptografia, proteção de status, CSRF e acesso à entrega apenas pelo dono do pedido.
+A API real não foi acessada com credenciais nem foram realizadas compras reais.

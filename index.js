@@ -670,20 +670,32 @@ function extrairImeisEmLote(texto) {
 
   return [...new Set(imeis)];
 }
+function imeiLuhnValido(valor) {
+  const imei=String(valor||'');
+  if(!/^\d{15}$/.test(imei)) return false;
+  let soma=0;
+  for(let i=0;i<15;i++){
+    let digito=Number(imei[i]);
+    if(i%2===1){digito*=2;if(digito>9)digito-=9;}
+    soma+=digito;
+  }
+  return soma%10===0;
+}
+function avisoImeisInvalidos(invalidos){
+  return `❌ IMEI inválido. Confira o número no aparelho e envie novamente.${invalidos.length?`\n\nRejeitados:\n${invalidos.join('\n')}`:''}`;
+}
 function validarEntradaServico(servico, textoOriginal) {
+  if(servico?.api_provider==='GGSOMA')return String(textoOriginal||'').trim()==='1'?{ok:true,entradas:['Compra digital']}:{ok:false,erro:'Digite 1 para confirmar a compra ou 0 para voltar.'};
   const tipo = normalizarTipoEntrada(servico?.tipo_entrada);
   const bruto = String(textoOriginal || '').trim();
   if (tipo === 'IMEI') {
     const imeis = extrairImeisEmLote(bruto);
-    if (!imeis.length) return { ok: false, erro: `❌ IMEI inválido.\n\n📱 Envie de 1 até 5 IMEIs.\nCada IMEI precisa ter 15 números.\n\nExemplo:\n356789123456789\n356789123456780` };
-    if (imeis.length > 5) return { ok: false, erro: `❌ Limite excedido.\n\nVocê pode enviar no máximo 5 IMEIs por pedido.\nVocê enviou: ${imeis.length}` };
-
-    const invalidos = imeis.filter(i => !/^\d{15}$/.test(i));
-    if (invalidos.length) {
-      return { ok: false, erro: `❌ IMEI inválido.\n\nOs IMEIs abaixo foram corrigidos automaticamente, mas não ficaram com 15 dígitos:\n${invalidos.join('\n')}\n\nCorrija e tente novamente.` };
-    }
-
-    return { ok: true, entradas: imeis };
+    if (!imeis.length) return { ok: false, erro: avisoImeisInvalidos([]) };
+    const validos=imeis.filter(imeiLuhnValido);
+    const invalidos=imeis.filter(i=>!imeiLuhnValido(i));
+    if(validos.length>5) return {ok:false,erro:`❌ Limite excedido.\n\nVocê pode enviar no máximo 5 IMEIs válidos por pedido.\nVocê enviou: ${validos.length}`};
+    if(!validos.length) return {ok:false,erro:avisoImeisInvalidos(invalidos)};
+    return {ok:true,entradas:validos,invalidos};
   }
   if (!bruto || bruto.length < 2) return { ok: false, erro: `❌ ${labelEntradaServico(servico)} inválido.\n\nEnvie a informação solicitada ou digite cancelar.` };
   return { ok: true, entradas: [bruto] };
@@ -1209,7 +1221,10 @@ function dhruParseInput(product, entrada){
   const txt=String(entrada||'').trim();
   const out={};
   if(required.length<=1 && fields.length<=1){
-    if(fields[0]) out[fields[0].name]=txt;
+    if(fields[0]){
+      const valor=dhruValidarCampoImei(fields[0],txt);
+      out[fields[0].name]=valor;
+    }
     return out;
   }
   const lines=txt.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
@@ -1221,11 +1236,29 @@ function dhruParseInput(product, entrada){
   for(const f of fields){
     const key=String(f.name||'');
     const val=out[key.toLowerCase()];
-    if(val!==undefined) final[key]=val;
+    if(val!==undefined) final[key]=dhruValidarCampoImei(f,val);
   }
   const missing=required.filter(f=>!String(final[f.name]??'').trim());
   if(missing.length) throw new Error(`Dados obrigatórios ausentes: ${missing.map(f=>f.name).join(', ')}`);
   return final;
+}
+function dhruCampoEhImei(campo){return /^imei(?:[ _-]*(?:number|[1-9]\d*))?$/i.test(String(campo?.name||'').trim());}
+function dhruValidarCampoImei(campo,valor){
+  if(!dhruCampoEhImei(campo))return valor;
+  if(!String(valor||'').trim()){
+    if(campo?.required===false)return valor;
+    throw new Error('IMEI inválido. Confira o número no aparelho e envie novamente.');
+  }
+  const imei=String(valor).replace(/\D/g,'');
+  if(!imeiLuhnValido(imei))throw new Error('IMEI inválido. Confira o número no aparelho e envie novamente.');
+  return imei;
+}
+async function dhruErroImeiAntesPedido(servico,entradas){
+  if(String(servico?.api_provider||'').toUpperCase()!=='DHRU')return '';
+  const produto=await dhruProductForService(servico.id);
+  if(!produto||!dhruFieldsUsuario(produto).some(dhruCampoEhImei))return '';
+  try{for(const entrada of entradas)dhruParseInput(produto,entrada);return '';}
+  catch(e){return `❌ ${e.message}`;}
 }
 async function textoEntradaDhru(servico){
   const p=await dhruProductForService(servico.id);
@@ -1260,6 +1293,8 @@ async function dhruEnviarPedidoOficial(productUuid, camposEntrada, referenceId){
 }
 
 async function executarPedidoDhru(pedidoId){
+  const gs=await get('SELECT s.api_provider FROM pedidos p JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?',[pedidoId]);
+  if(gs?.api_provider==='GGSOMA')return ggsoma.execute(pedidoId);
   const pedido=await get(`SELECT p.*,s.api_provider,s.api_service_id FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`,[pedidoId]);
   if(!pedido||pedido.api_provider!=='DHRU'||!pedido.api_service_id) return {executado:false};
   const ja=await get(`SELECT * FROM dhru_orders WHERE pedido_id=? AND status NOT IN ('ERRO_ENVIO','REJEITADO') ORDER BY id DESC LIMIT 1`,[pedido.id]);
@@ -1354,7 +1389,7 @@ function timUnlockPedidoIdFromReference(ref){
 }
 
 function timUnlockIsDesbloqueioTim(pedido){ return normalizarNomeServico(pedido?.servico_nome||'')==='desbloqueio tim'; }
-function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return /^\d{15}$/.test(v)?v:''; }
+function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return imeiLuhnValido(v)?v:''; }
 async function timUnlockDhruProduct(){
   const uuid=String(await getConfig('tim_unlock_dhru_product_uuid','')).trim();
   if(!uuid) return null;
@@ -2366,6 +2401,7 @@ async function initDB() {
   )`);
   await run(`INSERT OR IGNORE INTO categorias_produtos (nome) SELECT DISTINCT COALESCE(NULLIF(TRIM(categoria),''),'eSIM') FROM esim_planos`);
 
+  await ggsoma.init();
   PAINEL_TEMA = await getConfig('painel_tema', 'central-hacker-pro');
   if (!TEMAS_PAINEL[PAINEL_TEMA]) { PAINEL_TEMA = 'central-hacker-pro'; await setConfig('painel_tema', PAINEL_TEMA); }
   PAINEL_BG_MODE = await getConfig('painel_bg_mode', 'soft');
@@ -2514,7 +2550,7 @@ const CLIENTE_HACKER_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAABAAAAAYACAYAAADogjqqAABcQ
 // V171: estilos e interações também ficam embutidos no index.js. Assim o login
 // continua completo mesmo quando um deploy omite arquivos da pasta public.
 const CLIENTE_SITE_CSS_EMBUTIDO = ":root{--bg:#02080d;--panel:#07131b;--panel2:#0a1c25;--line:#153745;--cyan:#28e7ff;--green:#a8ff2a;--text:#eaf7fa;--muted:#83a2ad;--red:#ff5570;--yellow:#ffc857}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100vh;background:radial-gradient(circle at 75% 0,rgba(40,231,255,.09),transparent 32%),var(--bg);color:var(--text);font:14px Inter,Arial,sans-serif}.cu-grid-bg{position:fixed;inset:0;pointer-events:none;opacity:.18;background-image:linear-gradient(rgba(40,231,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(40,231,255,.06) 1px,transparent 1px);background-size:35px 35px;mask-image:linear-gradient(to bottom,#000,transparent 80%)}a{color:var(--cyan);text-decoration:none}.cu-main{min-height:100vh}.cu-content{position:relative;padding:28px;max-width:1450px;margin:auto}.cu-authenticated .cu-main{margin-left:245px}.cu-sidebar{position:fixed;z-index:20;inset:0 auto 0 0;width:245px;padding:22px 16px;background:linear-gradient(180deg,#07141c,#030b10);border-right:1px solid var(--line);display:flex;flex-direction:column}.cu-brand{display:flex;align-items:center;gap:9px;color:white;font-size:19px;padding:8px}.cu-brand>span{color:var(--green);font-size:30px}.cu-brand em{font-style:normal;color:var(--cyan)}.cu-sidebar nav{margin-top:30px}.cu-sidebar nav a{display:flex;gap:12px;padding:12px;margin:5px 0;color:#a8bec5;border-radius:10px;font-weight:750}.cu-sidebar nav a:hover{color:#fff;background:#0b222d;box-shadow:inset 3px 0 var(--green)}.cu-online{margin-top:auto;padding:12px;color:#9bb2ba;border-top:1px solid var(--line)}.cu-online i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 12px var(--green);margin-right:8px}.cu-top{height:73px;padding:0 27px;border-bottom:1px solid var(--line);background:rgba(3,12,17,.88);backdrop-filter:blur(12px);display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:12}.cu-top #cuMenu{display:none}.cu-top div:nth-child(2){display:flex;flex-direction:column}.cu-top small,.cu-muted{color:var(--muted)}.cu-balance{margin-left:auto;padding:8px 16px;border:1px solid #254856;border-radius:10px}.cu-balance strong{color:var(--green)}.cu-card{background:linear-gradient(145deg,rgba(10,28,37,.96),rgba(5,17,24,.96));border:1px solid var(--line);border-radius:16px;padding:20px;margin:15px 0;box-shadow:0 18px 50px rgba(0,0,0,.25)}.cu-card h1,.cu-card h2,.cu-card h3{margin-top:0}.cu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.cu-stat strong{display:block;font-size:28px;color:var(--cyan);margin-top:7px}.cu-stat.green strong{color:var(--green)}.cu-hero{display:grid;grid-template-columns:1.35fr .65fr;gap:25px;align-items:center;overflow:hidden}.cu-hero h1{font-size:34px;margin-bottom:8px}.cu-hero b{color:var(--green)}.cu-actions{display:flex;gap:9px;flex-wrap:wrap}.cu-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid #266072;border-radius:10px;padding:11px 15px;background:#0a2530;color:white;font-weight:850;cursor:pointer}.cu-btn:hover{border-color:var(--cyan);box-shadow:0 0 18px rgba(40,231,255,.12)}.cu-btn.primary{color:#031014;background:var(--green);border-color:var(--green)}.cu-btn.danger{background:#36131a;border-color:#873040}.cu-btn.secondary{background:#10222b}.cu-btn.small{padding:7px 10px;font-size:12px}label{font-weight:750;display:block;margin:12px 0 6px}input,select,textarea{width:100%;padding:12px 13px;background:#031016;color:#fff;border:1px solid #244653;border-radius:10px;outline:0}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(40,231,255,.09)}textarea{resize:vertical}.cu-table-wrap{overflow:auto}.cu-table{width:100%;border-collapse:collapse;min-width:720px}.cu-table th,.cu-table td{padding:12px 10px;border-bottom:1px solid #15303a;text-align:left}.cu-table th{color:#87a6b0;font-size:11px;text-transform:uppercase}.cu-badge{display:inline-block;padding:5px 8px;border-radius:99px;border:1px solid;font-size:11px;font-weight:850}.cu-badge.PENDENTE{color:var(--yellow);background:#2a210d}.cu-badge.EM-PROCESSO{color:var(--cyan);background:#092530}.cu-badge.FINALIZADO{color:var(--green);background:#17290c}.cu-badge.CANCELADO{color:var(--red);background:#2d1018}.cu-tabs{display:flex;gap:7px;flex-wrap:wrap;margin:14px 0}.cu-tab{padding:9px 12px;border:1px solid var(--line);border-radius:9px;color:#a8bec5}.cu-tab.active{color:#061014;background:var(--cyan)}.cu-login-page .cu-main{margin:0}.cu-login-page .cu-content{max-width:none;padding:0}.cu-login{min-height:100vh;display:grid;grid-template-columns:1.15fr .85fr}.cu-login-art{position:relative;min-height:620px;overflow:hidden;background:radial-gradient(circle at 50% 35%,rgba(40,231,255,.24),transparent 38%),#02090e}.cu-login-art img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.78;mix-blend-mode:screen}.cu-login-copy{position:absolute;z-index:2;left:8%;right:8%;bottom:8%;text-shadow:0 3px 20px #000}.cu-login-copy h1{font-size:45px;margin:0}.cu-login-copy h1 em{font-style:normal;color:var(--green)}.cu-login-panel{display:grid;place-items:center;padding:35px;background:#041017}.cu-login-box{width:min(440px,100%)}.cu-login-box>h2{font-size:28px;margin-bottom:6px}.cu-auth-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:24px 0 12px}.cu-auth-tabs button{padding:10px 5px;border:1px solid var(--line);background:#081b24;color:#95adb5;border-radius:9px;cursor:pointer}.cu-auth-tabs button.active{color:#041015;background:var(--cyan)}.cu-auth-form{display:none}.cu-auth-form.active{display:block}.cu-note,.cu-alert{padding:11px 13px;border-radius:9px;border:1px solid #244956;background:#09202a;margin:12px 0}.cu-alert.error{border-color:#7e3040;background:#281018;color:#ffb5c0}.cu-alert.ok{border-color:#426a1d;background:#15240d;color:#caff86}.cu-services{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.cu-service{display:flex;flex-direction:column}.cu-service .cu-btn{margin-top:auto}.cu-service-price{font-size:24px;color:var(--green);font-weight:900}.cu-filter{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:9px;align-items:end}.cu-toast{position:fixed;z-index:50;right:20px;bottom:20px;max-width:360px;padding:12px 16px;background:#0b2732;border:1px solid var(--cyan);border-radius:10px;opacity:0;transform:translateY(10px);pointer-events:none;transition:.2s}.cu-toast.show{opacity:1;transform:none}.cu-code{font-family:ui-monospace,monospace;word-break:break-all;color:#c6f8ff}.cu-empty{text-align:center;padding:35px;color:var(--muted)}@media(max-width:900px){.cu-login{grid-template-columns:1fr}.cu-login-art{min-height:330px}.cu-login-copy h1{font-size:34px}.cu-authenticated .cu-main{margin:0}.cu-sidebar{transform:translateX(-105%);transition:.2s}.cu-sidebar.open{transform:none}.cu-top #cuMenu{display:block;background:none;border:0;color:white;font-size:23px}.cu-hero{grid-template-columns:1fr}.cu-filter{grid-template-columns:1fr 1fr}.cu-filter>div:first-child{grid-column:1/-1}}@media(max-width:560px){.cu-content{padding:16px}.cu-top{padding:0 15px}.cu-top>div:nth-child(2){display:none}.cu-balance{margin-left:auto;padding:7px 9px}.cu-login-panel{padding:24px 18px}.cu-login-art{min-height:250px}.cu-login-copy h1{font-size:27px}.cu-auth-tabs{grid-template-columns:1fr}.cu-grid,.cu-services,.cu-filter{grid-template-columns:1fr}.cu-filter>div:first-child{grid-column:auto}.cu-actions .cu-btn{width:100%}}\n";
-const CLIENTE_SITE_JS_EMBUTIDO = "(function(){\n  const menu=document.getElementById('cuMenu'),side=document.getElementById('cuSidebar');\n  if(menu&&side) menu.addEventListener('click',()=>side.classList.toggle('open'));\n  document.querySelectorAll('[data-auth-tab]').forEach(btn=>btn.addEventListener('click',()=>{\n    document.querySelectorAll('[data-auth-tab]').forEach(x=>x.classList.remove('active'));\n    document.querySelectorAll('.cu-auth-form').forEach(x=>x.classList.remove('active'));\n    btn.classList.add('active'); document.getElementById('auth-'+btn.dataset.authTab)?.classList.add('active');\n  }));\n  document.querySelectorAll('[data-copy]').forEach(btn=>btn.addEventListener('click',async()=>{\n    const value=document.querySelector(btn.dataset.copy)?.value||btn.dataset.value||'';\n    if(!value)return; try{await navigator.clipboard.writeText(value);}catch(_){const t=document.createElement('textarea');t.value=value;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}\n    toast('Copiado com sucesso.');\n  }));\n  document.querySelectorAll('[data-confirm]').forEach(el=>el.addEventListener('click',e=>{if(!confirm(el.dataset.confirm||'Confirmar esta ação?'))e.preventDefault();}));\n  document.querySelectorAll('.imei-textarea').forEach(limparImeiTexto);\n  const initial=document.body.dataset.message;if(initial)toast(initial);\n  function toast(msg){const el=document.getElementById('cuToast');if(!el)return;el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000)}\n  window.cuToast=toast;\n})();\nfunction limparImeiTexto(el){\n  if(!el||!el.value)return;let linhas=el.value.split(/\\r?\\n/).map(x=>x.replace(/\\D/g,'').slice(0,15)).filter(Boolean).slice(0,5);el.value=linhas.join('\\n');\n  const c=el.parentElement?.querySelector('.imei-counter');if(c)c.textContent='IMEIs: '+linhas.length+'/5 · válidos: '+linhas.filter(x=>x.length===15).length;\n}\n";
+const CLIENTE_SITE_JS_EMBUTIDO = "(function(){\n  const menu=document.getElementById('cuMenu'),side=document.getElementById('cuSidebar');\n  if(menu&&side) menu.addEventListener('click',()=>side.classList.toggle('open'));\n  document.querySelectorAll('[data-auth-tab]').forEach(btn=>btn.addEventListener('click',()=>{\n    document.querySelectorAll('[data-auth-tab]').forEach(x=>x.classList.remove('active'));\n    document.querySelectorAll('.cu-auth-form').forEach(x=>x.classList.remove('active'));\n    btn.classList.add('active'); document.getElementById('auth-'+btn.dataset.authTab)?.classList.add('active');\n  }));\n  document.querySelectorAll('[data-copy]').forEach(btn=>btn.addEventListener('click',async()=>{\n    const value=document.querySelector(btn.dataset.copy)?.value||btn.dataset.value||'';\n    if(!value)return; try{await navigator.clipboard.writeText(value);}catch(_){const t=document.createElement('textarea');t.value=value;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}\n    toast('Copiado com sucesso.');\n  }));\n  document.querySelectorAll('[data-confirm]').forEach(el=>el.addEventListener('click',e=>{if(!confirm(el.dataset.confirm||'Confirmar esta ação?'))e.preventDefault();}));\n  document.querySelectorAll('.imei-textarea').forEach(limparImeiTexto);\n  const initial=document.body.dataset.message;if(initial)toast(initial);\n  function toast(msg){const el=document.getElementById('cuToast');if(!el)return;el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000)}\n  window.cuToast=toast;\n})();\nfunction imeiValidoPortal(v){if(!/^\\d{15}$/.test(v))return false;let soma=0;for(let i=0;i<15;i++){let d=Number(v[i]);if(i%2){d*=2;if(d>9)d-=9;}soma+=d;}return soma%10===0;}\nfunction limparImeiTexto(el){\n  if(!el||!el.value)return;let linhas=el.value.split(/\\r?\\n/).map(x=>x.replace(/\\D/g,'').slice(0,15)).filter(Boolean).slice(0,5);el.value=linhas.join('\\n');\n  const c=el.parentElement?.querySelector('.imei-counter');if(c)c.textContent='IMEIs: '+linhas.length+'/5 · válidos: '+linhas.filter(imeiValidoPortal).length;\n}\n";
 const CLIENTE_PORTAL_CSS_EMBUTIDO = ".cp-shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh;background:radial-gradient(circle at 65% 30%,#06344a 0,transparent 28%),radial-gradient(circle at 52% 80%,rgba(154,244,40,.08),transparent 30%),#020b12}.cp-sidebar{position:sticky;top:0;height:100vh;padding:28px 0 22px;background:linear-gradient(rgba(3,20,31,.98),rgba(2,12,19,.96));border-right:1px solid rgba(24,216,255,.32);display:flex;flex-direction:column;z-index:10}.cp-brand{color:#fff;font-size:20px;font-weight:800;display:flex;align-items:center;gap:10px;padding:0 22px;white-space:nowrap}.cp-brand em{font-style:normal;color:#9af428}.cp-brand-lock{display:grid;place-items:center;width:42px;height:42px;border:2px solid #18d8ff;border-radius:50%;color:#9af428;box-shadow:0 0 22px rgba(24,216,255,.35)}.cp-sidebar nav{display:grid;gap:10px;margin-top:72px}.cp-sidebar nav a{height:78px;border-left:3px solid transparent;color:#bed0db;font-size:16px;text-transform:uppercase;padding:0 25px;display:flex;align-items:center;gap:18px}.cp-sidebar nav a span{font-size:27px;color:#dff9ff}.cp-sidebar nav a:hover,.cp-sidebar nav a.active{color:#18d8ff;background:linear-gradient(90deg,rgba(24,216,255,.16),transparent);border-left-color:#18d8ff}.cp-network{margin:auto 22px 0;padding:14px;border:1px solid rgba(154,244,40,.22);background:rgba(7,34,24,.42);display:flex;align-items:center;gap:10px;color:#89a6b6;font-size:12px}.cp-network i,.cp-signal i{width:9px;height:9px;border-radius:50%;background:#9af428;box-shadow:0 0 12px #9af428}.cp-network b,.cp-signal b{color:#9af428}.cp-main{min-width:0;padding:34px}.cp-home-grid{min-height:650px;display:grid;grid-template-columns:minmax(600px,1fr) minmax(350px,420px);gap:24px}.cp-hero{position:relative;overflow:hidden;min-height:650px;border:1px solid rgba(24,216,255,.18);background:radial-gradient(circle at 60% 55%,rgba(24,216,255,.14),transparent 28%),linear-gradient(135deg,rgba(5,24,37,.74),rgba(2,10,16,.4));box-shadow:0 24px 80px rgba(0,0,0,.45)}.cp-hero:before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 49%,rgba(24,216,255,.1) 50%,transparent 51%) 0 0/64px 64px,linear-gradient(transparent 49%,rgba(24,216,255,.06) 50%,transparent 51%);opacity:.3}.cp-hero>img{position:absolute;z-index:1;left:-2%;bottom:0;width:60%;height:95%;object-fit:cover;object-position:62% center;mix-blend-mode:screen;filter:saturate(1.08) contrast(1.08);mask-image:linear-gradient(to right,#000 72%,transparent 100%)}.cp-phone{position:absolute;z-index:2;left:58%;top:47%;width:240px;height:470px;transform:translate(-50%,-50%) rotate(7deg);border:3px solid #6ce3ff;border-radius:38px;background:linear-gradient(160deg,#061827,#02080e);box-shadow:0 0 0 5px #11384a,0 0 60px rgba(24,216,255,.32)}.cp-speaker{position:absolute;left:50%;top:9px;transform:translateX(-50%);width:80px;height:18px;background:#010408;border-radius:12px}.cp-phone-content{height:100%;padding:60px 18px 20px;text-align:center;display:flex;align-items:center;flex-direction:column}.cp-orbit{width:122px;height:122px;border-radius:50%;border:1px solid #18d8ff;display:grid;place-items:center;box-shadow:0 0 25px rgba(24,216,255,.3);background:repeating-radial-gradient(circle,transparent 0,transparent 12px,rgba(24,216,255,.12) 13px,rgba(24,216,255,.12) 14px);font-size:70px;color:#9af428}.cp-phone-content>b{margin-top:24px;color:#9af428;font-size:14px}.cp-phone-content small{font-size:10px;color:#fff;margin-top:5px}.cp-world{margin-top:24px;width:170px;height:75px;background:radial-gradient(rgba(24,216,255,.35),transparent 70%);border-top:1px solid rgba(24,216,255,.32);border-bottom:1px solid rgba(24,216,255,.32)}.cp-secure{margin-top:auto;padding:12px 10px;border:1px solid rgba(154,244,40,.45);color:#9af428;font-size:11px;width:100%}.cp-signal{position:absolute;z-index:3;top:32px;right:24px;padding:12px 16px;border:1px solid rgba(24,216,255,.32);background:rgba(3,18,28,.88);font-size:10px;color:#bfefff;display:flex;align-items:center;gap:10px}.cp-primary-action{position:absolute;z-index:4;left:30px;bottom:35px;width:250px;height:64px;border:1px solid #18d8ff;background:linear-gradient(135deg,#12b7df,#1ce0ff);color:#00111b;font-size:22px;font-weight:800;clip-path:polygon(0 0,92% 0,100% 50%,92% 100%,0 100%);display:flex;align-items:center;justify-content:center;gap:55px;box-shadow:0 0 28px rgba(24,216,255,.35)}.cp-primary-action span{font-size:34px}.cp-login-card{min-height:650px;border:1px solid rgba(24,216,255,.58);background:linear-gradient(160deg,rgba(6,30,46,.97),rgba(3,14,23,.98));padding:28px;border-radius:18px 0 18px 18px;box-shadow:0 24px 80px rgba(0,0,0,.45),inset 0 0 40px rgba(24,216,255,.05)}.cp-login-icon{width:58px;height:58px;border:2px solid #18d8ff;border-radius:50%;display:grid;place-items:center;margin:auto;color:#18d8ff;font-size:30px;box-shadow:0 0 24px rgba(24,216,255,.25)}.cp-login-card h1{font-size:28px;text-transform:uppercase;text-align:center;color:#18d8ff;margin:16px 0 4px}.cp-login-card>p{text-align:center;color:#89a6b6;margin:0 0 22px}.cp-tabs{gap:5px;padding:5px;background:#020c13;border:1px solid rgba(24,216,255,.18);margin:0 0 22px}.cp-tabs button{border:0;border-radius:0;background:transparent;color:#89a6b6;padding:11px 4px}.cp-tabs button.active{background:linear-gradient(135deg,rgba(24,216,255,.2),rgba(154,244,40,.12));color:#fff;box-shadow:inset 0 -2px #9af428}.cp-auth-form.active{display:grid;gap:16px}.cp-auth-form label{display:grid;gap:8px;color:#d9f4ff;font-size:14px;margin:0}.cp-input{height:54px;border:1px solid rgba(24,216,255,.5);display:flex;align-items:center;background:#03101a}.cp-input:focus-within{border-color:#9af428;box-shadow:0 0 0 3px rgba(154,244,40,.1)}.cp-input i{font-style:normal;padding:0 14px;color:#18d8ff}.cp-input input{border:0;box-shadow:none;background:transparent;border-radius:0;font-size:16px}.cp-login-button{min-height:57px;border:0;background:linear-gradient(100deg,#9af428,#c8ff45);color:#071105;font-weight:850;font-size:17px;cursor:pointer;clip-path:polygon(0 0,95% 0,100% 50%,95% 100%,0 100%)}.cp-login-button span{float:right;margin-right:14px;font-size:28px}.cp-access-note{margin-top:17px;padding:10px;text-align:center;font-size:12px;color:#96a9b4;background:rgba(255,255,255,.03)}.cp-first{display:flex;justify-content:center;gap:7px;color:#89a6b6;border-top:1px solid rgba(24,216,255,.16);padding-top:18px;margin-top:18px}.cp-first b{color:#18d8ff}.cp-status{margin-top:18px;display:flex;align-items:center;justify-content:center;padding:18px 24px;border:1px solid rgba(24,216,255,.25);background:rgba(3,18,28,.8);gap:34px}.cp-status>div{display:flex;align-items:center;gap:14px;min-width:190px}.cp-status>div>span{width:46px;height:46px;border:1px solid #9af428;border-radius:50%;display:grid;place-items:center;font-size:21px;color:#9af428}.cp-status>div:nth-of-type(2)>span{border-color:#18d8ff;color:#18d8ff}.cp-status p{display:grid;margin:0}.cp-status small{color:#89a6b6;font-size:11px}.cp-status i{color:#18d8ff;font-size:24px;font-style:normal}.cp-mobile-head{display:none}\n@media(max-width:1100px){.cp-shell{grid-template-columns:170px 1fr}.cp-brand{font-size:15px;padding:0 13px}.cp-home-grid{grid-template-columns:1fr}.cp-hero{min-height:580px}.cp-login-card{min-height:auto}.cp-status{flex-wrap:wrap}}\n@media(max-width:720px){.cp-shell{display:block}.cp-sidebar{display:none}.cp-mobile-head{height:72px;display:flex;align-items:center;padding:0 16px;border-bottom:1px solid rgba(24,216,255,.32);position:sticky;top:0;z-index:9;background:rgba(2,11,18,.96)}.cp-main{padding:14px}.cp-home-grid{display:flex;flex-direction:column}.cp-hero{min-height:540px}.cp-hero>img{width:78%;height:78%;left:-15%;object-position:center}.cp-phone{width:185px;height:370px;left:68%;top:48%;border-radius:28px}.cp-phone-content{padding-top:45px}.cp-orbit{width:85px;height:85px;font-size:48px}.cp-world{width:135px}.cp-primary-action{left:18px;bottom:18px;width:210px;height:56px;font-size:18px;gap:32px}.cp-signal{right:10px;top:12px}.cp-login-card{padding:22px 16px}.cp-status{display:grid;gap:12px}.cp-status>div{min-width:0}.cp-status>i{display:none}.cp-tabs{grid-template-columns:repeat(3,1fr)}}\n";
 function clientePage(title, body, cliente=null) {
   const nav = cliente ? `<aside class="cu-sidebar" id="cuSidebar"><a class="cu-brand" href="/cliente/dashboard"><span>⌾</span><b>Central<em>Unlocker</em></b></a><nav><a href="/cliente/dashboard">⌂ <span>Início</span></a><a href="/cliente/servicos">◇ <span>Serviços</span></a><a href="/cliente/esim">▣ <span>Comprar eSIM</span></a><a href="/cliente/historico">▤ <span>Histórico</span></a><a href="/cliente/conta">◎ <span>Minha conta</span></a><a href="/cliente/pagamentos">＋ <span>Adicionar saldo</span></a><a href="/cliente/suporte">◉ <span>Suporte</span></a></nav><div class="cu-online"><i></i> Sistema online</div></aside>` : '';
@@ -2523,11 +2559,12 @@ function clientePage(title, body, cliente=null) {
 }
 
 function clienteEntradaHtml(s) {
+  if(s.api_provider==='GGSOMA')return '<input type="hidden" name="entrada" value="1"><input type="hidden" name="ggsomaToken" value="'+crypto.randomUUID()+'"><p>Compra de 1 unidade. A entrega ficará disponível no histórico.</p>';
   const tipo = normalizarTipoEntrada(s.tipo_entrada);
   const label = safeHtml(labelEntradaServico(s));
   if (tipo === 'IMEI') {
     return `<label>${label}</label>
-      <textarea name="entrada" class="imei-textarea" rows="5" required inputmode="numeric" placeholder="353625361425365\n353625361425366" oninput="limparImeiTexto(this)" onpaste="setTimeout(()=>limparImeiTexto(this),0)"></textarea>
+      <textarea name="entrada" class="imei-textarea" rows="5" required inputmode="numeric" placeholder="359372358802122\n359372358407807" oninput="limparImeiTexto(this)" onpaste="setTimeout(()=>limparImeiTexto(this),0)"></textarea>
       <div class="imei-counter">IMEIs: 0/5 · válidos: 0</div>
       <div class="imei-help">Digite 1 IMEI por linha. Cada linha aceita no máximo 15 números. Máximo de 5 IMEIs.</div>`;
   }
@@ -2539,7 +2576,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -2793,8 +2830,9 @@ async function categoriasServicosWhatsApp(){
   for(const r of rows){
     const nomeOriginal=String(r.categoria||'Serviços').trim()||'Serviços';
     const provider=String(r.api_provider||'');
+    if(provider.toUpperCase()==='GGSOMA'){mapa.push({categoria:nomeOriginal,api_provider:provider,nome:nomeOriginal,qtd:Number(r.qtd||0)});continue;}
     if(provider.toUpperCase()!=='DHRU'){
-      const existente=mapa.find(x=>String(x.api_provider||'').toUpperCase()!=='DHRU');
+      const existente=mapa.find(x=>!['DHRU','GGSOMA'].includes(String(x.api_provider||'').toUpperCase()));
       if(existente){existente.qtd+=Number(r.qtd||0);existente.categoriasOriginais.push(nomeOriginal);continue;}
       mapa.push({categoria:nomeOriginal,categoriasOriginais:[nomeOriginal],api_provider:provider,nome:nomeLocal,qtd:Number(r.qtd||0)});
       continue;
@@ -2814,11 +2852,11 @@ async function listarServicosTexto(revenda) {
 
 async function categoriaLocalWhatsAppObjeto(){
   const cats=await categoriasServicosWhatsApp();
-  return cats.find(c=>String(c.api_provider||'').toUpperCase()!=='DHRU')||null;
+  return cats.find(c=>!['DHRU','GGSOMA'].includes(String(c.api_provider||'').toUpperCase()))||null;
 }
 async function categoriasDhruWhatsApp(){
   const cats=await categoriasServicosWhatsApp();
-  return cats.filter(c=>String(c.api_provider||'').toUpperCase()==='DHRU');
+  return cats.filter(c=>['DHRU','GGSOMA'].includes(String(c.api_provider||'').toUpperCase()));
 }
 async function listarBlacklistBrazilTexto(revenda){
   const cat=await categoriaLocalWhatsAppObjeto();
@@ -2841,7 +2879,7 @@ async function listarServicosOnlineTexto(){
 async function buscarServicosOnlineWhatsApp(termo){
   const q=String(termo||'').trim().toLowerCase();
   if(!q)return [];
-  const rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')='DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
+  const rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'') IN ('DHRU','GGSOMA') ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
   const achados=[];
   for(const r of rows){
     const nome=nomeServicoWhatsApp(r);
@@ -2862,8 +2900,25 @@ async function textoBuscaServicosOnline(rows,revenda,termo){
   texto+=`0️⃣ ⬅️ Voltar`;
   return texto;
 }
+async function confirmarCompraGgsoma(from,cliente,servico,texto){
+  if(String(texto).trim()!=='1'){await enviarTexto(from,'Digite 1 para confirmar a compra ou 0 para voltar.');return;}
+  const token=crypto.randomUUID();
+  await apagarSessaoPedido(from);
+  try{await ggsoma.purchase(cliente,servico,from,token);}
+  catch(e){
+    if(String(e.message).includes('GGSOMA_CUSTOMER_BALANCE')){
+      const total=await precoDaRevenda(cliente.id,servico.id);
+      await salvarSessaoPedido(from,{etapa:'saldo_insuficiente_servico',servicoId:servico.id,entradas:['Compra digital'],totalPedido:total,ggsomaToken:token});
+      await enviarTexto(from,textoSaldoInsuficiente(cliente,total,servico.nome,['Compra digital']));
+    }else await enviarTexto(from,e.message);
+  }
+}
 async function iniciarServicoWhatsApp(from,cliente,servico){
   if(!servico)return false;
+  if(servico.api_provider==='GGSOMA'){
+    await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
+    await enviarTexto(from,`🛒 ${nomeServicoWhatsApp(servico)}\n\n💰 ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n1️⃣ Confirmar compra (1 unidade)\n0️⃣ Voltar`);return true;
+  }
   if(servico.api_provider==='DHRU'){
     const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
     const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
@@ -2908,10 +2963,12 @@ async function enviarDadosContaWhatsApp(from,revenda){
 }
 async function listarServicosCategoriaTexto(revenda,cat){
   let rows=[];
-  if(String(cat.api_provider||'').toUpperCase()==='DHRU'){
+  if(String(cat.api_provider||'').toUpperCase()==='GGSOMA'){
+    rows=await all("SELECT * FROM servicos_catalogo WHERE ativo=1 AND categoria=? AND api_provider='GGSOMA' ORDER BY nome",[cat.categoria]);
+  }else if(String(cat.api_provider||'').toUpperCase()==='DHRU'){
     rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(categoria,'Serviços')=? AND COALESCE(api_provider,'')='DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`,[cat.categoria]);
   }else{
-    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'DHRU' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
+    rows=await all(`SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'') NOT IN ('DHRU','GGSOMA') ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE`);
   }
   let texto=`📂 *${cat.nome}*
 
@@ -4278,6 +4335,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     let valorCampo=String(textoOriginal||'').trim();
     if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
     if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    try{valorCampo=dhruValidarCampoImei(campo,valorCampo)}catch(e){await enviarTexto(from,`❌ ${e.message}`);return;}
     const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
     const prox=idx+1;
     if(prox<campos.length){
@@ -4293,8 +4351,12 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
+    const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);
+    if(erroDhru){await enviarTexto(from,erroDhru);return;}
+    if(validacao.invalidos?.length) await enviarTexto(from,avisoImeisInvalidos(validacao.invalidos));
 
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     const valor = await precoDaRevenda(cliente.id, servico.id);
@@ -5314,6 +5376,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     let valorCampo=String(textoOriginal||'').trim();
     if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
     if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    try{valorCampo=dhruValidarCampoImei(campo,valorCampo)}catch(e){await enviarTexto(from,`❌ ${e.message}`);return;}
     const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
     const prox=idx+1;
     if(prox<campos.length){
@@ -5329,8 +5392,12 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
+    const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);
+    if(erroDhru){await enviarTexto(from,erroDhru);return;}
+    if(validacao.invalidos?.length) await enviarTexto(from,avisoImeisInvalidos(validacao.invalidos));
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
@@ -5364,7 +5431,7 @@ ${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoP
 💰 Valor: ${brl(totalPedido)}
 
 ${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, from);
-    if (servico.api_provider === 'DHRU') {
+    if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
       for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
     }
     return;
@@ -5380,6 +5447,8 @@ ${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: P
 
 
 async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entradaSerializada){
+  const erroDhru=await dhruErroImeiAntesPedido(servico,[entradaSerializada]);
+  if(erroDhru){await enviarTexto(from,erroDhru);return true;}
   const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
   const valor=await precoDaRevenda(cliente.id,servico.id);
   const modalidade=await modalidadeServicoRevenda(cliente.id,servico.id);
@@ -5785,6 +5854,7 @@ Exemplo: 50`);
         if (servMatch) {
           const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
           if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+          if(servico.api_provider==='GGSOMA')return iniciarServicoWhatsApp(from,cliente,servico);
           await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
           if (servico.api_provider === 'DHRU') {
             const promptDhru = await textoEntradaDhru(servico);
@@ -6089,6 +6159,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     let valorCampo=String(textoOriginal||'').trim();
     if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
     if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
+    try{valorCampo=dhruValidarCampoImei(campo,valorCampo)}catch(e){await enviarTexto(from,`❌ ${e.message}`);return;}
     const valores=Array.isArray(sess.dhruValores)?[...sess.dhruValores]:[]; valores[idx]=valorCampo;
     if(idx+1<campos.length){await salvarSessaoPedido(from,{...sess,dhruCampos:campos,dhruValores:valores,dhruIndice:idx+1});await enviarTexto(from,dhruPromptCampo(campos[idx+1],idx+1,campos.length));return;}
     await processarEntradaDhruColetadaWhatsApp(from,revenda,servico,dhruSerializarCampos(campos,valores));
@@ -6099,6 +6170,7 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
 
+    if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,revenda,servico,textoOriginal);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) {
       const agora = Date.now();
@@ -6109,6 +6181,9 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
       }
       return;
     }
+    const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);
+    if(erroDhru){await enviarTexto(from,erroDhru);return;}
+    if(validacao.invalidos?.length) await enviarTexto(from,avisoImeisInvalidos(validacao.invalidos));
 
     const valor = await precoDaRevenda(revenda.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
@@ -6167,10 +6242,11 @@ async function tratarServicoClienteFinal(msg, from, textoOriginal, texto, nomeCo
   const imei = onlyDigits(partes[partes.length - 1]);
   const valor = Number(String(partes[partes.length - 2] || '').replace(',', '.'));
   const nomeServico = partes.slice(1, -2).join(' ').trim();
-  if (!nomeServico || !valor || !/^\d{15}$/.test(imei)) {
-    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 356789123456789');
+  if (!nomeServico || !valor) {
+    await enviarTexto(from, '❌ Formato inválido.\n\nUse:\nservico desbloqueio tim 180 359372358802122');
     return true;
   }
+  if(!imeiLuhnValido(imei)){await enviarTexto(from,avisoImeisInvalidos([imei]));return true;}
   const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND status IN ("PENDENTE","EM PROCESSO")', [imei]);
   if (duplicado) { await enviarTexto(from, `⚠️ Esse IMEI já está em andamento.\n\n🛠 ${duplicado.servico_nome}\n📍 ${duplicado.status}`); return true; }
   let servico = await get('SELECT * FROM servicos_catalogo WHERE lower(nome)=lower(?)', [nomeServico]);
@@ -6751,6 +6827,8 @@ async function adminFinalizarPedido(from, id) {
 async function cancelarPedidoComEstorno(id, motivo = 'Não informado') {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [id]);
   if (!pedido) return { ok:false, erro:'Pedido não encontrado' };
+  const prov=await get('SELECT api_provider FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+  if(prov?.api_provider==='GGSOMA')return {ok:false,erro:'Pedidos digitais são conciliados automaticamente pela GGSOMA.'};
 
   if (pedido.status === 'CANCELADO') {
     return { ok:true, pedido, jaCancelado:true, estornou:false };
@@ -6969,7 +7047,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   if (paymentId) {
     const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : (sess.tipo_pix === 'ASSINATURA' ? 'ASSINATURA' : 'SALDO');
     const contextoJson = tipoPagamento === 'SERVICO'
-      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
+      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, ggsomaToken: sess.ggsomaToken, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
       : (tipoPagamento === 'ASSINATURA' ? JSON.stringify(sess.contexto_assinatura || {}) : null);
     await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
@@ -7146,16 +7224,23 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
   const servico = await get('SELECT * FROM servicos_catalogo WHERE id=?', [contexto.servicoId]);
   if (!cliente || !servico) return false;
+  if(servico.api_provider==='GGSOMA'){await ggsoma.purchase(cliente,servico,jid,contexto.ggsomaToken||('pix-'+crypto.createHash('sha256').update(String(contextoJson)).digest('hex')));return true;}
+  const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
+  const invalidos=tipoEntrada==='IMEI'?contexto.entradas.filter(i=>!imeiLuhnValido(i)):[];
+  const entradas=tipoEntrada==='IMEI'?contexto.entradas.filter(imeiLuhnValido):contexto.entradas;
+  if(invalidos.length)await enviarTexto(jid,avisoImeisInvalidos(invalidos));
+  if(!entradas.length)return true; // O PIX já foi creditado na carteira; nenhum serviço inválido é debitado.
+  const erroDhru=await dhruErroImeiAntesPedido(servico,entradas);
+  if(erroDhru){await enviarTexto(jid,`${erroDhru}\nO valor pago permanece na sua carteira.`);return true;}
   const valorUnitario = await precoDaRevenda(cliente.id, servico.id);
-  const totalPedido = Number(contexto.totalPedido || (valorUnitario * contexto.entradas.length));
+  const totalPedido = Number(invalidos.length?valorUnitario*entradas.length:(contexto.totalPedido || (valorUnitario * entradas.length)));
   // V131: o PIX do serviço já foi creditado na carteira. Debita agora o
   // valor integral do pedido. Ex.: -120 + 185 - 65 = 0.
   await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [totalPedido, cliente.id]);
-  const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const entradaLabel = labelEntradaServico(servico);
-  const loteId = contexto.entradas.length > 1 ? `LOTE-${Date.now()}` : null;
+  const loteId = entradas.length > 1 ? `LOTE-${Date.now()}` : null;
   const criados = [];
-  for (const entrada of contexto.entradas) {
+  for (const entrada of entradas) {
     const imeiBanco = tipoEntrada === 'IMEI' ? entrada : null;
     if (tipoEntrada === 'IMEI') {
       const duplicado = await get('SELECT * FROM pedidos WHERE imei=? AND servico_id=? AND status IN ("PENDENTE","EM PROCESSO")', [entrada, servico.id]);
@@ -7181,7 +7266,7 @@ ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.
 💰 Valor: ${brl(total)}
 
 ${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, jid);
-  if (servico.api_provider === 'DHRU') {
+  if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
   return true;
@@ -9481,6 +9566,12 @@ async function consultaDhruMapeamentoDoTexto(texto){
   if(!cmd) return null;
   return await get(`SELECT c.*,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE lower(c.comando)=lower(?) AND c.ativo=1`,[cmd]);
 }
+function consultaDhruValidarImeiCheck(texto,map){
+  if(consultaDhruNormalizarComando(map?.comando)!=='/check')return '';
+  const entrada=String(texto||'').trim().replace(/^\S+\s*/,'').trim();
+  if(imeiLuhnValido(entrada))return '';
+  return '❌ IMEI inválido. Confira o número no aparelho e envie novamente. O grupo permanece liberado.';
+}
 async function consultaDhruLiberarGrupo(ctx){
   try{ if(ctx?.socket&&ctx?.grupo) await ctx.socket.groupSettingUpdate(ctx.grupo,'not_announcement'); }catch(e){console.log('⚠️ DHRU GRUPO LIBERAR',e.message)}
   setTimeout(()=>consultaAssinaturaProcessarFila().catch(()=>{}),500);
@@ -9528,6 +9619,8 @@ async function consultaDhruAcompanhar(ctx){
   await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null;
 }
 async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,texto,map){
+  const validacaoImei=consultaDhruValidarImeiCheck(texto,map);
+  if(validacaoImei){await socketAtual.sendMessage(grupo,{text:validacaoImei});return true;}
   if(!map.servico_id||!map.api_service_id){ await socketAtual.sendMessage(grupo,{text:`⚠️ O comando ${map.comando} ainda não possui um serviço Dhru configurado no painel.`}); return true; }
   if(consultaEmMemoria||consultaDhruEmMemoria){ await socketAtual.sendMessage(grupo,{text:'⏳ Já existe uma consulta em andamento. Aguarde a liberação do grupo.'}); return true; }
   const entrada=String(texto||'').trim().replace(/^\S+\s*/,'').trim();
@@ -9896,6 +9989,12 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
 Depois que fizer a primeira assinatura paga, você recebe +${bonus} dia(s).`,mentions:[participante]}); return true; }
   if(/^\/indicado(?:\s|$)/i.test(cmd)){ if((await getConfig('consulta_indicacao_ativa','1'))!=='1'){await socketAtual.sendMessage(grupo,{text:'⚠️ O sistema de indicação está desativado no momento.'});return true;} const indicador=normalizarNumeroWhatsApp(cmd.replace(/^\/indicado\s*/i,'')), indicado=normalizarNumeroWhatsApp(jidToNumber(participante)||''); if(!indicador||indicador===indicado){await socketAtual.sendMessage(grupo,{text:'⚠️ Indicação inválida.'});return true;} const ja=await get(`SELECT id FROM consulta_assinatura_pagamentos WHERE cliente_numero=? AND status='PAGO' LIMIT 1`,[indicado]); if(ja){await socketAtual.sendMessage(grupo,{text:'⚠️ A indicação só pode ser vinculada antes da primeira assinatura paga.'});return true;} await run(`INSERT OR IGNORE INTO consulta_assinatura_indicacoes(indicado_numero,indicador_numero,status) VALUES(?,?,'PENDENTE')`,[indicado,indicador]); await socketAtual.sendMessage(grupo,{text:'✅ Indicação registrada. O bônus será liberado após sua primeira assinatura paga.'}); return true; }
   const mapaDhru=await consultaDhruMapeamentoDoTexto(cmd);
+  const erroImeiCheck=mapaDhru?consultaDhruValidarImeiCheck(cmd,mapaDhru):'';
+  if(erroImeiCheck){await socketAtual.sendMessage(grupo,{text:erroImeiCheck});return true;}
+  if(mapaDhru?.servico_id){
+    const produto=await dhruProductForService(mapaDhru.servico_id);
+    if(produto){try{dhruParseInput(produto,cmd.replace(/^\S+\s*/,''));}catch(e){await socketAtual.sendMessage(grupo,{text:`❌ ${e.message}`});return true;}}
+  }
   if(mapaDhru){ if(!(await consultaAssinaturaPodeConsultar(socketAtual,grupo,participante,nomeCliente))) return true; if(consultaEmMemoria||consultaDhruEmMemoria){ consultaFilaInteligente.push({socketAtual,msg,texto:cmd}); await socketAtual.sendMessage(grupo,{text:`⏳ @${normalizarNumeroWhatsApp(jidToNumber(participante)||'')}, sua consulta entrou na fila (${consultaFilaInteligente.length}).`,mentions:[participante]}); return true; } await consultaAssinaturaRegistrarUso(participante,cmd); return await consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,cmd,mapaDhru); }
   const validacao=consultaValidarComando(cmd);
   if(!validacao.ok){ await consultaApagarMensagemInvalida(socketAtual,grupo,msg,participante); return true; }
@@ -9955,6 +10054,9 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
+const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
+ggsoma.routes(app);
+
 
 app.get('/admin/consultavip',async(req,res)=>{
   const token=await consultavipTokenSalvo(),username=await getConfig('consultavip_bot_username',''),auto=(await getConfig('consultavip_bot_auto','0'))==='1';
@@ -10370,7 +10472,12 @@ app.get('/cliente/servico/:id', clienteAuth, async (req,res)=>{
 });
 app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   const s=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[req.params.id]);if(!s)return clienteRedirect(res,'/cliente/servicos','erro','Serviço indisponível.');
+  if(s.api_provider==='GGSOMA'){
+    const token=String(req.body.ggsomaToken||'');if(!/^[a-f0-9-]{36}$/.test(token))return res.sendStatus(400);
+    try{const id=await ggsoma.purchase(req.cliente,s,clienteDestinoPrincipal(req.cliente),token);return clienteRedirect(res,'/cliente/historico','ok',`Pedido #${id} registrado.`);}catch(e){return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',String(e.message).includes('GGSOMA_CUSTOMER_BALANCE')?'Saldo insuficiente. Adicione saldo para comprar.':e.message);}
+  }
   const val=validarEntradaServico(s,req.body.entrada);if(!val.ok)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',val.erro);
+  const erroDhru=await dhruErroImeiAntesPedido(s,val.entradas);if(erroDhru)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',erroDhru);
   const preco=await precoDaRevenda(req.cliente.id,s.id), modalidade=await modalidadeServicoRevenda(req.cliente.id,s.id), total=preco*val.entradas.length, atual=await get('SELECT * FROM revendas WHERE id=?',[req.cliente.id]);
   if(modalidade==='PRE_PAGO'&&Number(atual.saldo||0)<total)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro',`Saldo insuficiente. Necessário: ${brl(total)}.`);
   const destino=clienteDestinoPrincipal(atual), tipo=normalizarTipoEntrada(s.tipo_entrada), lote=val.entradas.length>1?`SITE-${Date.now()}`:null, criados=[], duplicados=[];
@@ -10378,9 +10485,9 @@ app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   if(modalidade==='PRE_PAGO'&&criados.length)await run('UPDATE revendas SET saldo=MAX(0,saldo-?),atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[preco*criados.length,atual.id]);
   if(!criados.length)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro','Nenhum pedido novo foi criado; os itens já estão em andamento.');
   notificarPainel('pedido','🌐 Novo pedido pelo site',`${atual.nome} - ${s.nome}`);if(criados.length===1)await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?',[criados[0].id]));else await avisarNovoLoteAdmins(atual,s,criados.length,preco*criados.length);
-  await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}`,destino);
-  if(s.api_provider==='DHRU')for(const p of criados){try{await executarPedidoDhru(p.id)}catch(e){console.log('❌ DHRU site',p.id,e.message)}}
-  clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.`);
+  await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}${val.invalidos?.length?'\n\n'+avisoImeisInvalidos(val.invalidos):''}`,destino);
+  if(['DHRU','GGSOMA'].includes(s.api_provider))for(const p of criados){try{await executarPedidoDhru(p.id)}catch(e){console.log('❌ DHRU site',p.id,e.message)}}
+  clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.${val.invalidos?.length?' '+avisoImeisInvalidos(val.invalidos):''}`);
 });
 
 app.post('/webhook/mercadopago', async (req, res) => {
@@ -10407,11 +10514,11 @@ app.post('/cliente/esim/:id', clienteAuth, clienteCsrf, async (req,res)=>{
 
 app.get('/cliente/historico', clienteAuth, async (req,res)=>{
   const filtros=v158FiltrosHistorico(req), base=v158WhereHistoricoCliente(req.cliente.id,filtros);
-  const pedidos=await all(`SELECT p.*,COALESCE((SELECT cancelamento_permitido FROM servicos_catalogo s WHERE s.id=p.servico_id),0) cancelamento_permitido FROM pedidos p WHERE ${base.sql} ORDER BY p.id DESC LIMIT 1000`,base.params);
+  const pedidos=await all(`SELECT p.*,(SELECT api_provider FROM servicos_catalogo WHERE id=p.servico_id) api_provider,COALESCE((SELECT cancelamento_permitido FROM servicos_catalogo s WHERE s.id=p.servico_id),0) cancelamento_permitido FROM pedidos p WHERE ${base.sql} ORDER BY p.id DESC LIMIT 1000`,base.params);
   const cr=await all('SELECT UPPER(status) status,COUNT(*) qtd FROM pedidos WHERE revenda_id=? GROUP BY UPPER(status)',[req.cliente.id]);const cont={TODOS:0,PENDENTE:0,'EM PROCESSO':0,FINALIZADO:0,CANCELADO:0};for(const x of cr){cont.TODOS+=Number(x.qtd||0);if(cont[x.status]!==undefined)cont[x.status]=Number(x.qtd||0)}
   const baseQ=new URLSearchParams();if(filtros.busca)baseQ.set('busca',filtros.busca);if(filtros.periodo&&filtros.periodo!=='todos')baseQ.set('periodo',filtros.periodo);const href=st=>{const q=new URLSearchParams(baseQ);if(st)q.set('status',st);return '/cliente/historico?'+q.toString()};
   const tabs=[['','Todos'],['PENDENTE','Pendentes'],['EM PROCESSO','Em processo'],['FINALIZADO','Finalizados'],['CANCELADO','Cancelados']].map(([st,n])=>`<a class="cu-tab ${(filtros.status||'')===st?'active':''}" href="${href(st)}">${n} (${cont[st||'TODOS']})</a>`).join('');
-  const linhas=pedidos.map(p=>{const valor=safeHtml(p.imei||p.entrada_valor||'-'),st=String(p.status||'').toUpperCase(),cancel=st==='PENDENTE'&&Number(p.cancelamento_permitido)?`<form method="post" action="/cliente/pedido/${p.id}/cancelar" style="display:inline"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><button class="cu-btn danger small" data-confirm="Deseja cancelar o pedido #${p.id}?">Cancelar</button></form>`:'';return `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-code">${valor}</span></td><td>${brl(p.valor||0)}</td><td><span class="cu-badge ${st.replace(/ /g,'-')}">${safeHtml(st)}</span></td><td>${dateBR(p.criado_em)}</td><td><a class="cu-btn small" href="/cliente/pedido/${p.id}/resultado">Baixar</a> ${cancel}</td></tr>`}).join('')||'<tr><td colspan="7" class="cu-empty">Nenhum pedido encontrado.</td></tr>';
+  const linhas=pedidos.map(p=>{const valor=safeHtml(p.imei||p.entrada_valor||'-'),st=String(p.status||'').toUpperCase(),cancel=st==='PENDENTE'&&Number(p.cancelamento_permitido)?`<form method="post" action="/cliente/pedido/${p.id}/cancelar" style="display:inline"><input type="hidden" name="_csrf" value="${req.clienteCsrf}"><button class="cu-btn danger small" data-confirm="Deseja cancelar o pedido #${p.id}?">Cancelar</button></form>`:'';return `<tr><td><b>#${p.id}</b></td><td>${safeHtml(p.servico_nome||'-')}</td><td><span class="cu-code">${valor}</span></td><td>${brl(p.valor||0)}</td><td><span class="cu-badge ${st.replace(/ /g,'-')}">${safeHtml(st)}</span></td><td>${dateBR(p.criado_em)}</td><td>${p.api_provider==='GGSOMA'&&st==='FINALIZADO'?`<a class="cu-btn small" href="/cliente/ggsoma/${p.id}">Ver entrega</a>`:`<a class="cu-btn small" href="/cliente/pedido/${p.id}/resultado">Baixar</a>`} ${cancel}</td></tr>`}).join('')||'<tr><td colspan="7" class="cu-empty">Nenhum pedido encontrado.</td></tr>';
   const exportQ=new URLSearchParams(req.query);exportQ.delete('formato');const copiar=pedidos.map(p=>String(p.imei||p.entrada_valor||'').trim()).filter(Boolean).join('\n');
   res.send(clientePage('Histórico',`<h1>Histórico de pedidos</h1>${clienteAviso(req)}<div class="cu-tabs">${tabs}</div><div class="cu-card"><form class="cu-filter"><div><label>Buscar pedido, IMEI ou serviço</label><input name="busca" value="${safeHtml(filtros.busca)}"></div><div><label>Período</label><select name="periodo"><option value="todos">Todos</option><option value="hoje" ${filtros.periodo==='hoje'?'selected':''}>Hoje</option><option value="7" ${filtros.periodo==='7'?'selected':''}>7 dias</option><option value="30" ${filtros.periodo==='30'?'selected':''}>30 dias</option></select></div>${filtros.status?`<input type="hidden" name="status" value="${safeHtml(filtros.status)}">`:''}<button class="cu-btn primary">Filtrar</button></form><div class="cu-actions" style="margin-top:14px"><button type="button" class="cu-btn" data-copy="#cuImeis">Copiar IMEIs</button><a class="cu-btn" href="/cliente/historico/export?formato=txt&${exportQ}">Baixar TXT</a><a class="cu-btn" href="/cliente/historico/export?formato=csv&${exportQ}">Baixar CSV</a></div><textarea id="cuImeis" hidden>${safeHtml(copiar)}</textarea></div><div class="cu-card cu-table-wrap"><table class="cu-table"><tr><th>ID</th><th>Serviço</th><th>IMEI/entrada</th><th>Valor</th><th>Status</th><th>Data</th><th>Ações</th></tr>${linhas}</table></div>`,req.cliente));
 });

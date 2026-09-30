@@ -3,7 +3,8 @@
   "version": "4.2.3",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test:ggsoma": "node test/ggsoma.test.js"
   },
   "dependencies": {
     "axios": "^1.7.9",
