@@ -74,8 +74,23 @@ module.exports = function createGgsoma(d) {
     price=Number(String(price).replace(',','.'));if(!Number.isFinite(price)||price<=0)throw new Error('Informe um preço de venda maior que zero.');
     const row=await get('SELECT * FROM ggsoma_products WHERE slug=?',[slug]);if(!row)throw new Error('Produto não encontrado.');
     const p=JSON.parse(row.json);if(enabled&&!row.present)throw new Error('Produto removido do catálogo. Sincronize novamente.');
-    if(!row.catalogo_id){const s=await run(`INSERT INTO servicos_catalogo(nome,preco_padrao,tipo_entrada,entrada_label,ativo,categoria,descricao,prazo,api_provider,api_service_id,api_cost,api_auto,cancelamento_permitido) VALUES(?,?,'TEXTO','Compra',?,?,?,'Entrega automática','GGSOMA',?,?,1,0)`,[p.name,price,enabled?1:0,'Produtos digitais / '+(p.provider?.name||'GGSOMA'),`Duração: ${p.durationDays||'consulte'} dias. Garantia: ${p.warranty?.enabled?p.warranty.days+' dias':'conforme produto'}.`,slug,Number(p.yourPrice)]);await run('UPDATE ggsoma_products SET catalogo_id=? WHERE slug=?',[s.lastID,slug]);}
-    else await run('UPDATE servicos_catalogo SET preco_padrao=?,ativo=?,cancelamento_permitido=0 WHERE id=?',[price,enabled?1:0,row.catalogo_id]);
+    // A product may keep an old catalogo_id after previous migrations/removals. In that case
+    // UPDATE would affect zero rows, making the checkbox look saved but immediately uncheck again.
+    // Resolve the catalog entry by both the stored id and the stable GGSOMA slug, and recreate it
+    // only when neither exists. This is especially important for long-lived products such as Gemini.
+    let catalog=null;
+    if(row.catalogo_id)catalog=await get(`SELECT id FROM servicos_catalogo WHERE id=? AND api_provider='GGSOMA'`,[row.catalogo_id]);
+    if(!catalog)catalog=await get(`SELECT id FROM servicos_catalogo WHERE api_provider='GGSOMA' AND api_service_id=? ORDER BY id DESC LIMIT 1`,[slug]);
+    if(!catalog){
+      const s=await run(`INSERT INTO servicos_catalogo(nome,preco_padrao,tipo_entrada,entrada_label,ativo,categoria,descricao,prazo,api_provider,api_service_id,api_cost,api_auto,cancelamento_permitido) VALUES(?,?,'TEXTO','Compra',?,?,?,'Entrega automática','GGSOMA',?,?,1,0)`,[p.name,price,enabled?1:0,'Produtos digitais / '+(p.provider?.name||'GGSOMA'),`Duração: ${p.durationDays||'consulte'} dias. Garantia: ${p.warranty?.enabled?p.warranty.days+' dias':'conforme produto'}.`,slug,Number(p.yourPrice)]);
+      catalog={id:s.lastID};
+    }else{
+      await run(`UPDATE servicos_catalogo SET nome=?,preco_padrao=?,ativo=?,api_service_id=?,api_cost=?,api_auto=1,cancelamento_permitido=0 WHERE id=?`,[p.name,price,enabled?1:0,slug,Number(p.yourPrice),catalog.id]);
+    }
+    if(Number(row.catalogo_id)!==Number(catalog.id))await run('UPDATE ggsoma_products SET catalogo_id=? WHERE slug=?',[catalog.id,slug]);
+    // Verify persistence so the panel never reports success when the sale flag was not actually saved.
+    const saved=await get(`SELECT ativo FROM servicos_catalogo WHERE id=? AND api_provider='GGSOMA'`,[catalog.id]);
+    if(!saved||Number(saved.ativo)!==(enabled?1:0))throw new Error('Não foi possível salvar o status de venda deste produto.');
   }
   function deliveryText(response){
     const items=Array.isArray(response.lines)?response.lines:[response.delivery];
