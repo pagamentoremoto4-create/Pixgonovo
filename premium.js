@@ -8,6 +8,7 @@ module.exports=function createPremium(d){
  async function init(){
   // Disable legacy PREMIUM catalog entries. Data is kept for audit/history; nothing is deleted.
   await run("UPDATE servicos_catalogo SET ativo=0 WHERE api_provider='PREMIUM'");
+  await run(`CREATE TABLE IF NOT EXISTS premium_translation_cache(source TEXT PRIMARY KEY, translated TEXT NOT NULL, updated_at TEXT NOT NULL)`);
  }
  async function products(activeOnly=false){
   return all(`SELECT g.slug,g.catalogo_id,g.json,g.present,s.id,s.nome,s.preco_padrao,s.descricao,s.ativo,s.api_cost,s.api_service_id
@@ -29,14 +30,34 @@ module.exports=function createPremium(d){
   if(days%30===0)return `${days/30} ${days/30===1?'mês':'meses'}`;
   return `${days} ${days===1?'dia':'dias'}`;
  }
- function customerDescription(p){
+ function cleanCustomerText(value){
+  return String(value||'').replace(/GGSOMA/gi,'').replace(/\r/g,'').replace(/\n{3,}/g,'\n\n').trim();
+ }
+ function looksEnglish(text){
+  const t=String(text||'').toLowerCase();
+  if(!t)return false;
+  const en=(t.match(/\b(the|and|with|you|your|can|add|storage|cloud|months?|days?|no|card|required|works?|country|warranty|link|account|family|private|shared|receive|important|after|purchase|within|hours?)\b/g)||[]).length;
+  const pt=(t.match(/\b(o|a|e|com|você|seu|sua|pode|armazenamento|nuvem|meses?|dias?|cartão|funciona|país|garantia|link|conta|família|privado|compartilhado|recebe|importante|após|compra|horas?)\b/g)||[]).length;
+  return en>=2 && en>pt;
+ }
+ async function translateToPortuguese(raw){
+  raw=cleanCustomerText(raw);if(!raw||!looksEnglish(raw))return raw;
+  const cached=await get('SELECT translated FROM premium_translation_cache WHERE source=?',[raw]);if(cached?.translated)return cached.translated;
+  try{
+   // Translation is presentation-only. If the service is unavailable, the original API text is kept.
+   const r=await d.axios.get('https://translate.googleapis.com/translate_a/single',{params:{client:'gtx',sl:'auto',tl:'pt',dt:'t',q:raw},timeout:7000});
+   const translated=cleanCustomerText((r.data?.[0]||[]).map(x=>Array.isArray(x)?x[0]:'').join(''));
+   if(translated){await run(`INSERT INTO premium_translation_cache(source,translated,updated_at) VALUES(?,?,datetime('now')) ON CONFLICT(source) DO UPDATE SET translated=excluded.translated,updated_at=excluded.updated_at`,[raw,translated]);return translated;}
+  }catch(_){ }
+  return raw;
+ }
+ async function customerDescription(p){
   const m=meta(p);
-  const raw=String(m.description||m.descricao||m.details||m.instructions||'').trim();
-  if(!raw)return '';
-  return raw.replace(/GGSOMA/gi,'').replace(/\n{3,}/g,'\n\n').trim();
+  const raw=m.description||m.descricao||m.details||m.instructions||'';
+  return translateToPortuguese(raw);
  }
  async function card(p,client){
-  const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),duration=durationLabel(p),description=customerDescription(p);
+  const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),duration=durationLabel(p),description=await customerDescription(p);
   const title=duration && !String(p.nome).toLowerCase().includes(duration.toLowerCase()) ? `${p.nome} — ${duration}` : p.nome;
   let text=`⭐ *${title}*\n\n💰 *${d.brl(price)}* • 📦 *${qty} ${qty===1?'disponível':'disponíveis'}*\n⚡ *Entrega instantânea — ${deliveryLabel(p)}*`;
   if(description)text+=`\n\n${description}`;
