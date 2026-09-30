@@ -11,13 +11,13 @@ module.exports=function createPremium(d){
   await run(`CREATE TABLE IF NOT EXISTS premium_translation_cache(source TEXT PRIMARY KEY, translated TEXT NOT NULL, updated_at TEXT NOT NULL)`);
  }
  async function products(activeOnly=false){
-  return all(`SELECT g.slug,g.catalogo_id,g.json,g.present,s.id,s.nome,s.preco_padrao,s.descricao,s.ativo,s.api_cost,s.api_service_id
+  return all(`SELECT g.slug,g.catalogo_id,g.json,g.present,g.custom_title,g.custom_description,g.image_path,s.id,s.nome,s.preco_padrao,s.descricao,s.ativo,s.api_cost,s.api_service_id
               FROM ggsoma_products g JOIN servicos_catalogo s ON s.id=g.catalogo_id
               WHERE s.api_provider='GGSOMA' ${activeOnly?'AND s.ativo=1 AND g.present=1':''}
               ORDER BY s.nome COLLATE NOCASE`);
  }
  async function product(id){
-  return get(`SELECT g.slug,g.catalogo_id,g.json,g.present,s.id,s.nome,s.preco_padrao,s.descricao,s.ativo,s.api_cost,s.api_service_id
+  return get(`SELECT g.slug,g.catalogo_id,g.json,g.present,g.custom_title,g.custom_description,g.image_path,s.id,s.nome,s.preco_padrao,s.descricao,s.ativo,s.api_cost,s.api_service_id
               FROM ggsoma_products g JOIN servicos_catalogo s ON s.id=g.catalogo_id
               WHERE s.api_provider='GGSOMA' AND s.id=?`,[id]);
  }
@@ -50,7 +50,8 @@ module.exports=function createPremium(d){
   add(m);return found.sort((a,b)=>b.length-a.length)[0]||'';
  }
  function customerTitle(p){
-  const m=meta(p);let name=String(m.name||p.nome||'Produto').trim();
+  const m=meta(p);let name=String(p.custom_title||m.name||p.nome||'Produto').trim();
+  if(p.custom_title)return cleanCustomerText(name);
   name=name.replace(/^\s*(?:link\s+to\s+receive|receive|get)\s+/i,'').trim();
   name=name.replace(/\b(\d+)\s*months?\b/ig,(_,n)=>`${n} ${Number(n)===1?'Mês':'Meses'}`);
   name=name.replace(/\b(\d+)\s*days?\b/ig,(_,n)=>`${n} ${Number(n)===1?'Dia':'Dias'}`);
@@ -77,6 +78,7 @@ module.exports=function createPremium(d){
   return raw;
  }
  async function customerDescription(p){
+  if(String(p.custom_description||'').trim())return cleanCustomerText(p.custom_description);
   const m=meta(p);
   return translateToPortuguese(apiText(m));
  }
@@ -97,7 +99,8 @@ module.exports=function createPremium(d){
  async function show(from,client,id,telegram=false){
   const p=await product(id);if(!p?.ativo||!p.present){await d.enviarTexto(from,'Produto indisponível.');return;}
   const token=crypto.randomUUID();await d.salvarSessaoPedido(from,{etapa:'premium_product',productId:p.id,token});const text=await card(p,client),available=stock(p)>0;
-  if(telegram)return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});
+  if(telegram){if(p.image_path)await d.enviarImagem(from,p.image_path,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
+  if(p.image_path)await d.enviarImagem(from,p.image_path,'');
   await d.enviarTexto(from,text+(available?'\n\n1️⃣ Comprar\n0️⃣ Voltar':'\n\n⛔ Esgotado\n0️⃣ Voltar'));
  }
  async function confirm(from,client,id,token){
