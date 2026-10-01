@@ -4972,6 +4972,12 @@ async function listarGruposAtivacaoSessao(sessao) {
   }
 }
 
+async function cancelarFluxoSilenciosamente(from, numeroNorm, textoOriginal, etapa='') {
+  await apagarSessaoPedido(from);
+  console.log(`🔇 FLUXO CANCELADO SILENCIOSAMENTE${etapa ? ' ['+etapa+']' : ''}: +${numeroNorm} — ${textoOriginal}`);
+  return true;
+}
+
 async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
@@ -5174,14 +5180,14 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   if(sess?.etapa==='hub_menu'){
     if(opcao==='1'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'menu'}); await enviarMenuServicosWhatsApp(from,cliente); return; }
-    await enviarMenuWhatsApp(from,cliente,false,true); return;
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'hub_menu'); return;
   }
   if(sess?.etapa==='consulta_assinatura_planos_privado'){
     if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
-    if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha um dos planos exibidos ou digite 0 para voltar.');return;}
+    if(!/^\d+$/.test(opcao||'')){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_assinatura_planos_privado');return;}
     const planoId=Array.isArray(sess.planoIds)?sess.planoIds[Number(opcao)-1]:null;
     const plano=planoId?await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]):null;
-    if(!plano){await enviarTexto(from,'⚠️ Plano indisponível. Abra o ConsultaVIP novamente.');return;}
+    if(!plano){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_assinatura_planos_privado');return;}
     const jid=numberToJid(numeroNorm);
     const sockPrivado={sendMessage:async(_dest,conteudo)=>{
       if(conteudo?.text) return await enviarTexto(from,conteudo.text.replace(/@\d+/g,String(cliente?.nome||nome||'Cliente').split(/\s+/)[0]));
@@ -5194,10 +5200,10 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     if(opcao==='1'){const cs=await all(`SELECT c.id,c.comando,c.nome_exibicao,c.servico_id,c.exemplo,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE c.ativo=1 ORDER BY c.id ASC`).catch(()=>[]);const ativos=cs.filter(x=>Number(x.servico_id)>0);if(!ativos.length){await enviarTexto(from,'⚠️ Nenhum comando de IMEI/aparelho está ativo no momento.\n\n0️⃣ Voltar');return;}const itens=ativos.slice(0,40);const lista=itens.map((x,i)=>`${i+1}️⃣ *${String(x.nome_exibicao||x.comando).trim()}* — ${x.comando}`).join('\n');await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaComandos:itens.map(x=>({id:Number(x.id),servicoId:Number(x.servico_id),comando:String(x.comando||''),nome:String(x.nome_exibicao||x.comando||'Consulta')}))});await enviarTexto(from,`📱 *IMEI / APARELHO*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);return;}
     if(opcao==='2'){await consultaVipMenuYanPrivado(from,'DADOS');return;} if(opcao==='3'){await consultaVipMenuYanPrivado(from,'VEICULOS');return;} if(opcao==='4'){await consultaVipMenuYanPrivado(from,'LINHA');return;} if(opcao==='5'){await consultaVipMenuYanPrivado(from,'OUTRAS');return;}
-    await enviarTexto(from,'⚠️ Escolha uma categoria de 1 a 5 ou digite 0 para voltar.');return;
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_categorias');return;
   }
   if(sess?.etapa==='consulta_privada_yan_menu'){
-    if(opcao==='0'){await menuConsultasPrivado(from,cliente);return;} if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha uma das consultas exibidas ou digite 0 para voltar.');return;}
+    if(opcao==='0'){await menuConsultasPrivado(from,cliente);return;} if(!/^\d+$/.test(opcao||'')){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_yan_menu');return;}
     const nomeYan=Array.isArray(sess.yanNomes)?sess.yanNomes[Number(opcao)-1]:null,c=CONSULTA_COMANDOS_VALIDOS.find(x=>x.nome===nomeYan&&x.nome!=='SENHA');if(!c){await enviarTexto(from,'⚠️ Consulta indisponível. Abra o menu novamente.');return;}
     await salvarSessaoPedido(from,{etapa:'consulta_privada_yan_dado',yanNome:c.nome,categoria:sess.categoria});const exemplo=String(c.exemplo||'').replace(/^[\/.][a-z0-9_]+\s*/i,'');await enviarTexto(from,`🔎 *${c.nome}*\n\nEnvie agora o dado para consultar.\n${exemplo?`Exemplo: ${exemplo}\n\n`:''}0️⃣ Cancelar`);return;
   }
@@ -5208,11 +5214,11 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
   if(sess?.etapa==='consulta_privada_menu'){
     if(opcao==='0'){await menuConsultasPrivado(from,cliente);return;}
-    if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha uma das consultas exibidas ou digite 0 para voltar.');return;}
+    if(!/^\d+$/.test(opcao||'')){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_menu');return;}
     const item=Array.isArray(sess.consultaComandos)?sess.consultaComandos[Number(opcao)-1]:null;
     const sid=item?Number(item.servicoId):null;
     const prod=sid?await dhruProductForService(sid):null;
-    if(!prod||!item){await enviarTexto(from,'⚠️ Consulta indisponível. Abra o menu novamente.');return;}
+    if(!prod||!item){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_menu');return;}
     const fs=dhruFieldsUsuario(prod).filter(f=>f.required!==false);
     await salvarSessaoPedido(from,{etapa:'consulta_privada_campos',servicoId:Number(sid),comandoId:Number(item.id),comando:item.comando,nomeComando:item.nome,produtoUuid:prod.product_uuid,campos:fs,indice:0,valores:{}});
     if(!fs.length){await enviarTexto(from,'⚠️ Essa consulta não possui campo de entrada configurado.');return;}
@@ -5353,7 +5359,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
       await enviarTexto(from,await textoCadastroPix(cliente));
       return;
     }
-    await enviarMenuMinhaContaWhatsApp(from,cliente);
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'conta_menu');
     return;
   }
   if (sess?.etapa === 'conta_dados') {
@@ -5384,7 +5390,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
       await enviarHistoricoRevendaFiltrado(from,cliente,filtro);
       return;
     }
-    await enviarMenuHistoricoWhatsApp(from);
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'historico_menu');
     return;
   }
   if (sess?.etapa === 'historico_lista') {
