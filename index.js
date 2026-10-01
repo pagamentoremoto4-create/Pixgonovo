@@ -5424,8 +5424,10 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
   }
   if (sess?.etapa === 'conta_menu') {
     if(opcao==='0'||lower==='voltar'){
+      // Volta para a Central de Serviços. Não usar enviarMenuWhatsApp aqui,
+      // pois ele renderiza o HUB principal (ConsultaVIP / Serviços / Suporte).
       await salvarSessaoPedido(from,{etapa:'menu'});
-      await enviarMenuWhatsApp(from,cliente,false,true);
+      await enviarMenuServicosWhatsApp(from,cliente);
       return;
     }
     if(opcao==='1'){
