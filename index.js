@@ -1520,88 +1520,6 @@ async function avisarGrupoConsultaPrivadaConcluida(ctx){
   }catch(e){console.log('⚠️ AVISO GRUPO CONSULTAVIP:',e.message)}
 }
 
-
-// V223 — padrão visual das consultas privadas (Yan + Dhru).
-// Mantém o status de processamento compacto e formata resultados Dhru sem inventar dados.
-const consultaStatusPrivadoDhru = new Map();
-function consultaNomeComandoYan(cmd){
-  const prefix=(String(cmd||'').trim().match(/^([\/.][a-z0-9_]+)/i)||[])[1]||'';
-  const c=CONSULTA_COMANDOS_VALIDOS.find(x=>{const p=(String(x.exemplo||'').match(/^([\/.][a-z0-9_]+)/i)||[])[1]||'';return p&&p.toLowerCase()===prefix.toLowerCase();});
-  return String(c?.nome||prefix.replace(/^[\/.]/,'')||'Consulta').trim();
-}
-function consultaTextoProcessando(nome,dado){
-  return `📋 *Consulta:* ${String(nome||'Consulta').trim()}\n🔍 *Dado:* \`${String(dado||'-').trim()}\`\n🟡 *STATUS › PROCESSANDO*\n⏳ Aguarde, estamos buscando seu resultado...`;
-}
-async function consultaEnviarProcessandoPrivado(from,nome,dado){
-  try{
-    const numero=normalizarNumeroWhatsApp(String(from||'').replace(/^wa:/i,'').replace(/@s\.whatsapp\.net$/i,''));
-    if(!numero) return null;
-    const sessaoPreferidaId=whatsappSessaoPorNumeroCliente.get(numero);
-    const sessaoPreferida=sessaoPreferidaId?whatsappSessoes.get(Number(sessaoPreferidaId)):null;
-    const sessaoBot=(sessaoPreferida?.funcaoBot&&sessaoPreferida?.conectado&&sessaoPreferida?.socket)?sessaoPreferida:await obterSessaoBotConectada();
-    const sock=sessaoBot?.socket||(conectado?whatsappSocket:null);
-    if(!sock) return null;
-    const destino=await resolverJidWhatsAppEnvio(numero,sock);
-    if(!destino) return null;
-    const enviado=await sock.sendMessage(destino,{text:consultaTextoProcessando(nome,dado)});
-    return {sock,destino,key:enviado?.key||null};
-  }catch(e){console.log('⚠️ STATUS PROCESSANDO PRIVADO:',e.message);return null;}
-}
-async function consultaApagarProcessandoPrivado(ref){
-  try{if(ref?.sock&&ref?.destino&&ref?.key) await ref.sock.sendMessage(ref.destino,{delete:ref.key});}catch(e){console.log('⚠️ APAGAR STATUS PROCESSANDO:',e.message);}
-}
-function consultaCorStatus(valor,chave=''){
-  const v=String(valor||'').trim().toLowerCase();
-  const k=String(chave||'').trim().toLowerCase();
-  if(/find my|fmi/.test(k)){if(v==='on'||v==='ativo'||v==='enabled')return '🔴';if(v==='off'||v==='desativado'||v==='disabled')return '🟢';}
-  if(/icloud/.test(k)){if(/^(clean|limpo)$/.test(v))return '🟢';if(/lost|stolen|blocked|bloqueado|perdido|roubado/.test(v))return '🔴';}
-  if(/^(off|clean|limpo|regular|success|sucesso|unlocked|desbloqueado|concluído|concluido)$/.test(v))return '🟢';
-  if(/^(on|blocked|bloqueado|blacklisted|lost|stolen|rejected|failed|falhou|roubado|perdido)$/.test(v))return '🔴';
-  if(/pending|pendente|processing|processando|unknown|indefinido/.test(v))return '🟡';
-  return '';
-}
-function consultaIconeCampo(chave,valor=''){
-  const k=String(chave||'').toLowerCase();
-  const v=String(valor||'').toLowerCase();
-  if(/imei/.test(k))return '🔢'; if(/serial|número de série|numero de serie|\bsn\b/.test(k))return '🆔';
-  if(/model|modelo/.test(k))return '📱'; if(/color|cor/.test(k))return '🎨';
-  if(/find my|fmi/.test(k))return /^(on|ativo|enabled)$/.test(v)?'🔒':'🔓'; if(/icloud/.test(k))return '☁️';
-  if(/carrier|operadora|network|rede/.test(k))return '📡'; if(/country|país|pais/.test(k))return '🌎';
-  if(/warranty|garantia/.test(k))return '🛡️'; if(/sim lock|simlock/.test(k))return '🔐'; if(/activation|ativação|ativacao/.test(k))return '⚙️';
-  if(/status|situação|situacao|result|resultado/.test(k))return '📄'; return '▫️';
-}
-function consultaAppleModeloVisual(modelo){
-  let s=String(modelo||'').trim().replace(/[-_]BES\b/ig,'').replace(/\s+/g,' ');
-  if(!s)return '';
-  const mem=(s.match(/\b(\d+\s?(?:GB|TB))\b/i)||[])[1]||'';
-  if(mem)s=s.replace(new RegExp(mem.replace(/\s+/g,'\\s*'),'i'),' ').replace(/[-|]+\s*$/,'').trim();
-  const cores=['COSMIC ORANGE','DESERT TITANIUM','NATURAL TITANIUM','WHITE TITANIUM','BLACK TITANIUM','DEEP BLUE','SILVER','SPACE BLACK','JET BLACK','ROSE GOLD','MIDNIGHT','STARLIGHT','PRODUCT RED','RED','BLUE','GREEN','YELLOW','PURPLE','PINK','WHITE','BLACK','ORANGE','GOLD','GRAY','GREY'];
-  let cor='';
-  for(const c of cores){const re=new RegExp(`\\b${c.replace(/ /g,'\\s+')}\\b`,'i');if(re.test(s)){cor=(s.match(re)||[])[0]||c;s=s.replace(re,' ').replace(/\s+/g,' ').trim();break;}}
-  const modeloFmt=s.toLowerCase().replace(/\biphone\b/i,'iPhone').replace(/\bpro max\b/i,'Pro Max').replace(/\bpro\b/i,'Pro').replace(/\bplus\b/i,'Plus').replace(/\bse\b/i,'SE').replace(/(^|\s)(\d+)/g,(m,a,b)=>a+b);
-  const partes=[modeloFmt,mem?mem.toUpperCase().replace(/\s+/g,''):'' ,cor?cor.toLowerCase().replace(/\b\w/g,x=>x.toUpperCase()):''].filter(Boolean);
-  return partes.join(' | ');
-}
-function consultaFormatarResultadoDhruVisual(bruto){
-  const traduzido=traduzirResultadoDhruPt(bruto).trim();
-  if(!traduzido)return '';
-  const pares=[]; const soltas=[];
-  for(const linha of traduzido.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)){const m=linha.match(/^([^:]{1,100})\s*:\s*(.+)$/);if(m)pares.push([m[1].trim(),m[2].trim()]);else soltas.push(linha);}
-  const achar=(rx)=>pares.find(([k])=>rx.test(k));
-  const modelo=achar(/modelo|model/i), imei=achar(/imei/i), serial=achar(/número de série|numero de serie|serial|^sn$/i), fmi=achar(/find my|fmi/i), icloud=achar(/icloud/i);
-  if(modelo&&(fmi||icloud)){
-    const out=[]; out.push(`📱 *${consultaAppleModeloVisual(modelo[1])||modelo[1]}*`);
-    if(imei)out.push(`🔢 IMEI › \`${imei[1]}\``); if(serial)out.push(`🆔 SN › \`${serial[1]}\``);
-    if(fmi){const cor=consultaCorStatus(fmi[1],fmi[0]);const on=/^(on|ativo|enabled)$/i.test(fmi[1]);out.push(`${on?'🔒':'🔓'} FMI › ${cor?cor+' ':''}*${String(fmi[1]).toUpperCase()}*`);}
-    if(icloud){const cor=consultaCorStatus(icloud[1],icloud[0]);const icloudValor=/^limpo$/i.test(String(icloud[1]).trim())?'CLEAN':String(icloud[1]).toUpperCase();out.push(`☁️ iCloud › ${cor?cor+' ':''}*${icloudValor}*`);}
-    const usados=new Set([modelo,imei,serial,fmi,icloud].filter(Boolean));
-    for(const p of pares){if(usados.has(p))continue;const cor=consultaCorStatus(p[1],p[0]);out.push(`${consultaIconeCampo(p[0],p[1])} ${p[0]} › ${cor?cor+' ':''}${p[1]}`);}
-    if(soltas.length)out.push(...soltas); return out.join('\n');
-  }
-  const out=pares.map(([k,v])=>{const cor=consultaCorStatus(v,k);return `${consultaIconeCampo(k,v)} ${k} › ${cor?cor+' ':''}${v}`;});
-  if(soltas.length)out.push(...soltas); return out.join('\n')||traduzido;
-}
-
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
   const pm=reference.match(/^private-(\d+)$/i);
@@ -1614,10 +1532,9 @@ async function processarFeedbackDhru(body){
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finalizado_em END WHERE id=?`,[orderId,ok?'CONCLUIDA':fail?'ERRO':(status.toUpperCase()||'PROCESSANDO'),replay,replay,fail?replay:'',ok||fail,execId]);
     if(ok&&replay){
       const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');
-      const statusRef=consultaStatusPrivadoDhru.get(execId); await consultaApagarProcessandoPrivado(statusRef); consultaStatusPrivadoDhru.delete(execId);
-      if(numero) await enviarTexto(`wa:${numero}`,consultaFormatarResultadoDhruVisual(replay)||traduzirResultadoDhruPt(replay));
+      if(numero) await enviarTexto(`wa:${numero}`,`✅ *CONSULTA CONCLUÍDA*\n\n${traduzirResultadoDhruPt(replay)}`);
       try{await avisarGrupoMovimentacao('consulta',row.cliente_nome||'Cliente',await nomeConsultaExecucao(row));}catch(_){}
-    }else if(fail){const statusRef=consultaStatusPrivadoDhru.get(execId);await consultaApagarProcessandoPrivado(statusRef);consultaStatusPrivadoDhru.delete(execId);const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
+    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
     return {consultaPrivadaId:execId,status,replay};
   }
   const gm=reference.match(/^group-(\d+)$/i);
@@ -3288,27 +3205,6 @@ async function enviarImagem(to, filePath, caption='') {
   } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM:', e.message); }
   return false;
 }
-
-// ConsultaVIP: envio de QR/Imagem já em memória (Buffer), sem depender de arquivo temporário.
-async function enviarImagemBufferWhatsApp(destino, buffer, caption='') {
-  try {
-    if (!destino || !buffer || !Buffer.isBuffer(buffer) || !buffer.length) return false;
-    const numero = normalizarNumeroWhatsApp(jidToNumber(destino) || String(destino).replace(/^wa:/,''));
-    if (!numero) return false;
-    const sessaoPreferidaId = whatsappSessaoPorNumeroCliente.get(numero);
-    const sessaoPreferida = sessaoPreferidaId ? whatsappSessoes.get(Number(sessaoPreferidaId)) : null;
-    const sessaoBot = (sessaoPreferida?.funcaoBot && sessaoPreferida?.conectado && sessaoPreferida?.socket) ? sessaoPreferida : await obterSessaoBotConectada();
-    const sock = sessaoBot?.socket || (conectado ? whatsappSocket : null);
-    if (!sock) return false;
-    const jidDestino = String(destino).includes('@s.whatsapp.net') ? String(destino) : await resolverJidWhatsAppEnvio(numero, sock);
-    if (!jidDestino) return false;
-    await sock.sendMessage(jidDestino, { image: buffer, mimetype: 'image/png', caption: String(caption || '') });
-    return true;
-  } catch (e) {
-    console.log('❌ ERRO ENVIAR IMAGEM BUFFER WHATSAPP:', e.message);
-    return false;
-  }
-}
 async function avisarAdminTelegram(texto) {
   if (ADMIN_TELEGRAM_ID && tgBot) {
     try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); } catch(e) { console.log('❌ ADMIN TG:', e.message); }
@@ -4686,6 +4582,28 @@ async function enviarEntradaConsultaVip(from,cliente,corpo=''){
   }
   await enviarTexto(from,texto);
 }
+async function consultaAssinaturaAbrirPlanosPrivado(from,cliente,titulo='🔄 *RENOVAR ASSINATURA*',intro='Escolha um plano para renovar seu acesso:'){
+  const planos=await consultaAssinaturaPlanosAtivos();
+  if(!planos.length){ await enviarTexto(from,`${titulo}\n\n⚠️ Nenhum plano está disponível no momento.\n\n0️⃣ ⬅️ Voltar`); return; }
+  const linhas=[];
+  for(let i=0;i<planos.length;i++){ const pr=await consultaAssinaturaPrecoPlano(planos[i]); linhas.push(pr.promo?`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • ${brl(pr.normal)} → *${brl(pr.final)}*`:`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • *${brl(pr.final)}*`); }
+  await salvarSessaoPedido(from,{etapa:'consulta_assinatura_planos_privado',planoIds:planos.map(p=>Number(p.id)),retorno:'consulta_assinatura_status_privado'});
+  await enviarTexto(from,`${titulo}\n\n${intro}\n\n💎 *PLANOS DISPONÍVEIS*\n\n${linhas.join('\n')}\n\nDigite o número do plano para gerar o PIX.\n0️⃣ ⬅️ Voltar`);
+}
+
+async function consultaAssinaturaStatusPrivado(from,cliente){
+  const jid=numberToJid(normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||String(from||'').replace(/^wa:/,'')));
+  const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
+  if(st==='ATIVA'){
+    const fim=new Date(String(a.vencimento_em||'').replace(' ','T')+'Z'); const dias=Math.max(0,Math.ceil((fim.getTime()-Date.now())/86400000));
+    await salvarSessaoPedido(from,{etapa:'consulta_assinatura_status_privado'});
+    await enviarTexto(from,`⭐ *MINHA ASSINATURA*\n\n🟢 Status: *ATIVA*\n📦 Plano: *${a.plano_nome||'-'}*\n⏳ Restam: *${dias} dia${dias===1?'':'s'}*\n📅 Vencimento: *${dateBR(fim)}*\n\n1️⃣ 🔄 *RENOVAR ASSINATURA*\n0️⃣ ⬅️ Voltar`); return;
+  }
+  const motivo=st==='SUSPENSA'?'SUSPENSA':st==='VENCIDA'?'VENCIDA':'SEM ASSINATURA';
+  await salvarSessaoPedido(from,{etapa:'consulta_assinatura_status_privado'});
+  await enviarTexto(from,`⭐ *MINHA ASSINATURA*\n\n🔴 Status: *${motivo}*\n\n1️⃣ 🔄 *RENOVAR ASSINATURA*\n0️⃣ ⬅️ Voltar`);
+}
+
 async function menuConsultasPrivado(from,cliente,mostrarEntrada=false){
   const jid=numberToJid(normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||from.replace(/^wa:/,'')));
   let assinatura=null, statusAss='DESATIVADO';
@@ -4727,15 +4645,16 @@ Nenhuma consulta está disponível no momento.
   }
   const menuTexto=`${acesso.trim()}
 
-1️⃣ 📱 *IMEI / APARELHO*
-2️⃣ 👤 *CONSULTAS DE DADOS*
-3️⃣ 🚗 *VEÍCULOS*
-4️⃣ 📞 *LINHA / TELEFONE*
-5️⃣ 🔍 *OUTRAS CONSULTAS*
-6️⃣ 📋 *GUIA DE COMANDOS*
-7️⃣ ⭐ *MINHA ASSINATURA*
+Escolha uma categoria:
 
-0️⃣ ⬅️ *MENU PRINCIPAL*`;
+📱 1️⃣ *IMEI / APARELHO*
+👤 2️⃣ *CONSULTAS DE DADOS*
+🚗 3️⃣ *VEÍCULOS*
+📞 4️⃣ *LINHA / TELEFONE*
+🔍 5️⃣ *OUTRAS CONSULTAS*
+
+📋 Consultas incluídas na sua assinatura.
+0️⃣ ⬅️ Menu principal`;
   if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,menuTexto);
   else await enviarTexto(from,menuTexto);
 
@@ -4765,12 +4684,11 @@ async function consultaVipExecutarYanPrivado(from,cliente,cmd){
   const r=await run(`INSERT INTO consultas_assinatura(cliente_jid,cliente_nome,grupo_whatsapp,comando,dado_consulta,status) VALUES(?,?,?,?,?,'ENVIANDO_TELEGRAM')`,[jid,cliente?.nome||'Cliente',from,cmd,dado]);
   consultaEmMemoria={id:r.lastID,canal:'WHATSAPP_PRIVADO',cliente_jid:jid,cliente_nome:cliente?.nome||'Cliente',grupo_whatsapp:from,comando:cmd,dado_consulta:dado};
   try{
-    await consultaAssinaturaRegistrarUso(jid,cmd);
-    consultaEmMemoria.statusProcessando=await consultaEnviarProcessandoPrivado(from,consultaNomeComandoYan(cmd),dado);
+    await consultaAssinaturaRegistrarUso(jid,cmd); await enviarTexto(from,'⏳ *Consulta recebida.*\n\nO resultado será entregue aqui no seu privado.');
     const ent=await consultaTelegramResolverGrupo(tgGrupo),env=await consultaTelegramCliente.sendMessage(ent,{message:cmd});
     consultaEmMemoria.telegram_entidade=ent;consultaEmMemoria.telegram_enviado_id=String(env?.id||'');
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=? WHERE id=?`,[String(env?.id||''),r.lastID]);
-    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite de 120 segundos excedido.')).catch(()=>{});},120000);
+    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite excedido.')).catch(()=>{});},30000);
   }catch(e){await consultaFalhar(r.lastID,e);}
 }
 
@@ -5154,8 +5072,10 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await enviarTexto(from, guia);
     return;
   }
-  if (/^\/assinatura(?:\s|$)/i.test(textoOriginal)) {
-    await consultaAssinaturaEnviarStatusPrivado(from, cliente);
+
+  // ConsultaVIP — assinatura no privado, disponível em qualquer etapa.
+  if (/^\/(?:assinatura|assitura)(?:\s|$)/i.test(textoOriginal)) {
+    await consultaAssinaturaStatusPrivado(from, cliente);
     return;
   }
 
@@ -5220,11 +5140,10 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
       if (consultaEmMemoria || consultaDhruEmMemoria) { await enviarTexto(from,'⏳ O sistema está concluindo outra consulta. Tente novamente em instantes.'); return; }
       try {
         const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(mapaDhruSolto.id)||null,Number(mapaDhruSolto.servico_id),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
-        const dadoVisual=Object.values(valores||{}).filter(v=>String(v??'').trim()).join(' | ')||resto;
-        consultaStatusPrivadoDhru.set(Number(r.lastID),await consultaEnviarProcessandoPrivado(from,String(mapaDhruSolto.nome_exibicao||mapaDhruSolto.comando||'Consulta'),dadoVisual));
         const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(prod.product_uuid,valores,ref);
         await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
-      } catch(e) { const ultimo=[...consultaStatusPrivadoDhru.keys()].pop(); if(ultimo){await consultaApagarProcessandoPrivado(consultaStatusPrivadoDhru.get(ultimo));consultaStatusPrivadoDhru.delete(ultimo);} await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`); }
+        await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+      } catch(e) { await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`); }
       return;
     }
   }
@@ -5375,8 +5294,13 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(opcao==='3'){ await salvarSessaoPedido(from,{etapa:'suporte_menu'}); await enviarTexto(from,`🆘 *SUPORTE*\n\n1️⃣ 🔎 Problema com ConsultaVIP\n2️⃣ 🛒 Problema com serviço/pedido\n3️⃣ 👨‍💻 Falar com o suporte\n\n0️⃣ ⬅️ Voltar`); return; }
     await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'hub_menu'); return;
   }
+  if(sess?.etapa==='consulta_assinatura_status_privado' || sess?.etapa==='consulta_assinatura_alerta_privado'){
+    if(opcao==='0'){ await menuConsultasPrivado(from,cliente); return; }
+    if(opcao==='1'){ await consultaAssinaturaAbrirPlanosPrivado(from,cliente); return; }
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,sess.etapa); return;
+  }
   if(sess?.etapa==='consulta_assinatura_planos_privado'){
-    if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
+    if(opcao==='0'){await consultaAssinaturaStatusPrivado(from,cliente);return;}
     if(!/^\d+$/.test(opcao||'')){await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_assinatura_planos_privado');return;}
     const planoId=Array.isArray(sess.planoIds)?sess.planoIds[Number(opcao)-1]:null;
     const plano=planoId?await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[Number(planoId)]):null;
@@ -5384,7 +5308,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     const jid=numberToJid(numeroNorm);
     const sockPrivado={sendMessage:async(_dest,conteudo)=>{
       if(conteudo?.text) return await enviarTexto(from,conteudo.text.replace(/@\d+/g,String(cliente?.nome||nome||'Cliente').split(/\s+/)[0]));
-      if(conteudo?.image) return await enviarImagemBufferWhatsApp(from,conteudo.image,conteudo.caption||'');
+      if(conteudo?.image) return await enviarMidiaWhatsApp(from,conteudo.image,conteudo.caption||'');
     }};
     await consultaAssinaturaGerarPixGrupo(sockPrivado,from,jid,cliente?.nome||nome||'Cliente',plano);
     return;
@@ -5394,7 +5318,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(opcao==='1'){const cs=await all(`SELECT c.id,c.comando,c.nome_exibicao,c.servico_id,c.exemplo,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE c.ativo=1 ORDER BY c.id ASC`).catch(()=>[]);const ativos=cs.filter(x=>Number(x.servico_id)>0);if(!ativos.length){await enviarTexto(from,'⚠️ Nenhum comando de IMEI/aparelho está ativo no momento.\n\n0️⃣ Voltar');return;}const itens=ativos.slice(0,40);const lista=itens.map((x,i)=>`${i+1}️⃣ *${String(x.nome_exibicao||x.comando).trim()}* — ${x.comando}`).join('\n');await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaComandos:itens.map(x=>({id:Number(x.id),servicoId:Number(x.servico_id),comando:String(x.comando||''),nome:String(x.nome_exibicao||x.comando||'Consulta')}))});await enviarTexto(from,`📱 *IMEI / APARELHO*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);return;}
     if(opcao==='2'){await consultaVipMenuYanPrivado(from,'DADOS');return;} if(opcao==='3'){await consultaVipMenuYanPrivado(from,'VEICULOS');return;} if(opcao==='4'){await consultaVipMenuYanPrivado(from,'LINHA');return;} if(opcao==='5'){await consultaVipMenuYanPrivado(from,'OUTRAS');return;}
     if(opcao==='6'){const guia=await consultaComandosTextoCompacto();await enviarTexto(from,guia);return;}
-    if(opcao==='7'){await consultaAssinaturaEnviarStatusPrivado(from,cliente);return;}
+    if(opcao==='7'){await consultaAssinaturaStatusPrivado(from,cliente);return;}
     await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_categorias');return;
   }
   if(sess?.etapa==='consulta_privada_yan_menu'){
@@ -5431,12 +5355,11 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
     if(i+1<campos.length){await salvarSessaoPedido(from,{...sess,etapa:'consulta_privada_campos',indice:i+1,valores});await enviarTexto(from,dhruPromptCampo(campos[i+1],i+1,campos.length)+'\n\n0️⃣ Cancelar');return;}
     try{
       const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(sess.comandoId)||null,Number(sess.servicoId),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
-      const dadoVisual=Object.values(valores||{}).filter(v=>String(v??'').trim()).join(' | ')||'-';
-      consultaStatusPrivadoDhru.set(Number(r.lastID),await consultaEnviarProcessandoPrivado(from,String(sess.nomeComando||sess.comando||'Consulta'),dadoVisual));
       const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(sess.produtoUuid,valores,ref);
       await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
       await salvarSessaoPedido(from,{etapa:'hub_menu'});
-    }catch(e){const ultimo=[...consultaStatusPrivadoDhru.keys()].pop();if(ultimo){await consultaApagarProcessandoPrivado(consultaStatusPrivadoDhru.get(ultimo));consultaStatusPrivadoDhru.delete(ultimo);}await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`);}
+      await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+    }catch(e){await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`);}
     return;
   }
 
@@ -9517,7 +9440,6 @@ async function consultaFalhar(id,erro){
   try{ await run(`UPDATE consultas_assinatura SET status='ERRO',erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[msg,id]); }catch(_){}
   try{
     if(consultaEmMemoria?.canal==='WHATSAPP_PRIVADO'){
-      await consultaApagarProcessandoPrivado(consultaEmMemoria.statusProcessando);
       await enviarTexto(String(consultaEmMemoria.grupo_whatsapp||''),'❌ Não foi possível concluir sua consulta agora. Tente novamente em instantes.').catch(()=>{});
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;} if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;} consultaEmMemoria=null; return;
     }
@@ -9742,10 +9664,9 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   try{
     if(ativo.canal==='WHATSAPP_PRIVADO'){
       const destino=String(ativo.grupo_whatsapp||'');
-      await consultaApagarProcessandoPrivado(ativo.statusProcessando);
-      if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await enviarTexto(destino,`📋 *Consulta:* ${consultaNomeComandoYan(ativo.comando)}\n🟢 *STATUS › CONCLUÍDA*\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
-      else if(semResultado){await enviarTexto(destino,`📋 *Consulta:* ${consultaNomeComandoYan(ativo.comando)}\n🟢 *STATUS › CONCLUÍDA*\n\n${consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.'}`);}
-      else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:`📋 *Consulta:* ${consultaNomeComandoYan(ativo.comando)}\n🟢 *STATUS › CONCLUÍDA*`});try{fs.unlinkSync(pdf)}catch(_){}}
+      if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await enviarTexto(destino,`✅ *Consulta concluída*\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
+      else if(semResultado){await enviarTexto(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
+      else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
       await avisarGrupoConsultaPrivadaConcluida(ativo);
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}consultaEmMemoria=null;return;
@@ -10408,21 +10329,8 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n🏦 ${nomeGateway(gateway)}\n💰 Valor: *${brl(preco.final)}*`;
   if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
   await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
-  // Sempre tenta entregar um QR Code. Se o Mercado Pago não retornar uma imagem válida,
-  // gera o QR localmente a partir do próprio PIX Copia e Cola.
-  if(gateway==='mercadopago'){
-    try{
-      let b=null;
-      if(pix.qrCodeBase64){
-        const candidato=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64');
-        if(candidato.length) b=candidato;
-      }
-      if(!b && pix.qrCode) b=await QRCode.toBuffer(String(pix.qrCode).replace(/[\r\n\t]/g,'').trim(),{type:'png',width:700,margin:2});
-      if(b?.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
-    }catch(e){ console.log('⚠️ CONSULTAVIP QR PIX:',e.message); }
-  }
-  // O Copia e Cola vai sozinho para o cliente copiar sem precisar apagar título/emoji.
-  await sock.sendMessage(grupo,{text:String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()});
+  if(gateway==='mercadopago'&&pix.qrCodeBase64){ try{ const b=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64'); if(b.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'}); }catch(_){} }
+  await sock.sendMessage(grupo,{text:`📋 PIX Copia e Cola:\n${String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()}`});
   verificarPagamento(String(pix.paymentId),cliente.revenda?.id||null,jid,preco.final,'ASSINATURA',JSON.stringify(contexto),gateway);
   return true;
 }
@@ -10458,18 +10366,10 @@ async function consultaAssinaturaConfirmarPagamento(paymentId,jid,valorPix,gatew
   await run(`INSERT INTO pagamentos(revenda_id,revenda_nome,cliente_jid,cliente_numero,valor,origem) VALUES(NULL,?,?,?,?,?)`,[ctx.clienteNome||'Assinante',ctx.clienteJid||jid,numero,Number(valorPix||0),`${gateway}_assinatura`]);
   const ind=await get(`SELECT * FROM consulta_assinatura_indicacoes WHERE indicado_numero=? AND status='PENDENTE'`,[numero]);
   if(ind){ const bonusInd=Math.max(0,Number(await getConfig('consulta_indicacao_bonus_dias','2')||2)); const ref=await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[ind.indicador_numero]); if(ref&&bonusInd>0){ const st=consultaAssinaturaStatus(ref), b=st==='ATIVA'&&ref.vencimento_em?new Date(String(ref.vencimento_em).replace(' ','T')+'Z'):new Date(); b.setTime(b.getTime()+bonusInd*86400000); await run(`UPDATE consulta_assinantes SET vencimento_em=?,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[consultaAssinaturaSqlDate(b),ref.id]); await run(`UPDATE consulta_assinatura_indicacoes SET status='CONVERTIDA',bonus_dias=?,convertido_em=CURRENT_TIMESTAMP WHERE id=?`,[bonusInd,ind.id]); } }
-  const grupo=ctx.grupoWhatsapp||await getConfig('consulta_wa_grupo',''); const j=ctx.clienteJid||jid;
-  const msgConfirmacao=`🎉 *PAGAMENTO CONFIRMADO*\n\n💎 Plano: *${p.nome}*\n💰 Valor: *${brl(valorPix)}*\n🟢 ConsultaVIP: *ATIVO*\n📅 Validade: *${dateBR(fim)}*${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}\n\n🔓 Seu acesso foi liberado automaticamente!`;
-  const msgTutorial=`🎓 *COMO USAR O CONSULTAVIP*\n\nSeu acesso está ativo! 🟢\n\n⚡ *CONSULTE DIRETO PELOS COMANDOS*\n\nVocê não precisa navegar pelo menu toda vez.\n\nDigite *\/comandos* para ver todos os comandos disponíveis.\n\nDepois é só usar o comando junto com o dado solicitado.\n\n*Exemplos:*\n/cpf 09034334344\n/placa EEE445G\n/nome KARIN GHOST\n\n🤖 O resultado chega automaticamente aqui no privado.\n\n📋 Se preferir, você também pode usar o menu do *ConsultaVIP* normalmente.\n\n💡 Sempre que esquecer algum comando, digite *\/comandos*.`;
-
-  if(String(grupo||'').endsWith('@g.us')){
-    const sock=await consultaObterSocketWhatsApp(grupo);
-    if(sock){ const tag=numero?`@${numero}`:(ctx.clienteNome||'Cliente'); await sock.sendMessage(grupo,{text:`✅ ${tag}, pagamento confirmado!\n\n💎 Assinatura ${estavaAtiva?'renovada':'ativada'}\n📦 Plano: ${p.nome}\n💰 Valor: ${brl(valorPix)}\n📅 Vencimento: ${dateBR(fim)}${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}`,mentions:j?[j]:[]}); }
-  } else {
-    // Compra feita no privado: confirma no próprio privado, ensina os comandos e abre o ConsultaVIP.
-    await enviarTexto(j,msgConfirmacao);
-    await enviarTexto(j,msgTutorial);
-    await menuConsultasPrivado(j,{whatsapp:numero,jid:j,nome:ctx.clienteNome||'Cliente'},false).catch(e=>console.log('⚠️ CONSULTAVIP MENU POS-PAGAMENTO:',e.message));
+  // Confirmação da assinatura é enviada somente no privado do cliente.
+  if(numero){
+    const diasSomados=Number(p.dias)+Number(bonusDias||0);
+    await enviarTexto(`wa:${numero}`,`✅ *PAGAMENTO CONFIRMADO*\n\n💎 Assinatura *${estavaAtiva?'RENOVADA':'ATIVADA'}*\n📦 Plano: *${p.nome}*\n➕ Dias adicionados: *${diasSomados}*\n📅 Novo vencimento: *${dateBR(fim)}*${estavaAtiva?'\n\n✅ Seus dias restantes foram preservados e a renovação foi somada ao vencimento atual.':''}`);
   }
   notificarPainel('pix','💎 Assinatura paga',`${ctx.clienteNome||numero} • ${p.nome} • ${brl(valorPix)} • ${nomeGateway(gateway)}`);
 }
@@ -10480,7 +10380,21 @@ async function consultaAssinaturaAnunciarPromocao(){
   try{ const cfg=await consultaAssinaturaPromocaoConfig(); if(!consultaAssinaturaPromoVigente(cfg))return; const last=cfg.ultimoEnvio?Date.parse(cfg.ultimoEnvio):0; if(last&&Date.now()-last<cfg.intervaloHoras*3600000)return; const plano=await get(`SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1`,[cfg.planoId]); if(!plano)return; const pr=await consultaAssinaturaPrecoPlano(plano), grupo=await getConfig('consulta_wa_grupo',''), sock=await consultaObterSocketWhatsApp(grupo); if(!grupo||!sock)return; const idx=((cfg.proximoModelo%cfg.modelos.length)+cfg.modelos.length)%cfg.modelos.length; await sock.sendMessage(grupo,{text:consultaPromoAplicarModelo(cfg.modelos[idx],plano,pr)}); await setConfig('consulta_promo_ultimo_envio',new Date().toISOString()); await setConfig('consulta_promo_modelo_indice',String((idx+1)%cfg.modelos.length)); }catch(e){console.log('⚠️ PROMO ASSINATURA:',e.message)}
 }
 async function consultaAssinaturaEnviarAlertas(){
-  try{ const grupo=await getConfig('consulta_wa_grupo',''), sock=await consultaObterSocketWhatsApp(grupo); if(!grupo||!sock)return; const rows=await all(`SELECT a.*,p.nome plano_nome FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id WHERE a.status='ATIVA' AND a.vencimento_em IS NOT NULL`); const agora=Date.now(); for(const a of rows){ const fim=Date.parse(String(a.vencimento_em).replace(' ','T')+'Z'); if(!Number.isFinite(fim))continue; const hrs=(fim-agora)/3600000; let tipo=''; if(hrs<=0)tipo='VENCEU'; else if(hrs<=24)tipo='1D'; else if(hrs<=72)tipo='3D'; if(!tipo)continue; const ref=String(a.vencimento_em); if(await get(`SELECT id FROM consulta_assinatura_alertas WHERE assinante_id=? AND tipo=? AND referencia=?`,[a.id,tipo,ref]))continue; const tag=`@${a.cliente_numero}`; const msg=tipo==='VENCEU'?`⛔ ${tag}, sua assinatura venceu. Digite /assinatura para renovar.`:`⏰ ${tag}, sua assinatura vence ${tipo==='1D'?'em até 1 dia':'em até 3 dias'}. Digite /assinatura para renovar sem interrupção.`; await sock.sendMessage(grupo,{text:msg,mentions:a.cliente_jid?[a.cliente_jid]:[]}); await run(`INSERT OR IGNORE INTO consulta_assinatura_alertas(assinante_id,tipo,referencia) VALUES(?,?,?)`,[a.id,tipo,ref]); } }catch(e){console.log('⚠️ ALERTAS ASSINATURA:',e.message)}
+  try{
+    const rows=await all(`SELECT a.*,p.nome plano_nome FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id WHERE a.status='ATIVA' AND a.vencimento_em IS NOT NULL`);
+    const agora=Date.now();
+    for(const a of rows){
+      const fim=Date.parse(String(a.vencimento_em).replace(' ','T')+'Z'); if(!Number.isFinite(fim))continue;
+      const hrs=(fim-agora)/3600000; const diasRestantes=Math.max(0,Math.ceil((fim-agora)/86400000)); let tipo=''; if(hrs<=0)tipo='VENCEU'; else if(hrs<=24)tipo='1D'; else if(hrs<=72)tipo='3D'; if(!tipo)continue;
+      const ref=String(a.vencimento_em); if(await get(`SELECT id FROM consulta_assinatura_alertas WHERE assinante_id=? AND tipo=? AND referencia=?`,[a.id,tipo,ref]))continue;
+      const numero=normalizarNumeroWhatsApp(a.cliente_numero||jidToNumber(a.cliente_jid)||''); if(!numero)continue;
+      const fromPrivado=`wa:${numero}`, nome=String(a.cliente_nome||'Cliente').trim();
+      const msg=tipo==='VENCEU'?`🔴 *ASSINATURA VENCIDA*\n\nOlá, *${nome}*!\nSeu acesso ao ConsultaVIP expirou.\n\n1️⃣ 🔄 *RENOVAR ASSINATURA*`:`⚠️ *SUA ASSINATURA ESTÁ VENCENDO*\n\nOlá, *${nome}*! 👋\n⏳ ${diasRestantes===1?'Resta *1 dia*':`Restam *${diasRestantes} dias*`} de acesso ao ConsultaVIP.\n\n1️⃣ 🔄 *RENOVAR ASSINATURA*`;
+      const ok=await enviarTexto(fromPrivado,msg); if(!ok)continue;
+      await salvarSessaoPedido(fromPrivado,{etapa:'consulta_assinatura_alerta_privado'});
+      await run(`INSERT OR IGNORE INTO consulta_assinatura_alertas(assinante_id,tipo,referencia) VALUES(?,?,?)`,[a.id,tipo,ref]);
+    }
+  }catch(e){console.log('⚠️ ALERTAS ASSINATURA:',e.message)}
 }
 
 // V210 — assinaturas: uma única verificação serve para comandos Yan e Dhru.
@@ -10517,34 +10431,6 @@ async function consultaAssinaturaEnviarStatus(sock,grupo,jid,nome){
     await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.${planos}`,mentions:[jid]});
   }
 }
-async function consultaAssinaturaEnviarStatusPrivado(from,cliente){
-  const numero=normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||String(from||'').replace(/^wa:/,''));
-  const jid=numberToJid(numero);
-  const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
-  if(st==='ATIVA'){
-    const venc=dateBR(String(a.vencimento_em||'')+'Z');
-    const fim=new Date(String(a.vencimento_em||'').replace(' ','T')+'Z');
-    const dias=Math.max(0,Math.ceil((fim.getTime()-Date.now())/86400000));
-    const planos=await consultaAssinaturaTextoPlanosV211();
-    await enviarTexto(from,`⭐ *MINHA ASSINATURA*
-
-🟢 Status › *ATIVA*
-💎 Plano › *${a.plano_nome||'-'}*
-📅 Vencimento › *${venc}*
-⏳ Restante › *${dias} dia${dias===1?'':'s'}*${planos}
-
-0️⃣ ⬅️ Voltar`);
-  }else{
-    const planos=await consultaAssinaturaTextoPlanosV211();
-    const motivo=st==='SUSPENSA'?'SUSPENSA':st==='VENCIDA'?'VENCIDA':'INATIVA';
-    await enviarTexto(from,`⭐ *MINHA ASSINATURA*
-
-🔴 Status › *${motivo}*${planos}
-
-0️⃣ ⬅️ Voltar`);
-  }
-}
-
 async function consultaAssinaturaPodeConsultar(sock,grupo,jid,nome){
   if(!(await consultaAssinaturaControleAtivo())) return true;
   const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
@@ -10585,9 +10471,6 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
   const nomeCliente=msg?.pushName||'Cliente';
-  // ConsultaVIP opera somente no privado. O grupo não executa comandos.
-  // Consome silenciosamente comandos antigos/novos para evitar exposição de dados.
-  if(/^[\/.]/.test(cmd)) return true;
   if(!consultaAssinaturaSpamOk(participante,cmd)){ await socketAtual.sendMessage(grupo,{text:'⚠️ Aguarde um instante antes de repetir o mesmo comando.'}); return true; }
   if(await consultaMenuTratarResposta({sock:socketAtual,grupo,jid:participante,nome:nomeCliente,cmd})) return true;
   if(/^\/assinatura(?:\s|$)/i.test(cmd)){ await consultaAssinaturaEnviarStatus(socketAtual,grupo,participante,nomeCliente); return true; }
@@ -10632,14 +10515,14 @@ Depois que fizer a primeira assinatura paga, você recebe +${bonus} dia(s).`,men
     consultaEmMemoria.processandoResultado=false;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     consultaTelegramIniciarPolling();
-    const timeoutSeg=120;
+    const timeoutSeg=30;
     consultaTimeoutTimer=setTimeout(()=>{
       if(consultaEmMemoria?.id!==id) return;
       if(consultaEmMemoria.processandoResultado){
-        console.log('🟢 V196 120S: resultado já encontrado; liberando o grupo enquanto finaliza a entrega.');
+        console.log('🟢 V196 30S: resultado já encontrado; liberando o grupo enquanto finaliza a entrega.');
         consultaGrupoWhatsAppAbrirSemEncerrar().catch(()=>{});
       }else{
-        consultaFalhar(id,new Error('Tempo limite de 120 segundos excedido.')).catch(()=>{});
+        consultaFalhar(id,new Error('Tempo limite de 30 segundos excedido.')).catch(()=>{});
       }
     },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
@@ -10750,7 +10633,7 @@ app.post('/admin/consultavip/chave',async(req,res)=>{try{const uid=String(req.bo
 app.post('/admin/consultavip/licenca/:id/status',async(req,res)=>{const st=req.body.status==='ATIVA'?'ATIVA':'SUSPENSA';await run('UPDATE consultavip_licencas SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[st,Number(req.params.id)]);res.redirect('/admin/consultavip?ok='+encodeURIComponent('Licença atualizada.'));});
 
 app.get('/admin/consultas-assinatura', async (req,res)=>{
-  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','120');
+  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','30');
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
@@ -10793,7 +10676,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="card"><a class="btn green" href="/admin/consultavip">🕵️🔎 Abrir painel CONSULTAVIP</a> <a class="btn" href="/admin/consultas-assinatura/saude">🩺 Abrir saúde das integrações</a></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
-  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="120" max="120" name="timeout_seg" value="120" readonly><small>As consultas Yan/Telegram aguardam o resultado por até 120 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF. Os comandos adicionais ativos cadastrados no painel entram automaticamente no PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>💎 Controle de assinaturas</h2><p class="muted">Quando ativado, todos os comandos Yan e Dhru verificam a validade do assinante antes de iniciar. /comandos e /assinatura continuam disponíveis.</p><form method="post" action="/admin/consultas-assinatura/assinaturas/config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${assinaturaControle?'checked':''}> Exigir assinatura ativa para consultar</label><button class="btn green">💾 Salvar controle</button></form></div>
   <div class="card"><h2>💰 Planos de assinatura</h2><p class="muted">Planos padrão: 1 dia R$ 10, 3 dias R$ 13, 7 dias R$ 17, 15 dias R$ 30 e 30 dias R$ 50. Você pode editar ou criar novos.</p><form method="post" action="/admin/consultas-assinatura/plano/novo" class="forms-inline"><input name="nome" placeholder="Nome do plano" required><input name="dias" type="number" min="1" placeholder="Dias" required><input name="preco" placeholder="Preço" required><button class="btn green">➕ Novo plano</button></form><table style="margin-top:12px"><tr><th>ID</th><th>Configuração</th></tr>${assinaturaPlanosRows}</table></div>
@@ -10931,7 +10814,7 @@ app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
     await setConfig('consulta_ativa',req.body.ativa==='1'?'1':'0');
     await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
     await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
-    await setConfig('consulta_timeout_seg',String(120));
+    await setConfig('consulta_timeout_seg',String(30));
     res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Fluxo salvo.'));
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
