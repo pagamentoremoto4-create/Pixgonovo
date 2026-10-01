@@ -3053,7 +3053,7 @@ async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
   if(String(opcao)==='0'){
     if(sess.origemMenu==='blacklist'){
       await salvarSessaoPedido(from,{etapa:'menu'});
-      await enviarMenuWhatsApp(from,cliente,false,true);
+      await enviarMenuServicosWhatsApp(from,cliente);
       return true;
     }
     if(sess.origemMenu==='online'){
@@ -5225,7 +5225,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if (opcao === '0' || lower === 'cancelar') {
       await apagarSessaoPedido(from);
       await salvarSessaoPedido(from, { etapa: 'menu' });
-      await enviarMenuWhatsApp(from, cliente, false, true);
+      await enviarMenuServicosWhatsApp(from, cliente);
       return;
     }
     const expirou = Date.now() - Number(sessValorPixWhatsApp.atualizado_em_ms || 0) > 5 * 60 * 1000;
@@ -5332,7 +5332,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
   if (opcao === '0' && sess && sess.etapa !== 'menu' && !etapasComVoltarProprio.has(sess.etapa)) {
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'menu' });
-    await enviarMenuWhatsApp(from, cliente, false);
+    await enviarMenuServicosWhatsApp(from, cliente);
     return;
   }
 
@@ -5393,7 +5393,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
         await enviarMenuMinhaContaWhatsApp(from, cliente);
       } else {
         await salvarSessaoPedido(from, { etapa: 'menu' });
-        await enviarMenuWhatsApp(from, cliente, false, true);
+        await enviarMenuServicosWhatsApp(from, cliente);
       }
       return;
     }
@@ -5465,7 +5465,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
         await enviarMenuMinhaContaWhatsApp(from,cliente);
       }else{
         await salvarSessaoPedido(from,{etapa:'menu'});
-        await enviarMenuWhatsApp(from,cliente,false,true);
+        await enviarMenuServicosWhatsApp(from,cliente);
       }
       return;
     }
@@ -5491,8 +5491,13 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
 
   if (sess?.etapa === 'suporte_menu') {
     if(opcao==='0'||lower==='voltar'){
-      await salvarSessaoPedido(from,{etapa:'hub_menu'});
-      await enviarMenuWhatsApp(from,cliente,false,true);
+      if(sess.origemMenu==='servicos'){
+        await salvarSessaoPedido(from,{etapa:'menu'});
+        await enviarMenuServicosWhatsApp(from,cliente);
+      }else{
+        await salvarSessaoPedido(from,{etapa:'hub_menu'});
+        await enviarMenuWhatsApp(from,cliente,false,true);
+      }
       return;
     }
     const motivos={'1':'Problema com ConsultaVIP','2':'Problema com serviço/pedido','3':'Falar com o suporte'};
@@ -5539,7 +5544,7 @@ ${descricao}`);}catch(_){}
   if (sess?.etapa === 'online_categorias') {
     if(opcao==='0'||lower==='voltar'){
       await salvarSessaoPedido(from,{etapa:'menu'});
-      await enviarMenuWhatsApp(from,cliente,false,true);
+      await enviarMenuServicosWhatsApp(from,cliente);
       return;
     }
     if(lower.startsWith('buscar ')){
@@ -5588,7 +5593,7 @@ ${descricao}`);}catch(_){}
     if (opcao === '0' || lower === 'voltar' || lower === 'cancelar') {
       await apagarSessaoPedido(from);
       await salvarSessaoPedido(from, { etapa: 'menu' });
-      await enviarMenuWhatsApp(from, cliente);
+      await enviarMenuServicosWhatsApp(from, cliente);
       return;
     }
     const todos = String(textoOriginal || '').match(/\b\d{15}\b/g) || [];
@@ -5673,7 +5678,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
       return;
     }
     if (opcao === '8') {
-      await salvarSessaoPedido(from, { etapa: 'suporte_menu' });
+      await salvarSessaoPedido(from, { etapa: 'suporte_menu', origemMenu: 'servicos' });
       await enviarTexto(from, `🆘 *SUPORTE*\n\n1️⃣ 🔎 Problema com ConsultaVIP\n2️⃣ 🛒 Problema com serviço/pedido\n3️⃣ 👨‍💻 Falar com o suporte\n\n0️⃣ ⬅️ Voltar`);
       return;
     }
@@ -10495,7 +10500,7 @@ function consultaLoginStatus(){
 app.use('/admin', basicAuth);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
 ggsoma.routes(app);
-const premium = require('./premium')({run,get,all,axios,ggsoma,precoDaRevenda,brl,enviarTexto,enviarImagem,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuWhatsApp(from,cliente);}});
+const premium = require('./premium')({run,get,all,axios,ggsoma,precoDaRevenda,brl,enviarTexto,enviarImagem,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuServicosWhatsApp(from,cliente);}});
 premium.routes(app);
 
 
