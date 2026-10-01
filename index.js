@@ -4538,7 +4538,8 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
   return `${saudacao}*O que deseja fazer?*
 
 1️⃣ 🔎 *CONSULTAVIP*
-2️⃣ 🛒 *SERVIÇOS*`;
+2️⃣ 🛒 *SERVIÇOS*
+3️⃣ 🆘 *SUPORTE*`;
 }
 
 function menuServicosWhatsAppTexto(cliente, pendentes=0) {
@@ -5048,6 +5049,75 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     return;
   }
 
+
+  // V220 — comandos soltos do ConsultaVIP têm prioridade sobre qualquer sessão/menu.
+  // Ex.: /cpf, /cpf 000..., /check, /blacklist. Um novo comando limpa apenas o
+  // fluxo interativo anterior e inicia a consulta correspondente.
+  const textoCmdSolto = String(textoOriginal || '').trim();
+  const prefixoCmdSolto = (textoCmdSolto.match(/^([\/.][a-z0-9_]+)(?:\s|$)/i) || [])[1] || '';
+  if (prefixoCmdSolto) {
+    // 1) Comandos antigos/Yan (CPF, NOME, PLACA etc.).
+    const cmdYan = CONSULTA_COMANDOS_VALIDOS.find(c => {
+      const pref = (String(c.exemplo || '').match(/^([\/.][a-z0-9_]+)/i) || [])[1] || '';
+      return pref && pref.toLowerCase() === prefixoCmdSolto.toLowerCase() && c.nome !== 'SENHA';
+    });
+    if (cmdYan) {
+      const jidConsulta = numberToJid(numeroNorm);
+      if (await consultaAssinaturaControleAtivo()) {
+        const ass = await consultaAssinaturaObterPorJid(jidConsulta);
+        if (consultaAssinaturaStatus(ass) !== 'ATIVA') { await apagarSessaoPedido(from); await menuConsultasPrivado(from, cliente, true); return; }
+      }
+      await apagarSessaoPedido(from);
+      const somentePrefixo = textoCmdSolto.toLowerCase() === prefixoCmdSolto.toLowerCase();
+      if (somentePrefixo) {
+        const exemplo = String(cmdYan.exemplo || '').replace(/^[\/.][a-z0-9_]+\s*/i, '');
+        await salvarSessaoPedido(from, { etapa:'consulta_privada_yan_dado', yanNome:cmdYan.nome, categoria:consultaVipYanCategoria(cmdYan) });
+        await enviarTexto(from, `🔎 *${cmdYan.nome}*\n\nEnvie agora o dado para consultar.${exemplo?`\nExemplo: ${exemplo}`:''}\n\n0️⃣ Cancelar`);
+        return;
+      }
+      const validacaoYan = consultaValidarComando(textoCmdSolto);
+      if (!validacaoYan.ok) {
+        const exemplo = String(cmdYan.exemplo || '').replace(/^[\/.][a-z0-9_]+\s*/i, '');
+        await enviarTexto(from, `❌ Dado inválido.${exemplo?`\nExemplo correto: ${exemplo}`:''}`);
+        return;
+      }
+      await consultaVipExecutarYanPrivado(from, cliente, textoCmdSolto);
+      return;
+    }
+
+    // 2) Comandos DHRU cadastrados/ativos no painel.
+    const mapaDhruSolto = await consultaDhruMapeamentoDoTexto(textoCmdSolto);
+    if (mapaDhruSolto?.servico_id) {
+      const jidConsulta = numberToJid(numeroNorm);
+      if (await consultaAssinaturaControleAtivo()) {
+        const ass = await consultaAssinaturaObterPorJid(jidConsulta);
+        if (consultaAssinaturaStatus(ass) !== 'ATIVA') { await apagarSessaoPedido(from); await menuConsultasPrivado(from, cliente, true); return; }
+      }
+      await apagarSessaoPedido(from);
+      const prod = await dhruProductForService(Number(mapaDhruSolto.servico_id));
+      if (!prod) { await enviarTexto(from, '⚠️ Essa consulta está temporariamente indisponível.'); return; }
+      const campos = dhruFieldsUsuario(prod).filter(f => f.required !== false);
+      const resto = textoCmdSolto.replace(/^\S+\s*/,'').trim();
+      if (!resto) {
+        await salvarSessaoPedido(from,{etapa:'consulta_privada_campos',servicoId:Number(mapaDhruSolto.servico_id),comandoId:Number(mapaDhruSolto.id),comando:String(mapaDhruSolto.comando||prefixoCmdSolto),nomeComando:String(mapaDhruSolto.nome_exibicao||mapaDhruSolto.comando||'Consulta'),produtoUuid:prod.product_uuid,campos,indice:0,valores:{}});
+        if (!campos.length) { await enviarTexto(from,'⚠️ Essa consulta não possui campo de entrada configurado.'); return; }
+        await enviarTexto(from, `🔎 *${String(mapaDhruSolto.nome_exibicao||mapaDhruSolto.comando||'Consulta')}*\n\n${dhruPromptCampo(campos[0],0,campos.length)}\n\n0️⃣ Cancelar`);
+        return;
+      }
+      let valores;
+      try { valores = dhruParseInput(prod, resto); }
+      catch(e) { await enviarTexto(from, `❌ ${String(e.message||e)}`); return; }
+      if (consultaEmMemoria || consultaDhruEmMemoria) { await enviarTexto(from,'⏳ O sistema está concluindo outra consulta. Tente novamente em instantes.'); return; }
+      try {
+        const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(mapaDhruSolto.id)||null,Number(mapaDhruSolto.servico_id),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
+        const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(prod.product_uuid,valores,ref);
+        await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
+        await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+      } catch(e) { await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`); }
+      return;
+    }
+  }
+
   // V157: se o cliente ativo ficou 12 horas ou mais sem falar com o bot,
   // qualquer nova mensagem reabre o atendimento diretamente no menu principal.
   // O horário anterior é lido antes de registrar a interação atual.
@@ -5191,6 +5261,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   if(sess?.etapa==='hub_menu'){
     if(opcao==='1'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'menu'}); await enviarMenuServicosWhatsApp(from,cliente); return; }
+    if(opcao==='3'){ await salvarSessaoPedido(from,{etapa:'suporte_menu'}); await enviarTexto(from,`🆘 *SUPORTE*\n\n1️⃣ 🔎 Problema com ConsultaVIP\n2️⃣ 🛒 Problema com serviço/pedido\n3️⃣ 👨‍💻 Falar com o suporte\n\n0️⃣ ⬅️ Voltar`); return; }
     await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'hub_menu'); return;
   }
   if(sess?.etapa==='consulta_assinatura_planos_privado'){
@@ -5416,20 +5487,48 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
 
   if (sess?.etapa === 'suporte_menu') {
     if(opcao==='0'||lower==='voltar'){
-      await salvarSessaoPedido(from,{etapa:'menu'});
+      await salvarSessaoPedido(from,{etapa:'hub_menu'});
       await enviarMenuWhatsApp(from,cliente,false,true);
       return;
     }
-    const motivos={'1':'Problema com pedido','2':'Problema com pagamento','3':'Falar com suporte'};
+    const motivos={'1':'Problema com ConsultaVIP','2':'Problema com serviço/pedido','3':'Falar com o suporte'};
     const motivo=motivos[opcao];
     if(motivo){
-      await apagarSessaoPedido(from);
-      await enviarTexto(from,`💬 *Suporte*\n\n✅ Sua solicitação foi encaminhada.\n\nAssunto: ${motivo}\n\nAguarde o retorno de um atendente.`);
-      notificarPainel('suporte','💬 Solicitação de suporte',`${cliente.nome} - ${motivo} - +${numeroNorm}`);
-      try{await avisarAdminTelegram(`💬 Solicitação de suporte\n\nCliente: ${cliente.nome}\nWhatsApp: +${numeroNorm}\nAssunto: ${motivo}`);}catch(_){}
+      await salvarSessaoPedido(from,{etapa:'suporte_descricao',motivo});
+      await enviarTexto(from,`👨‍💻 *FALAR COM O SUPORTE*
+
+📝 Descreva abaixo o seu problema ou dúvida.
+
+Envie uma única mensagem com as informações necessárias.
+
+0️⃣ Cancelar`);
       return;
     }
-    await enviarTexto(from,`💬 *Suporte*\n\nComo podemos ajudar?\n\n1️⃣ Problema com pedido\n2️⃣ Problema com pagamento\n3️⃣ Falar com suporte\n\n0️⃣ ⬅️ Voltar`);
+    await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'suporte_menu');
+    return;
+  }
+
+  if (sess?.etapa === 'suporte_descricao') {
+    if(opcao==='0'||lower==='cancelar'){
+      await apagarSessaoPedido(from);
+      return;
+    }
+    const descricao=String(textoOriginal||'').trim();
+    if(!descricao){ await apagarSessaoPedido(from); return; }
+    const motivo=String(sess.motivo||'Falar com o suporte');
+    await apagarSessaoPedido(from);
+    await enviarTexto(from,`✅ *Solicitação enviada ao suporte!*
+
+Nossa equipe recebeu sua mensagem e responderá assim que possível.`);
+    notificarPainel('suporte','🆘 Novo atendimento',`${cliente.nome} - ${motivo} - +${numeroNorm} - ${descricao}`);
+    try{await avisarAdminTelegram(`🆘 Novo atendimento
+
+Cliente: ${cliente.nome}
+WhatsApp: +${numeroNorm}
+Assunto: ${motivo}
+
+Mensagem:
+${descricao}`);}catch(_){}
     return;
   }
 
@@ -5571,7 +5670,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     }
     if (opcao === '8') {
       await salvarSessaoPedido(from, { etapa: 'suporte_menu' });
-      await enviarTexto(from, `💬 *Suporte*\n\nComo podemos ajudar?\n\n1️⃣ Problema com pedido\n2️⃣ Problema com pagamento\n3️⃣ Falar com suporte\n\n0️⃣ ⬅️ Voltar`);
+      await enviarTexto(from, `🆘 *SUPORTE*\n\n1️⃣ 🔎 Problema com ConsultaVIP\n2️⃣ 🛒 Problema com serviço/pedido\n3️⃣ 👨‍💻 Falar com o suporte\n\n0️⃣ ⬅️ Voltar`);
       return;
     }
     await apagarSessaoPedido(from);
