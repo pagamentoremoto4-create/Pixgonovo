@@ -3205,6 +3205,27 @@ async function enviarImagem(to, filePath, caption='') {
   } catch (e) { console.log('❌ ERRO ENVIAR IMAGEM:', e.message); }
   return false;
 }
+
+// ConsultaVIP: envio de QR/Imagem já em memória (Buffer), sem depender de arquivo temporário.
+async function enviarImagemBufferWhatsApp(destino, buffer, caption='') {
+  try {
+    if (!destino || !buffer || !Buffer.isBuffer(buffer) || !buffer.length) return false;
+    const numero = normalizarNumeroWhatsApp(jidToNumber(destino) || String(destino).replace(/^wa:/,''));
+    if (!numero) return false;
+    const sessaoPreferidaId = whatsappSessaoPorNumeroCliente.get(numero);
+    const sessaoPreferida = sessaoPreferidaId ? whatsappSessoes.get(Number(sessaoPreferidaId)) : null;
+    const sessaoBot = (sessaoPreferida?.funcaoBot && sessaoPreferida?.conectado && sessaoPreferida?.socket) ? sessaoPreferida : await obterSessaoBotConectada();
+    const sock = sessaoBot?.socket || (conectado ? whatsappSocket : null);
+    if (!sock) return false;
+    const jidDestino = String(destino).includes('@s.whatsapp.net') ? String(destino) : await resolverJidWhatsAppEnvio(numero, sock);
+    if (!jidDestino) return false;
+    await sock.sendMessage(jidDestino, { image: buffer, mimetype: 'image/png', caption: String(caption || '') });
+    return true;
+  } catch (e) {
+    console.log('❌ ERRO ENVIAR IMAGEM BUFFER WHATSAPP:', e.message);
+    return false;
+  }
+}
 async function avisarAdminTelegram(texto) {
   if (ADMIN_TELEGRAM_ID && tgBot) {
     try { await tgBot.sendMessage(ADMIN_TELEGRAM_ID, String(texto || '')); } catch(e) { console.log('❌ ADMIN TG:', e.message); }
@@ -5275,7 +5296,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     const jid=numberToJid(numeroNorm);
     const sockPrivado={sendMessage:async(_dest,conteudo)=>{
       if(conteudo?.text) return await enviarTexto(from,conteudo.text.replace(/@\d+/g,String(cliente?.nome||nome||'Cliente').split(/\s+/)[0]));
-      if(conteudo?.image) return await enviarMidiaWhatsApp(from,conteudo.image,conteudo.caption||'');
+      if(conteudo?.image) return await enviarImagemBufferWhatsApp(from,conteudo.image,conteudo.caption||'');
     }};
     await consultaAssinaturaGerarPixGrupo(sockPrivado,from,jid,cliente?.nome||nome||'Cliente',plano);
     return;
@@ -10294,8 +10315,21 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n🏦 ${nomeGateway(gateway)}\n💰 Valor: *${brl(preco.final)}*`;
   if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
   await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
-  if(gateway==='mercadopago'&&pix.qrCodeBase64){ try{ const b=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64'); if(b.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'}); }catch(_){} }
-  await sock.sendMessage(grupo,{text:`📋 PIX Copia e Cola:\n${String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()}`});
+  // Sempre tenta entregar um QR Code. Se o Mercado Pago não retornar uma imagem válida,
+  // gera o QR localmente a partir do próprio PIX Copia e Cola.
+  if(gateway==='mercadopago'){
+    try{
+      let b=null;
+      if(pix.qrCodeBase64){
+        const candidato=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64');
+        if(candidato.length) b=candidato;
+      }
+      if(!b && pix.qrCode) b=await QRCode.toBuffer(String(pix.qrCode).replace(/[\r\n\t]/g,'').trim(),{type:'png',width:700,margin:2});
+      if(b?.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
+    }catch(e){ console.log('⚠️ CONSULTAVIP QR PIX:',e.message); }
+  }
+  // O Copia e Cola vai sozinho para o cliente copiar sem precisar apagar título/emoji.
+  await sock.sendMessage(grupo,{text:String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()});
   verificarPagamento(String(pix.paymentId),cliente.revenda?.id||null,jid,preco.final,'ASSINATURA',JSON.stringify(contexto),gateway);
   return true;
 }
@@ -10331,8 +10365,19 @@ async function consultaAssinaturaConfirmarPagamento(paymentId,jid,valorPix,gatew
   await run(`INSERT INTO pagamentos(revenda_id,revenda_nome,cliente_jid,cliente_numero,valor,origem) VALUES(NULL,?,?,?,?,?)`,[ctx.clienteNome||'Assinante',ctx.clienteJid||jid,numero,Number(valorPix||0),`${gateway}_assinatura`]);
   const ind=await get(`SELECT * FROM consulta_assinatura_indicacoes WHERE indicado_numero=? AND status='PENDENTE'`,[numero]);
   if(ind){ const bonusInd=Math.max(0,Number(await getConfig('consulta_indicacao_bonus_dias','2')||2)); const ref=await get(`SELECT * FROM consulta_assinantes WHERE cliente_numero=?`,[ind.indicador_numero]); if(ref&&bonusInd>0){ const st=consultaAssinaturaStatus(ref), b=st==='ATIVA'&&ref.vencimento_em?new Date(String(ref.vencimento_em).replace(' ','T')+'Z'):new Date(); b.setTime(b.getTime()+bonusInd*86400000); await run(`UPDATE consulta_assinantes SET vencimento_em=?,status='ATIVA',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[consultaAssinaturaSqlDate(b),ref.id]); await run(`UPDATE consulta_assinatura_indicacoes SET status='CONVERTIDA',bonus_dias=?,convertido_em=CURRENT_TIMESTAMP WHERE id=?`,[bonusInd,ind.id]); } }
-  const grupo=ctx.grupoWhatsapp||await getConfig('consulta_wa_grupo',''); const sock=await consultaObterSocketWhatsApp(grupo); const j=ctx.clienteJid||jid;
-  if(sock&&grupo){ const tag=numero?`@${numero}`:(ctx.clienteNome||'Cliente'); await sock.sendMessage(grupo,{text:`✅ ${tag}, pagamento confirmado!\n\n💎 Assinatura ${estavaAtiva?'renovada':'ativada'}\n📦 Plano: ${p.nome}\n💰 Valor: ${brl(valorPix)}\n📅 Vencimento: ${dateBR(fim)}${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}`,mentions:j?[j]:[]}); }
+  const grupo=ctx.grupoWhatsapp||await getConfig('consulta_wa_grupo',''); const j=ctx.clienteJid||jid;
+  const msgConfirmacao=`🎉 *PAGAMENTO CONFIRMADO*\n\n💎 Plano: *${p.nome}*\n💰 Valor: *${brl(valorPix)}*\n🟢 ConsultaVIP: *ATIVO*\n📅 Validade: *${dateBR(fim)}*${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}\n\n🔓 Seu acesso foi liberado automaticamente!`;
+  const msgTutorial=`🎓 *COMO USAR O CONSULTAVIP*\n\nSeu acesso está ativo! 🟢\n\n⚡ *CONSULTE DIRETO PELOS COMANDOS*\n\nVocê não precisa navegar pelo menu toda vez.\n\nDigite *\/comandos* para ver todos os comandos disponíveis.\n\nDepois é só usar o comando junto com o dado solicitado.\n\n*Exemplos:*\n/cpf 09034334344\n/placa EEE445G\n/nome KARIN GHOST\n\n🤖 O resultado chega automaticamente aqui no privado.\n\n📋 Se preferir, você também pode usar o menu do *ConsultaVIP* normalmente.\n\n💡 Sempre que esquecer algum comando, digite *\/comandos*.`;
+
+  if(String(grupo||'').endsWith('@g.us')){
+    const sock=await consultaObterSocketWhatsApp(grupo);
+    if(sock){ const tag=numero?`@${numero}`:(ctx.clienteNome||'Cliente'); await sock.sendMessage(grupo,{text:`✅ ${tag}, pagamento confirmado!\n\n💎 Assinatura ${estavaAtiva?'renovada':'ativada'}\n📦 Plano: ${p.nome}\n💰 Valor: ${brl(valorPix)}\n📅 Vencimento: ${dateBR(fim)}${bonusDias?`\n🎁 Bônus de renovação: +${bonusDias} dia(s)`:''}`,mentions:j?[j]:[]}); }
+  } else {
+    // Compra feita no privado: confirma no próprio privado, ensina os comandos e abre o ConsultaVIP.
+    await enviarTexto(j,msgConfirmacao);
+    await enviarTexto(j,msgTutorial);
+    await menuConsultasPrivado(j,{whatsapp:numero,jid:j,nome:ctx.clienteNome||'Cliente'},false).catch(e=>console.log('⚠️ CONSULTAVIP MENU POS-PAGAMENTO:',e.message));
+  }
   notificarPainel('pix','💎 Assinatura paga',`${ctx.clienteNome||numero} • ${p.nome} • ${brl(valorPix)} • ${nomeGateway(gateway)}`);
 }
 async function consultaAssinaturaRegistrarUso(jid,comando){ const numero=normalizarNumeroWhatsApp(jidToNumber(jid)||''); if(numero) await run(`UPDATE consulta_assinantes SET total_consultas=COALESCE(total_consultas,0)+1,ultima_consulta_em=CURRENT_TIMESTAMP,ultimo_comando=? WHERE cliente_numero=?`,[String(comando||'').slice(0,120),numero]).catch(()=>{}); }
