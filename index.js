@@ -4727,16 +4727,15 @@ Nenhuma consulta está disponível no momento.
   }
   const menuTexto=`${acesso.trim()}
 
-Escolha uma categoria:
+1️⃣ 📱 *IMEI / APARELHO*
+2️⃣ 👤 *CONSULTAS DE DADOS*
+3️⃣ 🚗 *VEÍCULOS*
+4️⃣ 📞 *LINHA / TELEFONE*
+5️⃣ 🔍 *OUTRAS CONSULTAS*
+6️⃣ 📋 *GUIA DE COMANDOS*
+7️⃣ ⭐ *MINHA ASSINATURA*
 
-📱 1️⃣ *IMEI / APARELHO*
-👤 2️⃣ *CONSULTAS DE DADOS*
-🚗 3️⃣ *VEÍCULOS*
-📞 4️⃣ *LINHA / TELEFONE*
-🔍 5️⃣ *OUTRAS CONSULTAS*
-
-📋 Consultas incluídas na sua assinatura.
-0️⃣ ⬅️ Menu principal`;
+0️⃣ ⬅️ *MENU PRINCIPAL*`;
   if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,menuTexto);
   else await enviarTexto(from,menuTexto);
 
@@ -5155,6 +5154,10 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await enviarTexto(from, guia);
     return;
   }
+  if (/^\/assinatura(?:\s|$)/i.test(textoOriginal)) {
+    await consultaAssinaturaEnviarStatusPrivado(from, cliente);
+    return;
+  }
 
 
   // V220 — comandos soltos do ConsultaVIP têm prioridade sobre qualquer sessão/menu.
@@ -5390,6 +5393,8 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     if(opcao==='1'){const cs=await all(`SELECT c.id,c.comando,c.nome_exibicao,c.servico_id,c.exemplo,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE c.ativo=1 ORDER BY c.id ASC`).catch(()=>[]);const ativos=cs.filter(x=>Number(x.servico_id)>0);if(!ativos.length){await enviarTexto(from,'⚠️ Nenhum comando de IMEI/aparelho está ativo no momento.\n\n0️⃣ Voltar');return;}const itens=ativos.slice(0,40);const lista=itens.map((x,i)=>`${i+1}️⃣ *${String(x.nome_exibicao||x.comando).trim()}* — ${x.comando}`).join('\n');await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaComandos:itens.map(x=>({id:Number(x.id),servicoId:Number(x.servico_id),comando:String(x.comando||''),nome:String(x.nome_exibicao||x.comando||'Consulta')}))});await enviarTexto(from,`📱 *IMEI / APARELHO*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);return;}
     if(opcao==='2'){await consultaVipMenuYanPrivado(from,'DADOS');return;} if(opcao==='3'){await consultaVipMenuYanPrivado(from,'VEICULOS');return;} if(opcao==='4'){await consultaVipMenuYanPrivado(from,'LINHA');return;} if(opcao==='5'){await consultaVipMenuYanPrivado(from,'OUTRAS');return;}
+    if(opcao==='6'){const guia=await consultaComandosTextoCompacto();await enviarTexto(from,guia);return;}
+    if(opcao==='7'){await consultaAssinaturaEnviarStatusPrivado(from,cliente);return;}
     await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'consulta_privada_categorias');return;
   }
   if(sess?.etapa==='consulta_privada_yan_menu'){
@@ -10512,6 +10517,34 @@ async function consultaAssinaturaEnviarStatus(sock,grupo,jid,nome){
     await sock.sendMessage(grupo,{text:`⚠️ ${tag}, sua assinatura ${motivo}.${planos}`,mentions:[jid]});
   }
 }
+async function consultaAssinaturaEnviarStatusPrivado(from,cliente){
+  const numero=normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||String(from||'').replace(/^wa:/,''));
+  const jid=numberToJid(numero);
+  const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
+  if(st==='ATIVA'){
+    const venc=dateBR(String(a.vencimento_em||'')+'Z');
+    const fim=new Date(String(a.vencimento_em||'').replace(' ','T')+'Z');
+    const dias=Math.max(0,Math.ceil((fim.getTime()-Date.now())/86400000));
+    const planos=await consultaAssinaturaTextoPlanosV211();
+    await enviarTexto(from,`⭐ *MINHA ASSINATURA*
+
+🟢 Status › *ATIVA*
+💎 Plano › *${a.plano_nome||'-'}*
+📅 Vencimento › *${venc}*
+⏳ Restante › *${dias} dia${dias===1?'':'s'}*${planos}
+
+0️⃣ ⬅️ Voltar`);
+  }else{
+    const planos=await consultaAssinaturaTextoPlanosV211();
+    const motivo=st==='SUSPENSA'?'SUSPENSA':st==='VENCIDA'?'VENCIDA':'INATIVA';
+    await enviarTexto(from,`⭐ *MINHA ASSINATURA*
+
+🔴 Status › *${motivo}*${planos}
+
+0️⃣ ⬅️ Voltar`);
+  }
+}
+
 async function consultaAssinaturaPodeConsultar(sock,grupo,jid,nome){
   if(!(await consultaAssinaturaControleAtivo())) return true;
   const a=await consultaAssinaturaObterPorJid(jid), st=consultaAssinaturaStatus(a);
@@ -10552,6 +10585,9 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
   const nomeCliente=msg?.pushName||'Cliente';
+  // ConsultaVIP opera somente no privado. O grupo não executa comandos.
+  // Consome silenciosamente comandos antigos/novos para evitar exposição de dados.
+  if(/^[\/.]/.test(cmd)) return true;
   if(!consultaAssinaturaSpamOk(participante,cmd)){ await socketAtual.sendMessage(grupo,{text:'⚠️ Aguarde um instante antes de repetir o mesmo comando.'}); return true; }
   if(await consultaMenuTratarResposta({sock:socketAtual,grupo,jid:participante,nome:nomeCliente,cmd})) return true;
   if(/^\/assinatura(?:\s|$)/i.test(cmd)){ await consultaAssinaturaEnviarStatus(socketAtual,grupo,participante,nomeCliente); return true; }
