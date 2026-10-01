@@ -10331,8 +10331,20 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n🏦 ${nomeGateway(gateway)}\n💰 Valor: *${brl(preco.final)}*`;
   if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
   await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
-  if(gateway==='mercadopago'&&pix.qrCodeBase64){ try{ const b=Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''),'base64'); if(b.length) await sock.sendMessage(grupo,{image:b,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'}); }catch(_){} }
-  await sock.sendMessage(grupo,{text:`📋 PIX Copia e Cola:\n${String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()}`});
+  // Envia o QR Code. Se o Mercado Pago não devolver a imagem Base64, gera a imagem a partir do PIX Copia e Cola.
+  try {
+    let qrBuffer = null;
+    if (gateway === 'mercadopago' && pix.qrCodeBase64) {
+      const b = Buffer.from(String(pix.qrCodeBase64).replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,''), 'base64');
+      if (b.length) qrBuffer = b;
+    }
+    if (!qrBuffer && pix.qrCode) {
+      qrBuffer = await QRCode.toBuffer(String(pix.qrCode).replace(/[\r\n\t]/g,'').trim(), { width: 520, margin: 2, errorCorrectionLevel: 'M' });
+    }
+    if (qrBuffer?.length) await sock.sendMessage(grupo,{image:qrBuffer,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
+  } catch(e) { console.log('⚠️ QR ASSINATURA CONSULTAVIP:', e.message); }
+  // O código vai sozinho para o cliente copiar e colar no banco sem precisar apagar texto.
+  await sock.sendMessage(grupo,{text:String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()});
   verificarPagamento(String(pix.paymentId),cliente.revenda?.id||null,jid,preco.final,'ASSINATURA',JSON.stringify(contexto),gateway);
   return true;
 }
@@ -10372,6 +10384,7 @@ async function consultaAssinaturaConfirmarPagamento(paymentId,jid,valorPix,gatew
   if(numero){
     const diasSomados=Number(p.dias)+Number(bonusDias||0);
     await enviarTexto(`wa:${numero}`,`✅ *PAGAMENTO CONFIRMADO*\n\n💎 Assinatura *${estavaAtiva?'RENOVADA':'ATIVADA'}*\n📦 Plano: *${p.nome}*\n➕ Dias adicionados: *${diasSomados}*\n📅 Novo vencimento: *${dateBR(fim)}*${estavaAtiva?'\n\n✅ Seus dias restantes foram preservados e a renovação foi somada ao vencimento atual.':''}`);
+    await enviarTexto(`wa:${numero}`,`🎓 *COMO USAR O CONSULTAVIP*\n\nSeu acesso está ativo! 🟢\n\n⚡ *CONSULTE DIRETO PELOS COMANDOS*\n\nVocê não precisa navegar pelo menu toda vez.\n\nDigite *\/comandos* para ver todos os comandos disponíveis.\n\nDepois, use o comando junto com o dado solicitado.\n\n🤖 O resultado chega automaticamente aqui no privado.\n\n📋 Se preferir, você também pode usar o menu do *ConsultaVIP*.\n\n💡 Sempre que esquecer algum comando, digite *\/comandos*.`);
   }
   notificarPainel('pix','💎 Assinatura paga',`${ctx.clienteNome||numero} • ${p.nome} • ${brl(valorPix)} • ${nomeGateway(gateway)}`);
 }
