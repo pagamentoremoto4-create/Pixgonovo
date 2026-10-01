@@ -4687,7 +4687,7 @@ async function consultaVipExecutarYanPrivado(from,cliente,cmd){
     const ent=await consultaTelegramResolverGrupo(tgGrupo),env=await consultaTelegramCliente.sendMessage(ent,{message:cmd});
     consultaEmMemoria.telegram_entidade=ent;consultaEmMemoria.telegram_enviado_id=String(env?.id||'');
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=? WHERE id=?`,[String(env?.id||''),r.lastID]);
-    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite excedido.')).catch(()=>{});},30000);
+    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite de 120 segundos excedido.')).catch(()=>{});},120000);
   }catch(e){await consultaFalhar(r.lastID,e);}
 }
 
@@ -10508,14 +10508,14 @@ Depois que fizer a primeira assinatura paga, você recebe +${bonus} dia(s).`,men
     consultaEmMemoria.processandoResultado=false;
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(enviado?.id||''),id]);
     consultaTelegramIniciarPolling();
-    const timeoutSeg=30;
+    const timeoutSeg=120;
     consultaTimeoutTimer=setTimeout(()=>{
       if(consultaEmMemoria?.id!==id) return;
       if(consultaEmMemoria.processandoResultado){
-        console.log('🟢 V196 30S: resultado já encontrado; liberando o grupo enquanto finaliza a entrega.');
+        console.log('🟢 V196 120S: resultado já encontrado; liberando o grupo enquanto finaliza a entrega.');
         consultaGrupoWhatsAppAbrirSemEncerrar().catch(()=>{});
       }else{
-        consultaFalhar(id,new Error('Tempo limite de 30 segundos excedido.')).catch(()=>{});
+        consultaFalhar(id,new Error('Tempo limite de 120 segundos excedido.')).catch(()=>{});
       }
     },timeoutSeg*1000);
   }catch(e){ await consultaFalhar(id,e); }
@@ -10626,7 +10626,7 @@ app.post('/admin/consultavip/chave',async(req,res)=>{try{const uid=String(req.bo
 app.post('/admin/consultavip/licenca/:id/status',async(req,res)=>{const st=req.body.status==='ATIVA'?'ATIVA':'SUSPENSA';await run('UPDATE consultavip_licencas SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[st,Number(req.params.id)]);res.redirect('/admin/consultavip?ok='+encodeURIComponent('Licença atualizada.'));});
 
 app.get('/admin/consultas-assinatura', async (req,res)=>{
-  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','30');
+  const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','120');
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
@@ -10669,7 +10669,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="card"><a class="btn green" href="/admin/consultavip">🕵️🔎 Abrir painel CONSULTAVIP</a> <a class="btn" href="/admin/consultas-assinatura/saude">🩺 Abrir saúde das integrações</a></div>
   <div class="card"><h2>📱 Conta Telegram que consulta</h2><p class="muted">Use a mesma conta que você testou manualmente no grupo do Yan Buscas.</p><form method="post" action="/admin/consultas-assinatura/salvar-conta"><label>API ID</label><input name="api_id" inputmode="numeric" value="${c.apiId?safeHtml(String(c.apiId)):''}" placeholder="12345678"><label>API Hash</label><input type="password" name="api_hash" placeholder="${safeHtml(consultaSegredoMask(c.apiHash))}"><small>Deixe vazio para manter o API Hash salvo.</small><label>Telefone da conta Telegram</label><input name="telefone" value="${safeHtml(c.telefone)}" placeholder="+5575XXXXXXXXX"><button class="btn green">💾 Salvar dados da conta</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/admin/consultas-assinatura/telegram-enviar-codigo"><button class="btn">📨 Enviar código / Conectar conta</button></form><form method="post" action="/admin/consultas-assinatura/telegram-desconectar"><button class="btn red">Desconectar conta</button></form></div></div>
   ${authExtra}
-  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="30" max="30" name="timeout_seg" value="30" readonly><small>O grupo é liberado automaticamente em no máximo 30 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
+  <div class="card"><h2>⚙️ Fluxo de consultas</h2><form method="post" action="/admin/consultas-assinatura/salvar"><label><input style="width:auto" type="checkbox" name="ativa" value="1" ${ativa?'checked':''}> Ativar módulo de consultas</label><label>ID do grupo Telegram</label><input name="telegram_grupo" value="${safeHtml(tgGrupo)}" placeholder="-1001234567890"><label>Grupo WhatsApp dos assinantes</label><select name="whatsapp_grupo">${opts}</select>${!grupos.length?'<small>Conecte o WhatsApp para carregar a lista de grupos.</small>':''}<label>Liberação automática do grupo</label><input type="number" min="120" max="120" name="timeout_seg" value="120" readonly><small>As consultas Yan/Telegram aguardam o resultado por até 120 segundos.</small><div class="actions" style="margin-top:14px"><button class="btn green">💾 Salvar fluxo</button></div></form></div>
   <div class="card"><h2>📘 Comandos válidos</h2><p class="muted">O grupo só é bloqueado depois que o comando passa pela validação. Mensagens inválidas são apagadas. O cliente pode digitar <b>/comandos</b> para receber o tutorial em PDF. Os comandos adicionais ativos cadastrados no painel entram automaticamente no PDF.</p><small>${safeHtml(CONSULTA_COMANDOS_VALIDOS.map(x=>x.exemplo).join(' • '))}</small></div>
   <div class="card"><h2>💎 Controle de assinaturas</h2><p class="muted">Quando ativado, todos os comandos Yan e Dhru verificam a validade do assinante antes de iniciar. /comandos e /assinatura continuam disponíveis.</p><form method="post" action="/admin/consultas-assinatura/assinaturas/config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${assinaturaControle?'checked':''}> Exigir assinatura ativa para consultar</label><button class="btn green">💾 Salvar controle</button></form></div>
   <div class="card"><h2>💰 Planos de assinatura</h2><p class="muted">Planos padrão: 1 dia R$ 10, 3 dias R$ 13, 7 dias R$ 17, 15 dias R$ 30 e 30 dias R$ 50. Você pode editar ou criar novos.</p><form method="post" action="/admin/consultas-assinatura/plano/novo" class="forms-inline"><input name="nome" placeholder="Nome do plano" required><input name="dias" type="number" min="1" placeholder="Dias" required><input name="preco" placeholder="Preço" required><button class="btn green">➕ Novo plano</button></form><table style="margin-top:12px"><tr><th>ID</th><th>Configuração</th></tr>${assinaturaPlanosRows}</table></div>
@@ -10807,7 +10807,7 @@ app.post('/admin/consultas-assinatura/salvar', async(req,res)=>{
     await setConfig('consulta_ativa',req.body.ativa==='1'?'1':'0');
     await setConfig('consulta_tg_grupo',String(req.body.telegram_grupo||'').trim());
     await setConfig('consulta_wa_grupo',String(req.body.whatsapp_grupo||'').trim());
-    await setConfig('consulta_timeout_seg',String(30));
+    await setConfig('consulta_timeout_seg',String(120));
     res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent('Fluxo salvo.'));
   }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
