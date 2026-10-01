@@ -1504,6 +1504,17 @@ async function avisarGrupoMovimentacao(tipo,nome,item){
   await sock.sendMessage(grupo,{text:`${titulo}\n\n👤 Cliente: *${mascararNomeGrupo(nome)}*\n${tipo==='consulta'?'🔍 Consulta':'⚙️ Serviço'}: *${String(item||'-')}*\n\n✅ ${tipo==='consulta'?'Concluída':'Pedido realizado'} com sucesso!`});
 }
 
+// ConsultaVIP: todo resultado concluído no privado deve gerar o mesmo aviso protegido no grupo.
+// Nenhum dado consultado (CPF, IMEI, placa, link ou resultado) é enviado ao grupo.
+async function avisarGrupoConsultaPrivadaConcluida(ctx){
+  try{
+    if(!ctx)return;
+    const comando=String(ctx.comando||'Consulta').trim().split(/\s+/)[0]||'Consulta';
+    const nome=String(ctx.cliente_nome||'Cliente').trim()||'Cliente';
+    await avisarGrupoMovimentacao('consulta',nome,comando);
+  }catch(e){console.log('⚠️ AVISO GRUPO CONSULTAVIP:',e.message)}
+}
+
 async function processarFeedbackDhru(body){
   const reference=String(body?.reference_id||'').trim();
   const pm=reference.match(/^private-(\d+)$/i);
@@ -4555,11 +4566,12 @@ async function enviarMenuServicosWhatsApp(from, cliente){
 async function consultasPrivadasProdutos(){
   return await all(`SELECT d.*,s.id AS servico_id,COALESCE(NULLIF(s.nome_exibicao,''),d.nome) AS nome_cliente FROM dhru_products d JOIN servicos_catalogo s ON s.id=d.catalogo_id WHERE s.api_provider='DHRU' AND COALESCE(s.ativo,0)=1 ORDER BY nome_cliente COLLATE NOCASE`);
 }
-async function enviarEntradaConsultaVip(from,cliente){
+async function enviarEntradaConsultaVip(from,cliente,corpo=''){
   const primeiroNome=String(cliente?.nome||'Cliente').trim().split(/\s+/)[0]||'Cliente';
   const titulo=String(await getConfig('consultavip_entrada_titulo','SEJA BEM-VINDO AO CONSULTAVIP')).trim()||'SEJA BEM-VINDO AO CONSULTAVIP';
   const foto=String(await getConfig('consultavip_entrada_foto','')).trim();
-  const texto=`Olá, *${primeiroNome}*! 👋\n\n🔎 *${titulo}*`;
+  const extra=String(corpo||'').trim();
+  const texto=`Olá, *${primeiroNome}*! 👋\n\n🔎 *${titulo}*${extra?`\n\n${extra}`:''}`;
   if(foto && fs.existsSync(foto)){
     const ok=await enviarImagem(from,foto,texto);
     if(ok)return;
@@ -4567,7 +4579,6 @@ async function enviarEntradaConsultaVip(from,cliente){
   await enviarTexto(from,texto);
 }
 async function menuConsultasPrivado(from,cliente,mostrarEntrada=false){
-  if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente);
   const jid=numberToJid(normalizarNumeroWhatsApp(cliente?.whatsapp||jidToNumber(cliente?.jid)||from.replace(/^wa:/,'')));
   let assinatura=null, statusAss='DESATIVADO';
   if(await consultaAssinaturaControleAtivo()){
@@ -4576,14 +4587,20 @@ async function menuConsultasPrivado(from,cliente,mostrarEntrada=false){
       const planos=await consultaAssinaturaPlanosAtivos();
       const titulo=statusAss==='VENCIDA'?'⚠️ *SEU CONSULTAVIP EXPIROU*':'🔐 *ATIVE SEU CONSULTAVIP*';
       const intro=statusAss==='VENCIDA'?'Para continuar utilizando o ConsultaVIP, escolha um plano para renovar seu acesso:':'Você ainda não possui uma assinatura ativa.\n\nEscolha um plano para liberar o ConsultaVIP:';
-      if(!planos.length){ await enviarTexto(from,`${titulo}\n\n${intro}\n\n⚠️ Nenhum plano está disponível no momento.\n\n0️⃣ ⬅️ Menu principal`); return; }
+      if(!planos.length){
+        const msg=`${titulo}\n\n${intro}\n\n⚠️ Nenhum plano está disponível no momento.\n\n0️⃣ ⬅️ Menu principal`;
+        if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,msg); else await enviarTexto(from,msg);
+        return;
+      }
       const linhas=[];
       for(let i=0;i<planos.length;i++){
         const pr=await consultaAssinaturaPrecoPlano(planos[i]);
         linhas.push(pr.promo?`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • ${brl(pr.normal)} → *${brl(pr.final)}*`:`${i+1}️⃣ *${planos[i].nome}* • ${planos[i].dias} dias • *${brl(pr.final)}*`);
       }
       await salvarSessaoPedido(from,{etapa:'consulta_assinatura_planos_privado',planoIds:planos.map(p=>Number(p.id))});
-      await enviarTexto(from,`${titulo}\n\n${intro}\n\n💎 *PLANOS DISPONÍVEIS*\n\n${linhas.join('\n')}\n\nDigite o número do plano para gerar o PIX.\n0️⃣ ⬅️ Menu principal`);return;
+      const msg=`${titulo}\n\n${intro}\n\n💎 *PLANOS DISPONÍVEIS*\n\n${linhas.join('\n')}\n\nDigite o número do plano para gerar o PIX.\n0️⃣ ⬅️ Menu principal`;
+      if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,msg); else await enviarTexto(from,msg);
+      return;
     }
   }
   const ps=await consultasPrivadasProdutos();
@@ -4600,7 +4617,7 @@ Nenhuma consulta está disponível no momento.
     const dias=Math.max(0,Math.ceil((fim.getTime()-Date.now())/86400000));
     acesso=`\n🟢 *Acesso ativo* • ${dias} dia${dias===1?'':'s'} restante${dias===1?'':'s'}\n`;
   }
-  await enviarTexto(from,`${acesso.trim()}
+  const menuTexto=`${acesso.trim()}
 
 Escolha uma categoria:
 
@@ -4611,7 +4628,9 @@ Escolha uma categoria:
 🔍 5️⃣ *OUTRAS CONSULTAS*
 
 📋 Consultas incluídas na sua assinatura.
-0️⃣ ⬅️ Menu principal`);
+0️⃣ ⬅️ Menu principal`;
+  if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,menuTexto);
+  else await enviarTexto(from,menuTexto);
 
 }
 
@@ -9479,6 +9498,7 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
       else if(semResultado){await enviarTexto(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
       else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+      await avisarGrupoConsultaPrivadaConcluida(ativo);
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}consultaEmMemoria=null;return;
     }
     if(ativo.canal==='TELEGRAM'){
@@ -9487,6 +9507,7 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
       else if(semResultado){await consultaVipBot.sendMessage(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
       else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);await consultaVipBot.sendDocument(destino,pdf,{caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+      await avisarGrupoConsultaPrivadaConcluida(ativo);
       if(ativo.telegram_origem_chat_id!==destino)await consultaVipBot.sendMessage(ativo.telegram_origem_chat_id,'✅ Consulta concluída e enviada no privado.').catch(()=>{});
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}consultaEmMemoria=null;return;
     }
@@ -10098,7 +10119,10 @@ async function consultaAssinaturaPrecoPlano(plano){
   return {normal,final,promo,percentual:pct,cfg};
 }
 function consultaPromoAplicarModelo(modelo,plano,preco){
-  return String(modelo||'').replaceAll('{PLANO}',String(plano?.nome||`${plano?.dias||''} dias`)).replaceAll('{DESCONTO}',String(Number(preco?.percentual||0).toLocaleString('pt-BR'))).replaceAll('{PRECO_NORMAL}',brl(preco?.normal||0)).replaceAll('{PRECO_PROMO}',brl(preco?.final||0));
+  const texto=String(modelo||'').replaceAll('{PLANO}',String(plano?.nome||`${plano?.dias||''} dias`)).replaceAll('{DESCONTO}',String(Number(preco?.percentual||0).toLocaleString('pt-BR'))).replaceAll('{PRECO_NORMAL}',brl(preco?.normal||0)).replaceAll('{PRECO_PROMO}',brl(preco?.final||0));
+  // Mantém os 5 modelos editáveis e acrescenta apenas um acesso curto ao bot.
+  if(/(?:https?:\/\/)?wa\.me\/557581635708/i.test(texto)) return texto;
+  return `${texto.trim()}\n\n🤖 *Acesse:* wa.me/557581635708`;
 }
 async function consultaAssinaturaTextoPlanosV211(){
   const ps=await consultaAssinaturaPlanosAtivos();
