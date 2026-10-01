@@ -2633,7 +2633,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -3821,7 +3821,10 @@ ${entrada}
 ${extra}` : ''}
 
 🏢 Centralunlocker`, String(pedido.servico_nome || '').toLowerCase().includes('esim') ? 'ESIM' : 'NOVO_SERVICO');
-  if (timUnlockIsDesbloqueioTim(pedido)) { try { await executarConsultaAutomaticaDesbloqueioTim(pedido.id); } catch(e) { console.log('⚠️ DHRU TIM AUTO HOOK:',pedido.id,e.message); } }
+  if (timUnlockIsDesbloqueioTim(pedido)) {
+    try { await avisarHistoricoInternoDesbloqueioTim(pedido); } catch(e) { console.log('⚠️ HISTÓRICO INTERNO TIM:',pedido.id,e.message); }
+    try { await executarConsultaAutomaticaDesbloqueioTim(pedido.id); } catch(e) { console.log('⚠️ DHRU TIM AUTO HOOK:',pedido.id,e.message); }
+  }
 }
 
 async function avisarEsimManualAdminTelegram(pedido) {
@@ -6694,6 +6697,9 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
     await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
+    if (normalizarNomeServico(servico.nome) === 'desbloqueio tim') {
+      for (const c of criados) { try { const pp=await get('SELECT * FROM pedidos WHERE id=?',[c.id]); await avisarHistoricoInternoDesbloqueioTim(pp); } catch(e) { console.log('⚠️ HISTÓRICO INTERNO TIM LOTE:',c.id,e.message); } }
+    }
     await enviarParaCanaisCliente(revenda, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
     return;
   }
@@ -11231,6 +11237,55 @@ const CAMPOS_INTERNOS_IMEI = [
   ['Linha de acesso', 'interno_linha_acesso', 'linha_acesso', 80],
   ['Observação interna', 'interno_observacao', 'observacao', 2000]
 ];
+
+function normalizarImeiHistorico(v) { return String(v || '').replace(/\D/g, '').slice(0, 15); }
+function pedidoTemDadosInternos(p) {
+  return CAMPOS_INTERNOS_IMEI.some(([, coluna]) => String(p?.[coluna] || '').trim());
+}
+async function localizarDadosInternosPorImei(imei, excluirPedidoId = 0) {
+  const alvo = normalizarImeiHistorico(imei);
+  if (!/^\d{15}$/.test(alvo)) return [];
+  const rows = await all(`SELECT p.*, COALESCE(NULLIF(p.servico_nome,''),s.nome,'-') AS origem_servico
+    FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
+    WHERE p.id<>? AND (p.interno_nome IS NOT NULL OR p.interno_cpf IS NOT NULL OR p.interno_protocolo IS NOT NULL OR p.interno_linha_acesso IS NOT NULL OR p.interno_observacao IS NOT NULL)
+    ORDER BY p.id DESC`, [Number(excluirPedidoId || 0)]);
+  return rows.filter(r => normalizarImeiHistorico(r.entrada_valor || r.imei) === alvo && pedidoTemDadosInternos(r));
+}
+async function enriquecerPedidosComHistoricoInterno(rows) {
+  for (const r of rows || []) {
+    if (!pedidoTemEntradaImei(r)) continue;
+    const hist = await localizarDadosInternosPorImei(r.entrada_valor || r.imei, r.id);
+    r._internosLocalizados = hist.length;
+    r._internoOrigemId = hist[0]?.id || 0;
+  }
+  return rows;
+}
+function textoRegistroInterno(r, idx) {
+  const linhas = [
+    idx ? `📌 *Registro ${idx}*` : '',
+    `🗂 Origem: ${r.origem_servico || r.servico_nome || '-'}`,
+    `🆔 Pedido: #${r.id}`,
+    `📅 Salvo em: ${dateBR(r.atualizado_em || r.criado_em)}`,
+    r.interno_nome ? `👤 Nome: ${r.interno_nome}` : '',
+    r.interno_cpf ? `🪪 CPF: ${r.interno_cpf}` : '',
+    r.interno_protocolo ? `📋 Protocolo: ${r.interno_protocolo}` : '',
+    r.interno_linha_acesso ? `📱 Linha de acesso: ${r.interno_linha_acesso}` : '',
+    r.interno_observacao ? `📝 Observação: ${r.interno_observacao}` : ''
+  ].filter(Boolean);
+  return linhas.join('\n');
+}
+async function avisarHistoricoInternoDesbloqueioTim(pedido) {
+  if (!pedido || !timUnlockIsDesbloqueioTim(pedido)) return [];
+  const imei = normalizarImeiHistorico(pedido.entrada_valor || pedido.imei);
+  const achados = await localizarDadosInternosPorImei(imei, pedido.id);
+  if (!achados.length) return [];
+  const limite = achados.slice(0, 5);
+  const titulo = achados.length === 1 ? '🚨 *PROTOCOLO LOCALIZADO*' : `🚨 *${achados.length} REGISTROS LOCALIZADOS*`;
+  const texto = `${titulo}\n\n🔢 IMEI: ${imei}\n🔓 Novo pedido: *DESBLOQUEIO TIM*\n🆕 Pedido: #${pedido.id}\n\n${limite.map((r,i)=>textoRegistroInterno(r, achados.length > 1 ? i+1 : 0)).join('\n\n────────────\n\n')}${achados.length>limite.length?`\n\n➕ Mais ${achados.length-limite.length} registro(s) no painel.`:''}\n\n🔒 Informação interna — não enviada ao cliente.`;
+  await enviarParaAdmins(texto, 'NOVO_SERVICO');
+  notificarPainel('pedido', '🚨 Protocolo localizado', `IMEI ${imei} — ${achados.length} registro(s) interno(s)`);
+  return achados;
+}
 function formularioInternoImei(p, base) {
   const campos = CAMPOS_INTERNOS_IMEI.map(([titulo, coluna, nome, limite]) => {
     const valor = safeHtml(p[coluna] || '');
@@ -11259,7 +11314,9 @@ function pedidoActions(o, back = '/admin/pedidos') {
   const botaoQr = isPedidoEsimManual(o)
     ? `<a class="btn purple" href="/admin/pedido/${o.id}/entregar-esim">📤 Enviar QR Code</a>`
     : '';
-  return `${pedidoTemEntradaImei(o) ? `<a class="btn" href="/admin/pedido/${o.id}/dados-internos">🔒 Dados internos</a>` : ''}${botaoQr}
+  const hist = Number(o._internosLocalizados || 0);
+  const historico = hist ? `<a class="btn orange" href="/admin/pedido/${o.id}/dados-internos-historico">📋 DADOS LOCALIZADOS (${hist})</a>` : '';
+  return `${pedidoTemEntradaImei(o) ? `<a class="btn" href="/admin/pedido/${o.id}/dados-internos">🔒 Dados internos</a>` : ''}${historico}${botaoQr}
   <form class="status-action-form" method="post" action="/admin/pedido/${o.id}/acao">
     <select name="acao" required>
       <option value="">Escolher ação</option>
@@ -11293,10 +11350,38 @@ app.get('/admin/pedidos', async (req, res) => {
   if (q) { where.push('(imei LIKE ? OR entrada_valor LIKE ? OR cliente_whatsapp LIKE ? OR cliente_nome LIKE ? OR revenda_numero LIKE ? OR revenda_nome LIKE ?)'); params.push(`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`,`%${q}%`); }
   const sql = `SELECT * FROM pedidos ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT 500`;
   const rows = await all(sql, params);
+  await enriquecerPedidosComHistoricoInterno(rows);
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
   <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, Telegram ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
   res.send(page('Pedidos', html));
 });
+app.get('/admin/dados-internos-imei', async (req, res) => {
+  const q = normalizarImeiHistorico(req.query.q || '');
+  const todos = await all(`SELECT p.*, COALESCE(NULLIF(p.servico_nome,''),s.nome,'-') AS origem_servico FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id
+    WHERE p.interno_nome IS NOT NULL OR p.interno_cpf IS NOT NULL OR p.interno_protocolo IS NOT NULL OR p.interno_linha_acesso IS NOT NULL OR p.interno_observacao IS NOT NULL
+    ORDER BY p.id DESC LIMIT 3000`);
+  const comDados = todos.filter(pedidoTemDadosInternos);
+  const filtrados = q ? comDados.filter(r => normalizarImeiHistorico(r.entrada_valor || r.imei).includes(q)) : comDados;
+  const porImei = new Map();
+  for (const r of filtrados) { const k=normalizarImeiHistorico(r.entrada_valor||r.imei); if(!k) continue; if(!porImei.has(k)) porImei.set(k,[]); porImei.get(k).push(r); }
+  const cards = [...porImei.entries()].map(([imei, regs]) => `<div class="card"><h2>📱 ${safeHtml(imei)}</h2><p><span class="pill">📋 ${regs.length} registro(s)</span></p>${regs.slice(0,5).map(r=>`<div style="border-top:1px solid #2b3548;padding-top:10px;margin-top:10px"><b>${safeHtml(r.origem_servico||'-')} · Pedido #${r.id}</b><p class="muted">${safeHtml(dateBR(r.atualizado_em||r.criado_em))}</p>${r.interno_nome?`<p>👤 ${safeHtml(r.interno_nome)}</p>`:''}${r.interno_cpf?`<p>🪪 CPF: ${safeHtml(r.interno_cpf)}</p>`:''}${r.interno_protocolo?`<p>📋 Protocolo: ${safeHtml(r.interno_protocolo)}</p>`:''}${r.interno_linha_acesso?`<p>📱 Linha: ${safeHtml(r.interno_linha_acesso)}</p>`:''}<a class="btn" href="/admin/pedido/${r.id}/dados-internos">Abrir registro</a></div>`).join('')}</div>`).join('');
+  res.send(page('Base de Dados Internos IMEI', `<div class="topbar"><div><h1>🔎 Base de Dados Internos por IMEI</h1><p class="muted">Todos os IMEIs que possuem Nome, CPF, Protocolo, Linha ou Observação interna cadastrados.</p></div></div><div class="card"><form class="search" method="get"><input name="q" inputmode="numeric" value="${safeHtml(q)}" placeholder="Digite o IMEI"><button class="btn">🔎 Buscar</button><a class="btn gray" href="/admin/dados-internos-imei">Limpar</a></form><p><b>${porImei.size}</b> IMEI(s) localizado(s).</p></div><div class="grid">${cards||'<div class="card empty">Nenhum dado interno localizado.</div>'}</div>`));
+});
+app.get('/admin/pedido/:id/dados-internos-historico', async (req, res) => {
+  const p = await pedidoImeiInterno(req.params.id);
+  if (!p) return res.status(404).send('Pedido de IMEI não encontrado.');
+  const hist = await localizarDadosInternosPorImei(p.entrada_valor || p.imei, p.id);
+  const blocos = hist.map((r,i)=>`<div class="card"><h2>📋 Registro ${i+1} · Pedido #${r.id}</h2><p><b>Origem:</b> ${safeHtml(r.origem_servico||r.servico_nome||'-')} · <b>Data:</b> ${safeHtml(dateBR(r.atualizado_em||r.criado_em))}</p>${CAMPOS_INTERNOS_IMEI.map(([t,c])=>r[c]?`<p><b>${safeHtml(t)}:</b> ${safeHtml(r[c])}</p>`:'').join('')}<form method="post" action="/admin/pedido/${p.id}/usar-dados-internos/${r.id}"><button class="btn green" onclick="return confirm('Usar estes dados internos no pedido #${p.id}?')">✅ Usar estes dados</button></form></div>`).join('');
+  res.send(page('Dados internos localizados', `<h1>📋 Dados localizados — IMEI ${safeHtml(normalizarImeiHistorico(p.entrada_valor||p.imei))}</h1><div class="card"><b>Novo pedido #${p.id}</b> · ${safeHtml(p.servico_nome||'-')}<p class="muted">Os dados antigos não são copiados automaticamente. Escolha “Usar estes dados” somente se conferir que o registro é o correto.</p></div>${blocos||'<div class="card empty">Nenhum histórico interno localizado.</div>'}<a class="btn gray" href="/admin/pedidos">← Voltar</a>`));
+});
+app.post('/admin/pedido/:id/usar-dados-internos/:origemId', async (req, res) => {
+  const p = await pedidoImeiInterno(req.params.id), origem = await pedidoImeiInterno(req.params.origemId);
+  if (!p || !origem) return res.status(404).send('Pedido não encontrado.');
+  if (normalizarImeiHistorico(p.entrada_valor||p.imei) !== normalizarImeiHistorico(origem.entrada_valor||origem.imei) || !pedidoTemDadosInternos(origem)) return res.status(400).send('Os dados selecionados não pertencem ao mesmo IMEI.');
+  await run(`UPDATE pedidos SET interno_nome=?,interno_cpf=?,interno_protocolo=?,interno_linha_acesso=?,interno_observacao=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [origem.interno_nome||'',origem.interno_cpf||'',origem.interno_protocolo||'',origem.interno_linha_acesso||'',origem.interno_observacao||'',p.id]);
+  res.redirect(`/admin/pedido/${p.id}/dados-internos?ok=1`);
+});
+
 app.get('/admin/pedido/:id/dados-internos', async (req, res) => {
   const p = await pedidoImeiInterno(req.params.id);
   if (!p) return res.status(404).send('Pedido de IMEI não encontrado.');
@@ -12715,6 +12800,7 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
   if (notaFiltro === 'enviadas') sql += ' AND COALESCE(nota_enviada,0)=1';
   sql += controleNota ? ' ORDER BY id ASC LIMIT 1000' : ' ORDER BY id DESC LIMIT 1000';
   const rows = await all(sql, params);
+  await enriquecerPedidosComHistoricoInterno(rows);
   if(controleNota){ for(const r of rows) r._timDhru=await get('SELECT * FROM tim_unlock_dhru_checks WHERE pedido_id=?',[r.id]); }
 
   const base = `/admin/servico/${servicoId}/imeis`;
