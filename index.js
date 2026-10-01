@@ -1500,8 +1500,13 @@ async function nomeConsultaExecucao(row){const x=await get(`SELECT COALESCE(NULL
 async function avisarGrupoMovimentacao(tipo,nome,item){
   const grupo=String(await getConfig('consulta_wa_grupo','')||'').trim(); if(!grupo)return;
   const sock=await consultaObterSocketWhatsApp(grupo); if(!sock)return;
-  const titulo=tipo==='consulta'?'🔎 *CONSULTA REALIZADA*':'🛒 *NOVO SERVIÇO*';
-  await sock.sendMessage(grupo,{text:`${titulo}\n\n👤 Cliente: *${mascararNomeGrupo(nome)}*\n${tipo==='consulta'?'🔍 Consulta':'⚙️ Serviço'}: *${String(item||'-')}*\n\n✅ ${tipo==='consulta'?'Concluída':'Pedido realizado'} com sucesso!`});
+  if(tipo==='consulta'){
+    let consulta=String(item||'Consulta').trim();
+    if(/blacklist/i.test(consulta)) consulta='Blacklist IMEI';
+    await sock.sendMessage(grupo,{text:`🔎 *CONSULTA REALIZADA*\n\n👤 *${mascararNomeGrupo(nome)}*\n🔍 *${consulta}*\n✅ Concluída\n\n🤖 *Consultar:* wa.me/557581635708`});
+    return;
+  }
+  await sock.sendMessage(grupo,{text:`🛒 *NOVO SERVIÇO*\n\n👤 Cliente: *${mascararNomeGrupo(nome)}*\n⚙️ Serviço: *${String(item||'-')}*\n\n✅ Pedido realizado com sucesso!`});
 }
 
 // ConsultaVIP: todo resultado concluído no privado deve gerar o mesmo aviso protegido no grupo.
