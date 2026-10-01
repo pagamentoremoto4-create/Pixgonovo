@@ -4652,9 +4652,11 @@ Escolha uma categoria:
 🚗 3️⃣ *VEÍCULOS*
 📞 4️⃣ *LINHA / TELEFONE*
 🔍 5️⃣ *OUTRAS CONSULTAS*
+📋 6️⃣ *GUIA DE COMANDOS*
+⭐ 7️⃣ *MINHA ASSINATURA*
 
 📋 Consultas incluídas na sua assinatura.
-0️⃣ ⬅️ Menu principal`;
+0️⃣ ⬅️ *MENU PRINCIPAL*`;
   if(mostrarEntrada) await enviarEntradaConsultaVip(from,cliente,menuTexto);
   else await enviarTexto(from,menuTexto);
 
@@ -10470,6 +10472,8 @@ async function consultaReceberWhatsAppGrupo({socketAtual,msg,texto}){
   const participante=melhorJidCliente(msg,msg?.key?.participant||'');
   if(!participante) return true;
   const cmd=String(texto||'').trim(); if(!cmd) return true;
+  // ConsultaVIP: comandos foram desativados no grupo. Consultas, /comandos e /assinatura funcionam somente no privado.
+  return true;
   const nomeCliente=msg?.pushName||'Cliente';
   if(!consultaAssinaturaSpamOk(participante,cmd)){ await socketAtual.sendMessage(grupo,{text:'⚠️ Aguarde um instante antes de repetir o mesmo comando.'}); return true; }
   if(await consultaMenuTratarResposta({sock:socketAtual,grupo,jid:participante,nome:nomeCliente,cmd})) return true;
