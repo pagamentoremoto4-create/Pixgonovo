@@ -5022,6 +5022,15 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     return;
   }
 
+  // ConsultaVIP — /comandos é um comando global no privado.
+  // Deve funcionar em qualquer etapa (inclusive com consulta pendente) sem apagar
+  // ou substituir a sessão atual do cliente.
+  if (/^\/comandos(?:\s|$)/i.test(textoOriginal)) {
+    const guia = await consultaComandosTextoCompacto();
+    await enviarTexto(from, guia);
+    return;
+  }
+
   // V157: se o cliente ativo ficou 12 horas ou mais sem falar com o bot,
   // qualquer nova mensagem reabre o atendimento diretamente no menu principal.
   // O horário anterior é lido antes de registrar a interação atual.
