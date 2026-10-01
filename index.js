@@ -5183,7 +5183,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
   if(sess?.etapa==='consulta_privada_categorias'){
     if(opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
-    if(opcao==='1'){const ps=await consultasPrivadasProdutos();if(!ps.length){await enviarTexto(from,'⚠️ Nenhuma consulta de IMEI/aparelho disponível no momento.\n\n0️⃣ Voltar');return;}const lista=ps.slice(0,40).map((x,i)=>`${i+1}️⃣ ${dhruNomeServicoPt(x.nome_cliente||x.nome)}`).join('\n');await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaIds:ps.slice(0,40).map(x=>Number(x.servico_id))});await enviarTexto(from,`📱 *IMEI / APARELHO*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);return;}
+    if(opcao==='1'){const cs=await all(`SELECT c.id,c.comando,c.nome_exibicao,c.servico_id,c.exemplo,s.nome servico_nome,s.api_service_id FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id AND s.api_provider='DHRU' WHERE c.ativo=1 ORDER BY c.id ASC`).catch(()=>[]);const ativos=cs.filter(x=>Number(x.servico_id)>0);if(!ativos.length){await enviarTexto(from,'⚠️ Nenhum comando de IMEI/aparelho está ativo no momento.\n\n0️⃣ Voltar');return;}const itens=ativos.slice(0,40);const lista=itens.map((x,i)=>`${i+1}️⃣ *${String(x.nome_exibicao||x.comando).trim()}* — ${x.comando}`).join('\n');await salvarSessaoPedido(from,{etapa:'consulta_privada_menu',consultaComandos:itens.map(x=>({id:Number(x.id),servicoId:Number(x.servico_id),comando:String(x.comando||''),nome:String(x.nome_exibicao||x.comando||'Consulta')}))});await enviarTexto(from,`📱 *IMEI / APARELHO*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);return;}
     if(opcao==='2'){await consultaVipMenuYanPrivado(from,'DADOS');return;} if(opcao==='3'){await consultaVipMenuYanPrivado(from,'VEICULOS');return;} if(opcao==='4'){await consultaVipMenuYanPrivado(from,'LINHA');return;} if(opcao==='5'){await consultaVipMenuYanPrivado(from,'OUTRAS');return;}
     await enviarTexto(from,'⚠️ Escolha uma categoria de 1 a 5 ou digite 0 para voltar.');return;
   }
@@ -5200,11 +5200,12 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   if(sess?.etapa==='consulta_privada_menu'){
     if(opcao==='0'){await menuConsultasPrivado(from,cliente);return;}
     if(!/^\d+$/.test(opcao||'')){await enviarTexto(from,'⚠️ Escolha uma das consultas exibidas ou digite 0 para voltar.');return;}
-    const sid=Array.isArray(sess.consultaIds)?sess.consultaIds[Number(opcao)-1]:null;
+    const item=Array.isArray(sess.consultaComandos)?sess.consultaComandos[Number(opcao)-1]:null;
+    const sid=item?Number(item.servicoId):null;
     const prod=sid?await dhruProductForService(sid):null;
-    if(!prod){await enviarTexto(from,'⚠️ Consulta indisponível. Abra o menu novamente.');return;}
+    if(!prod||!item){await enviarTexto(from,'⚠️ Consulta indisponível. Abra o menu novamente.');return;}
     const fs=dhruFieldsUsuario(prod).filter(f=>f.required!==false);
-    await salvarSessaoPedido(from,{etapa:'consulta_privada_campos',servicoId:Number(sid),produtoUuid:prod.product_uuid,campos:fs,indice:0,valores:{}});
+    await salvarSessaoPedido(from,{etapa:'consulta_privada_campos',servicoId:Number(sid),comandoId:Number(item.id),comando:item.comando,nomeComando:item.nome,produtoUuid:prod.product_uuid,campos:fs,indice:0,valores:{}});
     if(!fs.length){await enviarTexto(from,'⚠️ Essa consulta não possui campo de entrada configurado.');return;}
     await enviarTexto(from,`🔎 *${dhruNomeServicoPt(prod.nome||'Consulta')}*
 
@@ -5219,7 +5220,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
     const valores={...(sess.valores||{})}; valores[String(f.name)]=textoOriginal;
     if(i+1<campos.length){await salvarSessaoPedido(from,{...sess,etapa:'consulta_privada_campos',indice:i+1,valores});await enviarTexto(from,dhruPromptCampo(campos[i+1],i+1,campos.length)+'\n\n0️⃣ Cancelar');return;}
     try{
-      const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(NULL,?,?,?,?,?,'ENVIANDO')`,[Number(sess.servicoId),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
+      const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(sess.comandoId)||null,Number(sess.servicoId),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
       const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(sess.produtoUuid,valores,ref);
       await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
       await salvarSessaoPedido(from,{etapa:'hub_menu'});
