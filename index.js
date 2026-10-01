@@ -1532,9 +1532,9 @@ async function processarFeedbackDhru(body){
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finalizado_em END WHERE id=?`,[orderId,ok?'CONCLUIDA':fail?'ERRO':(status.toUpperCase()||'PROCESSANDO'),replay,replay,fail?replay:'',ok||fail,execId]);
     if(ok&&replay){
       const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');
-      if(numero) await enviarTexto(`wa:${numero}`,`✅ *CONSULTA CONCLUÍDA*\n\n${traduzirResultadoDhruPt(replay)}`);
+      if(numero){ await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId)); consultaDhruStatusPrivado.delete(execId); await enviarTexto(`wa:${numero}`,consultaFormatarDhruPrivado(replay)); }
       try{await avisarGrupoMovimentacao('consulta',row.cliente_nome||'Cliente',await nomeConsultaExecucao(row));}catch(_){}
-    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
+    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId));consultaDhruStatusPrivado.delete(execId);if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
     return {consultaPrivadaId:execId,status,replay};
   }
   const gm=reference.match(/^group-(\d+)$/i);
@@ -4677,6 +4677,41 @@ async function consultaVipMenuYanPrivado(from,categoria){
   const tit=categoria==='DADOS'?'CONSULTAS DE DADOS':categoria==='VEICULOS'?'VEÍCULOS':categoria==='LINHA'?'LINHA / TELEFONE':'OUTRAS CONSULTAS';
   await enviarTexto(from,`🔎 *${tit}*\n\n${lista}\n\n0️⃣ ⬅️ Voltar`);
 }
+function consultaNomeVisualPorComando(cmd){
+  const pref=String(cmd||'').trim().split(/\s+/)[0].replace(/^\//,'').toLowerCase();
+  const mapa={telefone:'Telefone',cpf:'CPF Completa',nome:'Nome Completo',email:'E-mail',placa:'Veículo / Placa',check:'Apple Check',blacklist:'Blacklist IMEI',xiaomi:'Xiaomi Check'};
+  return mapa[pref]||pref.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())||'Consulta';
+}
+function consultaTextoProcessando(nome,dado){
+  return `📋 *Consulta:* ${String(nome||'Consulta')}\n🔍 *Dado:* \`${String(dado||'-')}\`\n🟡 *STATUS › PROCESSANDO*\n⏳ Aguarde, estamos buscando seu resultado...`;
+}
+function consultaTextoNaoEncontrado(nome,dado){
+  return `📋 *Consulta:* ${String(nome||'Consulta')}\n🔍 *Dado:* \`${String(dado||'-')}\`\n🔴 *STATUS › NÃO ENCONTRADO*\n⚠️ Nenhum resultado encontrado para este dado.`;
+}
+async function consultaPrivadaEnviarProcessando(from,nome,dado){
+  try{
+    const numero=normalizarNumeroWhatsApp(String(from||'').replace(/^wa:/,''))||normalizarNumeroWhatsApp(jidToNumber(from)||'');
+    const sock=whatsappSocket||await consultaObterSocketWhatsApp();
+    if(sock&&numero){ const jid=numberToJid(numero); const m=await sock.sendMessage(jid,{text:consultaTextoProcessando(nome,dado)}); return {jid,key:m?.key||null}; }
+  }catch(e){console.log('⚠️ STATUS PROCESSANDO:',e.message)}
+  await enviarTexto(from,consultaTextoProcessando(nome,dado)); return null;
+}
+async function consultaPrivadaApagarProcessando(status){
+  try{if(status?.jid&&status?.key){const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(sock)await sock.sendMessage(status.jid,{delete:status.key});}}catch(e){console.log('⚠️ APAGAR PROCESSANDO:',e.message)}
+}
+const consultaDhruStatusPrivado=new Map();
+function consultaFormatarDhruPrivado(bruto){
+  const t=traduzirResultadoDhruPt(String(bruto||'')).trim(); if(!t)return t;
+  const pick=(rx)=>{const m=t.match(rx);return m?String(m[1]||'').trim():''};
+  const modelo=pick(/(?:model|modelo)\s*[:›-]\s*([^\n\r]+)/i), imei=pick(/imei\s*[:›-]\s*([0-9]{14,17})/i), sn=pick(/(?:serial(?: number)?|sn|n[uú]mero de s[eé]rie)\s*[:›-]\s*([A-Z0-9-]+)/i);
+  const fmi=pick(/(?:find my iphone|find my|fmi)\s*[:›-]\s*(on|off)/i).toUpperCase();
+  const icloud=pick(/icloud(?: status)?\s*[:›-]\s*([^\n\r]+)/i);
+  if(modelo&&(imei||sn||fmi||icloud)){
+    const ls=[`📱 *${modelo.replace(/\s*[-–]\s*/g,' | ')}*`]; if(imei)ls.push(`🔢 IMEI › \`${imei}\``); if(sn)ls.push(`🆔 SN › \`${sn}\``); if(fmi)ls.push(`${fmi==='ON'?'🔒':'🔓'} FMI › ${fmi==='ON'?'🔴':'🟢'} *${fmi}*`); if(icloud){const good=/clean|limpo|off/i.test(icloud);const bad=/lost|blocked|blacklist|on|ativo/i.test(icloud);ls.push(`☁️ iCloud › ${bad?'🔴':good?'🟢':'🟡'} *${icloud.toUpperCase()}*`);} return ls.join('\n');
+  }
+  return t;
+}
+
 async function consultaVipExecutarYanPrivado(from,cliente,cmd){
   if(consultaEmMemoria||consultaDhruEmMemoria){await enviarTexto(from,'⏳ O sistema está concluindo outra consulta. Tente novamente em instantes.');return;}
   const tgGrupo=await getConfig('consulta_tg_grupo','');
@@ -4686,11 +4721,11 @@ async function consultaVipExecutarYanPrivado(from,cliente,cmd){
   const r=await run(`INSERT INTO consultas_assinatura(cliente_jid,cliente_nome,grupo_whatsapp,comando,dado_consulta,status) VALUES(?,?,?,?,?,'ENVIANDO_TELEGRAM')`,[jid,cliente?.nome||'Cliente',from,cmd,dado]);
   consultaEmMemoria={id:r.lastID,canal:'WHATSAPP_PRIVADO',cliente_jid:jid,cliente_nome:cliente?.nome||'Cliente',grupo_whatsapp:from,comando:cmd,dado_consulta:dado};
   try{
-    await consultaAssinaturaRegistrarUso(jid,cmd); await enviarTexto(from,'⏳ *Consulta recebida.*\n\nO resultado será entregue aqui no seu privado.');
+    await consultaAssinaturaRegistrarUso(jid,cmd); consultaEmMemoria.statusProcessando=await consultaPrivadaEnviarProcessando(from,consultaNomeVisualPorComando(cmd),dado);
     const ent=await consultaTelegramResolverGrupo(tgGrupo),env=await consultaTelegramCliente.sendMessage(ent,{message:cmd});
     consultaEmMemoria.telegram_entidade=ent;consultaEmMemoria.telegram_enviado_id=String(env?.id||'');
     await run(`UPDATE consultas_assinatura SET status='AGUARDANDO_RESULTADO',telegram_message_id=? WHERE id=?`,[String(env?.id||''),r.lastID]);
-    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite excedido.')).catch(()=>{});},30000);
+    consultaTelegramIniciarPolling(); consultaTimeoutTimer=setTimeout(()=>{if(consultaEmMemoria?.id===r.lastID)consultaFalhar(r.lastID,new Error('Tempo limite excedido.')).catch(()=>{});},120000);
   }catch(e){await consultaFalhar(r.lastID,e);}
 }
 
@@ -5144,7 +5179,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
         const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(mapaDhruSolto.id)||null,Number(mapaDhruSolto.servico_id),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
         const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(prod.product_uuid,valores,ref);
         await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
-        await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+        consultaDhruStatusPrivado.set(r.lastID,await consultaPrivadaEnviarProcessando(from,String(mapaDhruSolto.nome_exibicao||mapaDhruSolto.comando||'Consulta'),resto));
       } catch(e) { await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`); }
       return;
     }
@@ -5360,7 +5395,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
       const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(sess.produtoUuid,valores,ref);
       await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
       await salvarSessaoPedido(from,{etapa:'hub_menu'});
-      await enviarTexto(from,'⏳ *Consulta enviada com sucesso.*\n\nO resultado será entregue aqui no seu privado assim que estiver disponível.');
+      consultaDhruStatusPrivado.set(r.lastID,await consultaPrivadaEnviarProcessando(from,String(sess.nomeComando||'Consulta'),Object.values(valores).join(' | ')));
     }catch(e){await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`);}
     return;
   }
@@ -9442,6 +9477,7 @@ async function consultaFalhar(id,erro){
   try{ await run(`UPDATE consultas_assinatura SET status='ERRO',erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[msg,id]); }catch(_){}
   try{
     if(consultaEmMemoria?.canal==='WHATSAPP_PRIVADO'){
+      await consultaPrivadaApagarProcessando(consultaEmMemoria.statusProcessando);
       await enviarTexto(String(consultaEmMemoria.grupo_whatsapp||''),'❌ Não foi possível concluir sua consulta agora. Tente novamente em instantes.').catch(()=>{});
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;} if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;} consultaEmMemoria=null; return;
     }
@@ -9666,8 +9702,9 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
   try{
     if(ativo.canal==='WHATSAPP_PRIVADO'){
       const destino=String(ativo.grupo_whatsapp||'');
+      await consultaPrivadaApagarProcessando(ativo.statusProcessando);
       if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await enviarTexto(destino,`✅ *Consulta concluída*\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
-      else if(semResultado){await enviarTexto(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
+      else if(semResultado){await enviarTexto(destino,consultaTextoNaoEncontrado(consultaNomeVisualPorComando(ativo.comando),ativo.dado_consulta));}
       else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
       await avisarGrupoConsultaPrivadaConcluida(ativo);
