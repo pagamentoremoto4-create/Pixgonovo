@@ -4530,9 +4530,11 @@ function extrairMensagemWhatsApp(body) {
 
 
 function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
+  // Usa exatamente o mesmo nome salvo no cadastro/revenda em todos os menus.
+  // Cliente novo: cadastrarClienteWhatsApp salva automaticamente o pushName do WhatsApp.
+  // Cliente existente: preserva e reutiliza o nome já cadastrado, sem abreviar.
   const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
-  const primeiroNome = nome.split(/\s+/)[0] || 'Cliente';
-  const saudacao = semSaudacao ? '' : `👋 Olá, *${primeiroNome}*!
+  const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
 
 `;
   return `${saudacao}*O que deseja fazer?*
