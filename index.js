@@ -10674,6 +10674,23 @@ function consultaLoginStatus(){
 app.use('/admin', basicAuth);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
 ggsoma.routes(app);
+
+// GGSOMA compartilhada: a credencial fica somente no Pixgonovo central.
+app.get('/api/shared-ggsoma/health', async (req,res)=>{
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ok:false,error:'unauthorized_or_disabled'});
+  try { const enabled=await getConfig('ggsoma_enabled','0'); res.json({ok:true,service:'shared-ggsoma',enabled:enabled==='1'}); }
+  catch(e){res.status(500).json({ok:false,error:'TEMPORARY'});}
+});
+app.get('/api/shared-ggsoma/catalog', async (req,res)=>{
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ok:false,error:'unauthorized_or_disabled'});
+  try { const products=await ggsoma.sharedCatalog(); res.json({ok:true,products}); }
+  catch(e){const code=e.code||e.message||'TEMPORARY';res.status(code==='GGSOMA_DISABLED'?409:503).json({ok:false,error:code});}
+});
+app.post('/api/shared-ggsoma/order', async (req,res)=>{
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ok:false,error:'unauthorized_or_disabled'});
+  try { const out=await ggsoma.sharedOrder(req.body?.slug,req.body?.external_order_id); res.json({ok:true,...out}); }
+  catch(e){const code=e.code||e.message||'TEMPORARY';const definite=['OUT_OF_STOCK','INSUFFICIENT_BALANCE','PRODUCT_NOT_FOUND','PRODUCT_NOT_ALLOWED','PRODUCT_UNAVAILABLE','UNSUPPORTED_DELIVERY_TYPE','INVALID_QUANTITY','VALIDATION_ERROR','GGSOMA_DISABLED'].includes(code);res.status(definite?409:503).json({ok:false,error:code,request_id:e.requestId||''});}
+});
 const premium = require('./premium')({run,get,all,axios,ggsoma,precoDaRevenda,brl,enviarTexto,enviarImagem,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'menu'});await enviarMenuServicosWhatsApp(from,cliente);}});
 premium.routes(app);
 

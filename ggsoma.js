@@ -34,6 +34,7 @@ module.exports = function createGgsoma(d) {
     await d.addColumnIfMissing('ggsoma_products','custom_description','TEXT');
     await d.addColumnIfMissing('ggsoma_products','image_path','TEXT');
     await run(`CREATE TABLE IF NOT EXISTS ggsoma_orders(pedido_id INTEGER PRIMARY KEY,external_id TEXT UNIQUE NOT NULL,request_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,attempts INTEGER DEFAULT 0,next_try INTEGER DEFAULT 0,notified INTEGER DEFAULT 0)`);
+    await run(`CREATE TABLE IF NOT EXISTS shared_ggsoma_orders(external_id TEXT PRIMARY KEY,slug TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
     await d.addColumnIfMissing('pedidos','ggsoma_checkout_token','TEXT');
     await run('CREATE UNIQUE INDEX IF NOT EXISTS ggsoma_checkout_unique ON pedidos(ggsoma_checkout_token)');
     await run(`CREATE TRIGGER IF NOT EXISTS ggsoma_checkout_reserve AFTER INSERT ON pedidos
@@ -171,6 +172,43 @@ module.exports = function createGgsoma(d) {
     if(running)return;running=true;
     try{if(await getConfig('ggsoma_enabled','0')==='1' && Date.now()-lastSyncTry>120000){lastSyncTry=Date.now();try{await sync();}catch(_){}}const rows=await all(`SELECT p.id FROM pedidos p JOIN servicos_catalogo s ON s.id=p.servico_id LEFT JOIN ggsoma_orders o ON o.pedido_id=p.id WHERE s.api_provider='GGSOMA' AND p.status IN ('PENDENTE','EM PROCESSO','FINALIZADO') AND (o.state IS NULL OR o.state!='COMPLETED' OR (o.state='COMPLETED' AND o.notified=0)) ORDER BY p.id LIMIT 10`);for(const r of rows)await execute(r.id);}finally{running=false;}
   }
+
+  async function sharedCatalog(){
+    if(await getConfig('ggsoma_enabled','0')!=='1')throw Object.assign(new Error('GGSOMA_DISABLED'),{code:'GGSOMA_DISABLED'});
+    try{await sync();}catch(_){}
+    const rows=await all(`SELECT g.slug,g.json,g.custom_title,g.custom_description,s.id catalogo_id,s.nome,s.preco_padrao,s.ativo,s.api_cost FROM ggsoma_products g LEFT JOIN servicos_catalogo s ON s.id=g.catalogo_id WHERE g.present=1 AND s.ativo=1 ORDER BY COALESCE(NULLIF(g.custom_title,''),s.nome,g.slug)`);
+    return rows.map(r=>{const p=JSON.parse(r.json||'{}');return {slug:r.slug,name:r.custom_title||r.nome||p.name||r.slug,description:r.custom_description||p.description||'',cost:Number(r.api_cost??p.yourPrice??0),central_price:Number(r.preco_padrao||0),enabled:Number(r.ativo||0)===1,stock:{inStock:!!p.stock?.inStock,count:Number(p.stock?.count||0)},deliveryType:p.deliveryType||'',durationDays:p.durationDays||null,warranty:p.warranty||null};});
+  }
+  async function sharedOrder(slug,externalId){
+    slug=String(slug||'').trim();externalId=String(externalId||'').trim().slice(0,180);
+    if(!slug||!externalId)throw Object.assign(new Error('VALIDATION_ERROR'),{code:'VALIDATION_ERROR'});
+    if(await getConfig('ggsoma_enabled','0')!=='1')throw Object.assign(new Error('GGSOMA_DISABLED'),{code:'GGSOMA_DISABLED'});
+    let saved=await get('SELECT * FROM shared_ggsoma_orders WHERE external_id=?',[externalId]);
+    if(saved?.state==='COMPLETED')return {status:'COMPLETED',orderCode:saved.order_code,delivery:decrypt(saved.delivery_enc)};
+    if(saved?.state==='FAILED')throw Object.assign(new Error(saved.error||'FAILED'),{code:saved.error||'FAILED'});
+    const gp=await get('SELECT * FROM ggsoma_products WHERE slug=? AND present=1',[slug]);
+    if(!gp)throw Object.assign(new Error('PRODUCT_NOT_FOUND'),{code:'PRODUCT_NOT_FOUND'});
+    const svc=await get(`SELECT ativo FROM servicos_catalogo WHERE api_provider='GGSOMA' AND api_service_id=? ORDER BY id DESC LIMIT 1`,[slug]);
+    if(!svc||!Number(svc.ativo))throw Object.assign(new Error('PRODUCT_NOT_ALLOWED'),{code:'PRODUCT_NOT_ALLOWED'});
+    if(!saved){await run(`INSERT OR IGNORE INTO shared_ggsoma_orders(external_id,slug,state) VALUES(?,?,'NEW')`,[externalId,slug]);saved=await get('SELECT * FROM shared_ggsoma_orders WHERE external_id=?',[externalId]);}
+    try{
+      const product=await request('get','/catalog/products/'+encodeURIComponent(slug));
+      const card=product.data&&!Array.isArray(product.data)?product.data:product;
+      if(!card.stock?.inStock)throw Object.assign(new Error('OUT_OF_STOCK'),{code:'OUT_OF_STOCK'});
+      const balance=await request('get','/balance');
+      if(Number(balance.balance)<Number(card.yourPrice))throw Object.assign(new Error('INSUFFICIENT_BALANCE'),{code:'INSUFFICIENT_BALANCE'});
+      const resp=await postOrder({productSlug:slug,quantity:1,externalOrderId:externalId});
+      const text=deliveryText(resp);
+      if(resp.status!=='COMPLETED'||!text)throw Object.assign(new Error('UNRESOLVED'),{code:'UNRESOLVED'});
+      await run(`UPDATE shared_ggsoma_orders SET state='COMPLETED',order_code=?,delivery_enc=?,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE external_id=?`,[resp.orderCode||'',encrypt(text),externalId]);
+      return {status:'COMPLETED',orderCode:resp.orderCode||'',delivery:text};
+    }catch(e){
+      const definite=['OUT_OF_STOCK','INSUFFICIENT_BALANCE','PRODUCT_NOT_FOUND','PRODUCT_NOT_ALLOWED','PRODUCT_UNAVAILABLE','UNSUPPORTED_DELIVERY_TYPE','INVALID_QUANTITY','VALIDATION_ERROR'].includes(e.code);
+      await run(`UPDATE shared_ggsoma_orders SET state=?,error=?,request_id=?,updated_at=CURRENT_TIMESTAMP WHERE external_id=?`,[definite?'FAILED':'RETRY',e.code||'TEMPORARY',e.requestId||'',externalId]);
+      throw e;
+    }
+  }
+
   function csrf(){return crypto.createHmac('sha256',key()).update('ggsoma-admin').digest('hex');}
   const premiumImageDir=path.join(DATA_DIR,'premium-images');
   fs.mkdirSync(premiumImageDir,{recursive:true});
@@ -196,5 +234,5 @@ module.exports = function createGgsoma(d) {
       res.set('Cache-Control','no-store');res.send(d.clientePage('Entrega',`<div class="cu-card"><h1>Entrega do pedido #${Number(o.pedido_id)}</h1><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${h(decrypt(o.delivery_enc))}</pre></div>`,req.cliente));
     }));
   }
-  return {init,routes,execute,purchase,sync,saveProduct,deliveryText,encrypt,decrypt};
+  return {init,routes,execute,purchase,sync,saveProduct,deliveryText,encrypt,decrypt,sharedCatalog,sharedOrder};
 };
