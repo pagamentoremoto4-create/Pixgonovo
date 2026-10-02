@@ -1402,7 +1402,11 @@ function timUnlockPedidoIdFromReference(ref){
   return Number.isInteger(id)&&id>0?id:0;
 }
 
-function timUnlockIsDesbloqueioTim(pedido){ return normalizarNomeServico(pedido?.servico_nome||'')==='desbloqueio tim'; }
+function timUnlockIsDesbloqueioTim(pedido){
+  const nome = normalizarNomeServico(pedido?.servico_nome || '');
+  // Aceita o serviço base e variações do catálogo, ex.: "Desbloqueio TIM Premium".
+  return nome === 'desbloqueio tim' || nome.startsWith('desbloqueio tim ');
+}
 function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return imeiLuhnValido(v)?v:''; }
 async function timUnlockDhruProduct(){
   const uuid=String(await getConfig('tim_unlock_dhru_product_uuid','')).trim();
