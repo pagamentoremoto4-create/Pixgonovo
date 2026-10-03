@@ -43,7 +43,8 @@ module.exports = function({run,get,all,page,safeHtml:esc,brl,getBot,cadastrarCli
       UPDATE waq_outbox SET status='CANCELADO' WHERE pedido_id=OLD.id AND status<>'ENVIADO';
     END`);
     if(await get("SELECT name FROM sqlite_master WHERE type='table' AND name='waq_android'"))await run('UPDATE waq_android SET ativo=0');
-    await run("UPDATE waq_recepcao SET status='IGNORADO',codigo=NULL WHERE origem<>'WHATSAPP' AND status='REVISAO'");
+    await run("UPDATE waq_recepcao SET status='IGNORADO',codigo=NULL WHERE origem NOT IN ('WHATSAPP','ANDROID_CAPTURA') AND status='REVISAO'");
+    await android.init();
     // A venda fica no histórico e o número não volta automaticamente ao estoque após estorno.
   }
   function availableWhere(){
@@ -124,7 +125,7 @@ module.exports = function({run,get,all,page,safeHtml:esc,brl,getBot,cadastrarCli
     return true;
   }
   async function accept(pid,codigo,origem){
-    if(origem!=='WHATSAPP')throw Error('A captura é somente pela conta WhatsApp conectada.');
+    if(!['WHATSAPP','ANDROID_CAPTURA'].includes(origem))throw Error('A captura é somente pela conta WhatsApp conectada.');
     if(!/^\d{6}$/.test(codigo))throw Error('Informe os seis dígitos do código.');
     const now=Date.now();
     const r=await run(`UPDATE waq_pedidos SET codigo=?,origem=?,codigo_em=?,status='CODIGO_RECEBIDO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status='AGUARDANDO_CODIGO' AND expira>?`,[codigo,origem,now,pid,now]);
@@ -182,9 +183,11 @@ module.exports = function({run,get,all,page,safeHtml:esc,brl,getBot,cadastrarCli
     }finally{working=false}
   }
   function start(){if(!timer){timer=setInterval(()=>flush().catch(e=>console.log('⚠️ Entrega WhatsApp aquecidos:',e.message)),10000);timer.unref();flush().catch(()=>{})}}
-  const nav=()=>`<div class="card"><a class="btn" href="${BASE}">Estoque</a> <a class="btn" href="${BASE}/pedidos">Pedidos e códigos</a> <a class="btn" href="${BASE}/integracao">Recebimento WhatsApp</a></div>`;
+  const nav=()=>`<div class="card"><a class="btn" href="${BASE}">Estoque</a> <a class="btn" href="${BASE}/pedidos">Pedidos e códigos</a> <a class="btn" href="${BASE}/integracao">Recebimento WhatsApp</a> <a class="btn" href="${BASE}/android">Captura Android</a></div>`;
   function route(handler){return async(req,res)=>{try{if(req.method==='POST'&&req.body.waq_token!==csrf)return res.status(403).send('Reabra a página para atualizar o formulário.');await handler(req,res)}catch(e){res.status(400).send(page('Verifique os dados',`${nav()}<div class="card">⚠️ ${esc(e.message)}</div>`))}}}
+  const android=require('./whatsapp-aquecidos-android')({run,get,all,page,esc,token,guard:route,nav,getSessions,accept});
   function routes(app){
+    android.routes(app);
     app.get(BASE+'/pedidos',route(async(req,res)=>{
       const status=Object.hasOwn(labels,req.query.status)?req.query.status:'';
       const ps=await all(`SELECT p.*,r.nome FROM waq_pedidos p LEFT JOIN revendas r ON r.id=p.cliente_id ${status?'WHERE p.status=?':''} ORDER BY p.id DESC LIMIT 200`,status?[status]:[]);

@@ -59,3 +59,7 @@ Requer Node.js e Python 3 apenas para o teste:
 node test/whatsapp-aquecidos.test.js
 Valida cadastro automático, preços, duas opções, conexão, função Receber códigos,
 concorrência, saldo, captura exclusiva WhatsApp, revisão, entrega, estorno e migração.
+
+
+CAPTURA ANDROID (NOVA OPÇÃO)
+Aba Captura Android adicionada ao painel. Código-fonte do aplicativo em android-captura. Leia android-captura/INSTRUCOES.txt. As referências anteriores a captura somente por mensagem descrevem a versão antiga. Agora são aceitas mensagens e capturas do aplicativo vinculado. Continua sem SMS. O APK ainda precisa ser compilado e o OCR validado no aparelho; não ative entrega automática antes do teste real.
