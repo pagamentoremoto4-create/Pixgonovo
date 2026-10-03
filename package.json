@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node index.js",
     "test:ggsoma": "node test/ggsoma.test.js",
-    "test:premium": "node test/premium.test.js"
+    "test:premium": "node test/premium.test.js",
+    "test:whatsapp-aquecidos": "node test/whatsapp-aquecidos.test.js"
   },
   "dependencies": {
     "axios": "^1.7.9",
