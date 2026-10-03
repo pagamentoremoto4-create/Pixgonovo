@@ -1770,7 +1770,6 @@ async function initDB() {
   await addColumnIfMissing('whatsapp_sessoes', 'auto_ativar_clientes_grupo', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('whatsapp_sessoes', 'grupos_ativacao_json', "TEXT DEFAULT '[]'");
   await addColumnIfMissing('whatsapp_sessoes', 'funcao_consultas', 'INTEGER DEFAULT 0');
-  await addColumnIfMissing('whatsapp_sessoes', 'funcao_codigos', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('revendas', 'ativado_por', "TEXT DEFAULT ''");
   await addColumnIfMissing('revendas', 'ativado_grupo_id', "TEXT DEFAULT ''");
   await addColumnIfMissing('revendas', 'ativado_grupo_nome', "TEXT DEFAULT ''");
@@ -2463,8 +2462,6 @@ async function initDB() {
   )`);
   await run(`INSERT OR IGNORE INTO categorias_produtos (nome) SELECT DISTINCT COALESCE(NULLIF(TRIM(categoria),''),'eSIM') FROM esim_planos`);
 
-  await whatsappAquecidos.init();
-  await whatsappAquecidosVendas.init();
   await ggsoma.init();
   await premium.init();
   PAINEL_TEMA = await getConfig('painel_tema', 'central-hacker-pro');
@@ -2642,7 +2639,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/whatsapp-aquecidos">📱 <span>WhatsApp aquecidos</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/whatsapp-aquecidos">📱 <span>WhatsApp aquecidos</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -4030,7 +4027,6 @@ function tecladoTelegramMenu() {
       inline_keyboard: [
         [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
         [{ text: '⭐ Assinaturas Premium', callback_data: 'menu_premium' }],
-        [{ text: '📱 WhatsApp aquecidos', callback_data: 'waq_home' }],
         [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
         [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🧾 Cadastrar PIX', callback_data: 'menu_cadastrar_pix' }],
         [{ text: '🆘 Suporte', callback_data: 'menu_suporte' }, { text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
@@ -6122,7 +6118,6 @@ async function responderBotaoAdminTelegram(chatId, data) {
 
 async function iniciarTelegram() {
   await initDB();
-  whatsappAquecidosVendas.start();
   iniciarWorkerAnuncios();
   if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
     console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
@@ -6187,7 +6182,6 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       const chatId = q.message?.chat?.id;
       const data = String(q.data || '');
       if (!chatId) return;
-      if (await whatsappAquecidosVendas.callback(q)) return;
       const ehBotaoAdmin = data.startsWith('admin_') || data.startsWith('adm');
       if (ehBotaoAdmin) {
         if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
@@ -8316,7 +8310,6 @@ function criarRuntimeSessaoWhatsApp(row) {
   base.funcaoGrupos = normalizarFuncaoCheckbox(row.funcao_grupos);
   base.funcaoStatus = normalizarFuncaoCheckbox(row.funcao_status);
   base.funcaoConsultas = normalizarFuncaoCheckbox(row.funcao_consultas);
-  base.funcaoCodigos = normalizarFuncaoCheckbox(row.funcao_codigos);
   base.autoAtivarClientesGrupo = normalizarFuncaoCheckbox(row.auto_ativar_clientes_grupo);
   try { base.gruposAtivacao = JSON.parse(row.grupos_ativacao_json || '[]'); } catch (_) { base.gruposAtivacao = []; }
   if (!Array.isArray(base.gruposAtivacao)) base.gruposAtivacao = [];
@@ -8550,9 +8543,6 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     registrarSaudacaoEntradaGrupoConsultas(socketAtual, sessao);
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type === 'notify') for (const msg of messages || []) {
-        try { await whatsappAquecidosVendas.whatsapp(sessao, msg); } catch (e) { console.log('⚠️ Código WhatsApp aquecido:', e.message); }
-      }
       // V96: mensagens FROMME sincronizadas do celular podem chegar como append,
       // não apenas notify. Processa o comando do admin antes do filtro de type.
       for (const msg of messages || []) {
@@ -10682,10 +10672,6 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
-const whatsappAquecidos = require('./whatsapp-aquecidos')({run,get,all,page,safeHtml,brl,getSessions:()=>Array.from(whatsappSessoes.values()),extraNav:()=>whatsappAquecidosVendas.nav()});
-const whatsappAquecidosVendas = require('./whatsapp-aquecidos-vendas')({run,get,all,page,safeHtml,brl,getBot:()=>tgBot,cadastrarClienteTelegram,avisarAdmin:avisarAdminTelegram,notificarPainel,getSessions:()=>Array.from(whatsappSessoes.values())});
-whatsappAquecidos.routes(app);
-whatsappAquecidosVendas.routes(app);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
 ggsoma.routes(app);
 
@@ -13179,7 +13165,6 @@ app.get('/admin/whatsapp', async (req, res) => {
     const funcoes = [
       sessao.funcaoBot ? '<span class="pill">🤖 Bot de Serviços</span>' : '',
       sessao.funcaoConsultas ? '<span class="pill">🔍 Grupo ConsultaVIP</span>' : '',
-      sessao.funcaoCodigos ? '<span class="pill">🔑 Receber códigos</span>' : '',
       sessao.funcaoGrupos ? '<span class="pill">📢 Anúncios em Grupos</span>' : '',
       sessao.funcaoStatus ? '<span class="pill">🟢 Anúncios no Status</span>' : ''
     ].filter(Boolean).join(' ');
@@ -13188,23 +13173,22 @@ app.get('/admin/whatsapp', async (req, res) => {
 
   const emConexao = Array.from(whatsappSessoes.values()).some(x => ['INICIANDO','AGUARDANDO_QR','REGERANDO_QR','CONECTANDO'].includes(String(x.status || '')));
   const autoRefresh = emConexao ? `<script>setTimeout(()=>{if(!document.hidden)location.reload()},8000)</script>` : '';
-  res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🔑 <b>Receber códigos</b> — acompanhar mensagens dos números cadastrados em WhatsApp aquecidos.<br>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>🔍 <b>Grupo ConsultaVIP</b> — assinaturas, comandos, consultas e saudações do grupo.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. As demais funções podem ser combinadas. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
+  res.send(page('Conectar WhatsApp', `<div class="topbar"><div><h1>📲 Conectar WhatsApp</h1><p class="muted">Adicione quantos números quiser e escolha a função de cada um.</p></div><a class="btn green" href="/admin/whatsapp/adicionar">➕ Adicionar WhatsApp</a></div><div class="card"><h3>Funções disponíveis</h3><p>🤖 <b>Bot de Serviços</b> — menu, serviços, eSIM, saldo, PIX e pedidos.<br>🔍 <b>Grupo ConsultaVIP</b> — assinaturas, comandos, consultas e saudações do grupo.<br>📢 <b>Anúncios em Grupos</b> — campanhas nos grupos em que o número participa.<br>🟢 <b>Anúncios no Status</b> — publica texto ou imagem no Status do WhatsApp.</p><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. As demais funções podem ser combinadas. Após reiniciar o Render, as sessões salvas são reconectadas automaticamente.</p><a class="btn green" href="/admin/anuncios">📣 Abrir Central de Anúncios</a></div><div class="grid">${cards}</div>${autoRefresh}`));
 });
 
 app.get('/admin/whatsapp/adicionar', async (req, res) => {
-  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_codigos" value="1"> 🔑 <b>Receber códigos — WhatsApp aquecidos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1"> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
+  res.send(page('Adicionar WhatsApp', `<h1>➕ Adicionar WhatsApp</h1><div class="card"><form method="post" action="/admin/whatsapp/adicionar"><label>Nome da sessão</label><input name="nome" required maxlength="80" placeholder="Ex.: WhatsApp Principal"><h3>Escolha as funções</h3><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1"> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1"> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1"> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1"> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Somente um número pode assumir o Grupo ConsultaVIP. Depois de criar, clique em Gerar QR Code.</p><button class="btn green">✅ Criar sessão</button> <a class="btn" href="/admin/whatsapp">Cancelar</a></form></div>`));
 });
 
 app.post('/admin/whatsapp/adicionar', async (req, res) => {
   const nome = String(req.body.nome || '').trim().slice(0,80);
   const bot = req.body.funcao_bot ? 1 : 0, consultas = req.body.funcao_consultas ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
-  const codigos = req.body.funcao_codigos ? 1 : 0;
-  if (!nome || (!bot && !consultas && !grupos && !status && !codigos)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="/admin/whatsapp/adicionar">Voltar</a>'));
+  if (!nome || (!bot && !consultas && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="/admin/whatsapp/adicionar">Voltar</a>'));
   const key = `wa-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
   const dir = pastaCanonicaSessaoWhatsApp(key);
   fs.mkdirSync(dir, { recursive: true });
   if (consultas) await run('UPDATE whatsapp_sessoes SET funcao_consultas=0, atualizado_em=CURRENT_TIMESTAMP WHERE funcao_consultas=1');
-  const r = await run(`INSERT INTO whatsapp_sessoes (nome,session_key,session_dir,funcao_bot,funcao_consultas,funcao_grupos,funcao_status,funcao_codigos,ativo) VALUES (?,?,?,?,?,?,?,?,1)`, [nome,key,dir,bot,consultas,grupos,status,codigos]);
+  const r = await run(`INSERT INTO whatsapp_sessoes (nome,session_key,session_dir,funcao_bot,funcao_consultas,funcao_grupos,funcao_status,ativo) VALUES (?,?,?,?,?,?,?,1)`, [nome,key,dir,bot,consultas,grupos,status]);
   await carregarSessoesWhatsApp();
   res.redirect(`/admin/whatsapp/${r.lastID}/editar?novo=1`);
 });
@@ -13247,20 +13231,19 @@ app.get('/admin/whatsapp/:id/editar', async (req, res) => {
     gruposHtml = `<div style="margin-top:16px;padding:14px;border:1px solid rgba(34,197,94,.25);border-radius:14px"><h3 style="margin-top:0">✅ Ativação automática por grupo</h3><label style="display:block;padding:8px 0"><input type="checkbox" name="auto_ativar_clientes_grupo" value="1" ${sessao.autoAtivarClientesGrupo?'checked':''}> <b>Ativar automaticamente clientes novos que estejam em grupo autorizado</b></label><p class="mini-help">Só clientes novos são liberados por esta regra. Se você desativar um cliente manualmente depois, ele não será reativado automaticamente.</p><h4>Grupos que podem liberar clientes</h4><div style="max-height:320px;overflow:auto">${lista}</div></div>`;
   }
 
-  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_codigos" value="1" ${sessao.funcaoCodigos?'checked':''}> 🔑 <b>Receber códigos — WhatsApp aquecidos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1" ${sessao.funcaoConsultas?'checked':''}> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Ao marcar Grupo ConsultaVIP, esta sessão substitui automaticamente qualquer outra que esteja nessa função.</p>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
+  res.send(page('Editar WhatsApp', `<h1>⚙️ ${safeHtml(row.nome)}</h1><div class="grid"><div class="card"><h2>Configuração</h2><form method="post" action="/admin/whatsapp/${id}/salvar"><label>Nome da sessão</label><input name="nome" value="${safeHtml(row.nome)}" required maxlength="80"><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_bot" value="1" ${sessao.funcaoBot?'checked':''}> 🤖 <b>Bot de Serviços</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_consultas" value="1" ${sessao.funcaoConsultas?'checked':''}> 🔍 <b>Grupo ConsultaVIP</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_grupos" value="1" ${sessao.funcaoGrupos?'checked':''}> 📢 <b>Anúncios em Grupos</b></label><label style="display:block;padding:10px 0"><input type="checkbox" name="funcao_status" value="1" ${sessao.funcaoStatus?'checked':''}> 🟢 <b>Anúncios no Status</b></label><p class="mini-help">Ao marcar Grupo ConsultaVIP, esta sessão substitui automaticamente qualquer outra que esteja nessa função.</p>${gruposHtml}<button class="btn green" style="margin-top:14px">💾 Salvar alterações</button></form></div><div class="card"><h2>Conexão</h2><h3>${label}</h3><p><b>Número:</b> ${sessao.numero ? '+'+safeHtml(sessao.numero) : 'Ainda não conectado'}</p>${sessao.erro?`<p style="color:#ef4444">⚠️ ${safeHtml(sessao.erro)}</p>`:''}${qrHtml}<form class="forms-inline" method="post" action="/admin/whatsapp/${id}/conectar"><button class="btn green">📷 ${sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)?'Reconectar sessão':'Gerar QR Code'}</button></form><form class="forms-inline" method="post" action="/admin/whatsapp/${id}/desconectar"><button class="btn red" onclick="return confirm('Desconectar e apagar esta sessão?')">🔌 Desconectar</button></form><p class="mini-help">Se o Render reiniciar, uma sessão registrada será restaurada automaticamente sem precisar escanear outro QR Code.</p></div></div><p><a class="btn" href="/admin/whatsapp">⬅️ Voltar</a></p>${refresh}`));
 });
 
 app.post('/admin/whatsapp/:id/salvar', async (req, res) => {
   const id = Number(req.params.id);
   const nome = String(req.body.nome || '').trim().slice(0,80);
   const bot = req.body.funcao_bot ? 1 : 0, consultas = req.body.funcao_consultas ? 1 : 0, grupos = req.body.funcao_grupos ? 1 : 0, status = req.body.funcao_status ? 1 : 0;
-  const codigos = req.body.funcao_codigos ? 1 : 0;
   const autoAtivar = bot && req.body.auto_ativar_clientes_grupo ? 1 : 0;
   const gruposBody = req.body.grupos_ativacao == null ? [] : (Array.isArray(req.body.grupos_ativacao) ? req.body.grupos_ativacao : [req.body.grupos_ativacao]);
   const gruposAtivacao = [...new Set(gruposBody.map(x => String(x || '').trim()).filter(x => x.endsWith('@g.us')))];
-  if (!nome || (!bot && !consultas && !grupos && !status && !codigos)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="javascript:history.back()">Voltar</a>'));
+  if (!nome || (!bot && !consultas && !grupos && !status)) return res.send(page('Erro', '<h1>❌ Marque pelo menos uma função</h1><a class="btn" href="javascript:history.back()">Voltar</a>'));
   if (consultas) await run('UPDATE whatsapp_sessoes SET funcao_consultas=0, atualizado_em=CURRENT_TIMESTAMP WHERE id<>? AND funcao_consultas=1', [id]);
-  await run('UPDATE whatsapp_sessoes SET nome=?,funcao_bot=?,funcao_consultas=?,funcao_grupos=?,funcao_status=?,funcao_codigos=?,auto_ativar_clientes_grupo=?,grupos_ativacao_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome,bot,consultas,grupos,status,codigos,autoAtivar,JSON.stringify(gruposAtivacao),id]);
+  await run('UPDATE whatsapp_sessoes SET nome=?,funcao_bot=?,funcao_consultas=?,funcao_grupos=?,funcao_status=?,auto_ativar_clientes_grupo=?,grupos_ativacao_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [nome,bot,consultas,grupos,status,autoAtivar,JSON.stringify(gruposAtivacao),id]);
   await carregarSessoesWhatsApp();
   res.redirect(`/admin/whatsapp/${id}/editar`);
 });
