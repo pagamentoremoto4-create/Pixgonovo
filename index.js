@@ -407,6 +407,7 @@ async function sharedEsimPublicItem(req, item) {
   return {
     id: item.id,
     plano: item.nome_plano,
+    ddd: item.ddd || '',
     image_url: arquivo ? `${base}/esim/${encodeURIComponent(arquivo)}` : '',
     lpa_completo: item.lpa_completo || '',
     smdp: item.smdp || '',
@@ -439,16 +440,33 @@ app.get('/api/shared-esim/stock', async (req, res) => {
   try {
     await liberarReservasEsimExpiradas();
     const plano = String(req.query.plan || '').trim();
+    const ddd = String(req.query.ddd || '').replace(/\D/g,'').slice(0,2);
     if (!plano) return res.status(400).json({ ok:false, error:'plan_required' });
-    const row = await get(`SELECT COUNT(*) qtd FROM esim_estoque
-      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE`, [plano]);
-    res.json({ ok:true, plan:plano, available:Number(row?.qtd || 0) });
+    const row = ddd
+      ? await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE AND ddd=?`, [plano, ddd])
+      : await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE`, [plano]);
+    res.json({ ok:true, plan:plano, ddd:ddd || null, available:Number(row?.qtd || 0) });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+});
+
+app.get('/api/shared-esim/ddds', async (req, res) => {
+  if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
+  try {
+    await liberarReservasEsimExpiradas();
+    const plano = String(req.query.plan || '').trim();
+    if (!plano) return res.status(400).json({ ok:false, error:'plan_required' });
+    const rows = await all(`SELECT ddd, COUNT(*) available FROM esim_estoque
+      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE
+        AND ddd IS NOT NULL AND TRIM(ddd)<>''
+      GROUP BY ddd ORDER BY CAST(ddd AS INTEGER), ddd`, [plano]);
+    res.json({ok:true, plan:plano, ddds:rows.map(r=>({ddd:String(r.ddd), available:Number(r.available||0)}))});
+  } catch(e) { res.status(500).json({ok:false,error:e.message}); }
 });
 
 app.post('/api/shared-esim/reserve', async (req, res) => {
   if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ ok:false, error:'unauthorized_or_disabled' });
   const plano = String(req.body?.plan || '').trim();
+  const ddd = String(req.body?.ddd || '').replace(/\D/g,'').slice(0,2);
   const source = String(req.body?.source || 'EXTERNAL').trim().slice(0,80);
   const orderId = String(req.body?.order_id || '').trim().slice(0,120);
   const customer = String(req.body?.customer || '').trim().slice(0,180);
@@ -457,9 +475,9 @@ app.post('/api/shared-esim/reserve', async (req, res) => {
   try {
     await liberarReservasEsimExpiradas();
     await run('BEGIN IMMEDIATE');
-    let item = await get(`SELECT * FROM esim_estoque
-      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE
-      ORDER BY id ASC LIMIT 1`, [plano]);
+    let item = ddd
+      ? await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE AND ddd=? ORDER BY id ASC LIMIT 1`, [plano, ddd])
+      : await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE ORDER BY id ASC LIMIT 1`, [plano]);
     if (!item) { await run('ROLLBACK'); return res.status(409).json({ ok:false, error:'out_of_stock' }); }
     item = await garantirDadosAtivacaoEsim(item);
     if (!item?.arquivo_qr) { await run('ROLLBACK'); return res.status(422).json({ ok:false, error:'invalid_esim_item' }); }
@@ -4012,24 +4030,25 @@ function menuTelegramTexto(cliente) {
   const saldo = brl(cliente?.saldo || 0);
   const linhaFinanceira = `🏷 Perfil: REVENDA
 💰 Saldo / situação: ${saldo}`;
-  return `🏠 *MENU PRINCIPAL*
+  return `✨ *CENTRAL UNLOCKER*
+━━━━━━━━━━━━━━━━━━
 
-Olá, ${cliente?.nome || 'cliente'}!
-
+👋 Olá, *${cliente?.nome || 'cliente'}*!
 ${linhaFinanceira}
 
-Toque em uma opção abaixo.`;
+⚡ Escolha uma opção para continuar:`;
 }
 function tecladoTelegramMenu() {
   return {
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🔓 Serviços', callback_data: 'menu_servicos' }, { text: '📱 Comprar eSIM', callback_data: 'menu_esim' }],
-        [{ text: '⭐ Assinaturas Premium', callback_data: 'menu_premium' }],
-        [{ text: '📦 Histórico', callback_data: 'menu_historico' }, { text: '👤 Minha Conta', callback_data: 'menu_conta' }],
-        [{ text: '💳 Pagar / Saldo', callback_data: 'menu_pagar' }, { text: '🧾 Cadastrar PIX', callback_data: 'menu_cadastrar_pix' }],
-        [{ text: '🆘 Suporte', callback_data: 'menu_suporte' }, { text: '🔗 Vincular WhatsApp', callback_data: 'menu_vincular_whatsapp' }]
+        [{ text: '📱 COMPRA eSIM', callback_data: 'menu_esim' }],
+        [{ text: '🔓 SERVIÇOS', callback_data: 'menu_servicos' }, { text: '⭐ PREMIUM', callback_data: 'menu_premium' }],
+        [{ text: '💰 CONTA / SALDO', callback_data: 'menu_conta' }, { text: '📦 MEUS PEDIDOS', callback_data: 'menu_historico' }],
+        [{ text: '💳 PAGAR / ADICIONAR SALDO', callback_data: 'menu_pagar' }],
+        [{ text: '🧾 CADASTRAR PIX', callback_data: 'menu_cadastrar_pix' }, { text: '🆘 SUPORTE', callback_data: 'menu_suporte' }],
+        [{ text: '🔗 VINCULAR WHATSAPP', callback_data: 'menu_vincular_whatsapp' }]
       ]
     }
   };
