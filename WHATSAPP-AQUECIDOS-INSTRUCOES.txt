@@ -1,81 +1,61 @@
-WHATSAPP AQUECIDOS — VENDA E ATIVACAO
+WHATSAPP AQUECIDOS — SOMENTE WHATSAPP CONECTADO
 
-IMPLEMENTADO NO SCRIPT
-- Aba de estoque: cadastro, edição, preço, DDD, dias de aquecimento informados,
-  celular, chip 1/2, canal previsto e sessão WhatsApp.
-- Menu Telegram: comprar por DDD, comprar aleatório, saldo, suporte e meus pedidos.
-- Confirmação com validade de 5 minutos; disponibilidade e preço conferidos na compra.
-- Venda, débito e fila de entrega gravados atomicamente por triggers SQLite.
-- Número vendido não é vendido novamente; repetir confirmação não cobra novamente.
-- Pedidos separados dentro de WhatsApp aquecidos > Pedidos e códigos.
-- Solicitar código abre uma espera de 10 minutos. O cliente solicita a ativação
-  no WhatsApp dele; o sistema não solicita a verificação ao WhatsApp.
-- Recebimento SMS autenticado por credencial individual de cada Android.
-- Recebimento WhatsApp para sessões com a função Receber códigos habilitada.
-- Código manual no painel e revisão dos códigos de remetentes não autorizados.
-- Entrega automática para remetentes que o administrador autorizar explicitamente.
-- Deduplicação das entradas e aceitação de apenas um código por espera.
-- Fila de saída, retentativas e recuperação após reinício.
-- Conclusão pelo cliente; cancelamento/estorno único antes de receber código.
-- Código apagado do banco operacional após 10 minutos ou conclusão.
-  Mensagens já enviadas no Telegram e cópias de backup não são removidas.
+PLANOS
+30 dias aquecidos: R$ 40,00
+120 dias aquecidos: R$ 90,00
+O servidor define o preço pelo plano. O número vem da sessão conectada.
+Não existe preenchimento manual de número, preço, chip ou canal SMS.
+Os dias de aquecimento são informados pelo plano, não medidos pelo sistema.
 
-INSTALACAO NO RENDER
-1. Faça backup do banco e do disco antes de atualizar.
-2. Suba os arquivos do projeto ao repositório usado pelo Render.
-3. Mantenha as variáveis de ambiente e o disco persistente existentes.
-4. As tabelas novas e a função Receber códigos são criadas na inicialização.
-5. Abra WhatsApp aquecidos no menu do painel.
-6. Cadastre um número de teste. Defina preço e número real de dias de aquecimento.
-7. Conecte a conta em Conectar WhatsApp > Adicionar WhatsApp.
-   Marque somente Receber códigos para uma conta destinada ao estoque.
-   Vincule a sessão ao mesmo número no estoque.
-8. No Telegram, use /menu e abra WhatsApp aquecidos.
-   A compra exige cliente ATIVA e saldo. Adicione saldo pelo PIX existente.
+FLUXO DO ADMINISTRADOR
+1. Conectar WhatsApp > Adicionar WhatsApp.
+2. Dê um nome ao celular e marque Receber códigos.
+3. Conecte a conta pelo QR Code.
+4. Abra WhatsApp aquecidos > Estoque.
+5. Escolha o celular conectado. O número aparece automaticamente.
+6. Escolha 30 dias ou 120 dias; o preço aparece automaticamente.
+7. Cadastre. A sessão, o número, o DDD e o nome do celular são vinculados.
+Somente celulares livres, conectados e com Receber códigos podem ser cadastrados.
 
-SMS / ANDROID
-1. Em WhatsApp aquecidos > Celulares / SMS, crie uma credencial para o celular.
-2. Guarde a credencial exibida uma única vez.
-3. Vincule chip 1 e/ou 2 aos números já cadastrados no estoque.
-4. O projeto Android está em android-sms/. Leia android-sms/LEIA-ME.txt.
-   Esta entrega inclui o código-fonte, não um APK compilado/testado.
-5. Configure no aplicativo o endereço:
-   https://SEU-SERVIDOR/api/whatsapp-aquecidos/sms
-   e a credencial do celular. Autorize SMS e identificação do chip.
-6. Comece com lista de remetentes vazia; o código vai para revisão.
-7. Confira a origem de uma mensagem real e autorize seu remetente exato no painel
-   somente se quiser entrega automática.
-8. Se a leitura SMS não funcionar no Android, use envio manual no app ou painel.
+FLUXO DO CLIENTE
+Telegram > WhatsApp aquecidos > Comprar por DDD ou Comprar aleatório.
+A confirmação confere disponibilidade, conexão, plano e saldo.
+A venda e o débito são gravados juntos, evitando duas vendas do mesmo número.
+O cliente recebe o número, solicita a ativação no WhatsApp dele e aperta
+Solicitar código no Telegram. A espera dura até dez minutos.
+O bot acompanha mensagens novas da conta conectada e vinculada ao pedido.
+A captura só considera mensagem que mencione WhatsApp e um único código de seis dígitos.
 
-WHATSAPP
-- A captura só ocorre para sessão vinculada e habilitada em Receber códigos.
-- Somente mensagens novas, do número conectado, com espera aberta, são consideradas.
-- Mensagens precisam mencionar WhatsApp e conter um único código de seis dígitos.
-- A lista de remetentes confiáveis começa vazia. Comece com revisão manual.
-- Em Recebimento WhatsApp, informe os JIDs exatos dos remetentes verificados.
-- Mensagens internas de verificação podem não estar acessíveis à conexão Baileys;
-  a validação final depende de um código real no celular, sem garantia prévia.
-- Nova ativação no aparelho do comprador pode desconectar a conta no aparelho antigo.
+RECEBIMENTO DOS CODIGOS
+Em Recebimento WhatsApp, a lista de remetentes confiáveis começa vazia.
+Na primeira captura, confira em Pedidos e códigos o remetente e o código.
+Aprove a mensagem para enviar ao comprador.
+Depois de verificar a origem, cadastre o JID exato do remetente para entrega automática.
+Não há entrada manual de códigos nem entrada por SMS nesta versão.
+A captura real depende de a mensagem de ativação estar acessível à conexão.
+Mensagens internas do WhatsApp podem não aparecer no Baileys.
 
-PEDIDOS E SUPORTE
-- Se a espera expirar sem código, o cliente pode abrir outra espera no pedido.
-- Se um código já foi recebido/entregue e não funcionar, encaminhe ao suporte.
-- Entregas com falha aparecem na tela Pedidos e códigos. O worker tenta cinco vezes;
-  o administrador pode tentar novamente pelo painel.
-- Reenviar código só funciona por até dez minutos após recebê-lo.
-- Após cancelar e estornar, o número fica no histórico de venda e não volta ao estoque.
-- O estoque vinculado a uma venda não pode ter número, preço ou situação alterados.
-- Em caso de falha entre envio Telegram e confirmação local, uma retentativa pode
-  reenviar a mesma mensagem. Não há cobrança adicional.
-- O canal previsto no cadastro é informativo. Ambos os canais podem atender uma espera.
+MIGRACAO DA VERSAO ANTERIOR
+- Retirada a integração SMS e o projeto Android.
+- Removidas as rotas e a tela dos celulares/SMS.
+- Credenciais SMS antigas são desativadas na inicialização.
+- Histórico de pedidos e banco existentes são preservados.
+- Códigos SMS antigos ainda em revisão ficam ignorados.
+- Estoque não vendido de 30/120 dias recebe os preços de R$ 40/R$ 90.
+- Cadastros disponíveis de outros planos, sem vínculo ou sem Receber códigos
+  ficam pausados; edite o cadastro escolhendo uma conta e um dos dois planos.
+- Números vendidos não voltam automaticamente ao estoque.
+- Uma conta que se desconectar deixa de ser ofertada no Telegram até reconectar.
 
-VALIDACAO REAL NECESSARIA
-O script passou nos testes locais com SQLite e Telegram simulado. Não foi instalado
-no Render e não foram usadas contas, pagamentos, chips ou celulares reais.
-O aplicativo Android ainda precisa ser compilado e testado no modelo de celular usado.
-Antes de vender, valide um pedido completo: saldo > compra > código > conclusão.
+ATUALIZAR NO RENDER
+Faça backup do banco/disco. Atualize o projeto no repositório e faça o deploy.
+Mantenha as variáveis e o disco persistente existentes.
+Não é necessário instalar aplicativo de SMS ou compilar APK.
+Depois do deploy, teste cadastro e um pedido completo com uma conta sua.
+O deploy e o teste com conta real não foram executados neste ambiente.
 
 TESTES LOCAIS
-Requer Node.js e Python 3 (o Python só é usado no teste, não no servidor):
-  node test/whatsapp-aquecidos.test.js
-Os testes não iniciam o index.js nem conectam serviços externos.
+Requer Node.js e Python 3 apenas para o teste:
+node test/whatsapp-aquecidos.test.js
+Valida cadastro automático, preços, duas opções, conexão, função Receber códigos,
+concorrência, saldo, captura exclusiva WhatsApp, revisão, entrega, estorno e migração.

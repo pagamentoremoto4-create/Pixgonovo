@@ -10682,8 +10682,8 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
-const whatsappAquecidos = require('./whatsapp-aquecidos')({run,get,all,page,safeHtml,brl,extraNav:()=>whatsappAquecidosVendas.nav()});
-const whatsappAquecidosVendas = require('./whatsapp-aquecidos-vendas')({run,get,all,page,safeHtml,brl,getBot:()=>tgBot,cadastrarClienteTelegram,avisarAdmin:avisarAdminTelegram,notificarPainel});
+const whatsappAquecidos = require('./whatsapp-aquecidos')({run,get,all,page,safeHtml,brl,getSessions:()=>Array.from(whatsappSessoes.values()),extraNav:()=>whatsappAquecidosVendas.nav()});
+const whatsappAquecidosVendas = require('./whatsapp-aquecidos-vendas')({run,get,all,page,safeHtml,brl,getBot:()=>tgBot,cadastrarClienteTelegram,avisarAdmin:avisarAdminTelegram,notificarPainel,getSessions:()=>Array.from(whatsappSessoes.values())});
 whatsappAquecidos.routes(app);
 whatsappAquecidosVendas.routes(app);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
