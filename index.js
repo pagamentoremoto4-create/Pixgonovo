@@ -4102,8 +4102,24 @@ function menuTelegramTexto(cliente) {
 
 // Botões no mesmo padrão visual do Telegramesim: cor + Custom Emoji configurável.
 // Quando não houver Custom Emoji configurado, mantém um emoji comum visível no texto.
+// Custom Emojis animados padrão reaproveitados do Telegramesim de referência.
+// Qualquer ícone salvo pelo painel tem prioridade, então o administrador pode trocar depois.
+const TG_DEFAULT_ANIMATED_ICONS = {
+  TG_ICON_ESIM: '6028435952299413210',
+  TG_ICON_SERVICOS: '5774022692642492953',
+  TG_ICON_PREMIUM: '5771449289972650710',
+  TG_ICON_CARTEIRA: '5368324170671202286',
+  TG_ICON_PEDIDOS: '5774022692642492953',
+  TG_ICON_PAGAR: '5368324170671202286',
+  TG_ICON_PIX: '5368324170671202286',
+  TG_ICON_SUPORTE: '5774077015388852135',
+  TG_ICON_WHATSAPP: '5771449289972650710',
+  TG_ICON_ADMIN: '5771449289972650710',
+  TG_ICON_COMPRAR: '5368324170671202286',
+  TG_ICON_VOLTAR: '5774022692642492953'
+};
 function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji='') {
-  const icon = iconKey ? String(tgVisualCache[iconKey] || process.env[iconKey] || '').trim() : '';
+  const icon = iconKey ? String(tgVisualCache[iconKey] || TG_DEFAULT_ANIMATED_ICONS[iconKey] || '').trim() : '';
   const b = { text: icon ? label : `${fallbackEmoji ? fallbackEmoji + ' ' : ''}${label}`, callback_data };
   if (['primary','success','danger'].includes(style)) b.style = style;
   if (icon) b.icon_custom_emoji_id = icon;
