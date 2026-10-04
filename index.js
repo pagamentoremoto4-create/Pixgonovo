@@ -4087,7 +4087,31 @@ function montarLinhasBotoes(items, prefixo, nomeCampo='nome') {
   linhas.push([tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR', '⬅️')]);
   return linhas;
 }
-async function enviarServicosBotoesTelegram(chatId, cliente) {
+async function atualizarCardTelegram(chatId, message, texto, inline_keyboard) {
+  const opts = { parse_mode:'Markdown', reply_markup:{ inline_keyboard } };
+  // Quando o clique veio de um card com foto/GIF/vídeo, preserva a mídia e troca
+  // somente legenda + botões. Isso dá o efeito de uma única tela viva, como no Telegramesim.
+  if (message && (message.photo || message.animation || message.video || message.document) && message.message_id) {
+    try {
+      await tgBot.editMessageCaption(texto, { chat_id:chatId, message_id:message.message_id, ...opts });
+      return true;
+    } catch (e) { console.log('⚠️ edit caption:', e.message); }
+  }
+  if (message && message.message_id) {
+    try {
+      await tgBot.editMessageText(texto, { chat_id:chatId, message_id:message.message_id, ...opts });
+      return true;
+    } catch (e) { console.log('⚠️ edit text:', e.message); }
+  }
+  await tgBot.sendMessage(chatId, texto, opts);
+  return false;
+}
+async function voltarHomeNoMesmoCard(chatId, cliente, message) {
+  const texto = menuTelegramTexto(cliente);
+  const kb = tecladoTelegramMenu(cliente).reply_markup.inline_keyboard;
+  return atualizarCardTelegram(chatId, message, texto, kb);
+}
+async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
   const servicos = await all("SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'PREMIUM' ORDER BY id ASC");
   if (!servicos.length) {
     await tgBot.sendMessage(chatId, '❌ Nenhum serviço cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
@@ -4099,12 +4123,9 @@ async function enviarServicosBotoesTelegram(chatId, cliente) {
     texto += `• ${s.nome} — ${brl(preco)}
 `;
   }
-  await tgBot.sendMessage(chatId, texto, {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: montarLinhasBotoes(servicos, 'servico', 'nome') }
-  });
+  await atualizarCardTelegram(chatId, message, texto.trim(), montarLinhasBotoes(servicos, 'servico', 'nome'));
 }
-async function enviarEsimBotoesTelegram(chatId) {
+async function enviarEsimBotoesTelegram(chatId, message=null) {
   const clienteEsim = await get('SELECT * FROM revendas WHERE telegram_id=? AND status="ATIVA"', [String(chatId)]);
   const planos = await planosEsimDisponiveis(clienteEsim?.id || null);
   if (!planos.length) {
@@ -4122,10 +4143,7 @@ ${entrega}
 
 `;
   }
-  await tgBot.sendMessage(chatId, texto.trim(), {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: montarLinhasBotoes(planos, 'esim', 'nome_plano') }
-  });
+  await atualizarCardTelegram(chatId, message, texto.trim(), montarLinhasBotoes(planos, 'esim', 'nome_plano'));
 }
 function normalizarOpcaoTelegram(texto) {
   const t = String(texto || '').trim().toLowerCase().replace(/^menu_/, '');
@@ -6276,15 +6294,15 @@ Digite /menu para solicitar serviços pelo Telegram.`);
 
         if (data === 'menu_voltar') {
           await apagarSessaoPedido(from);
-          return enviarMenuTelegram(chatId, cliente);
+          return voltarHomeNoMesmoCard(chatId, cliente, q.message);
         }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });
-          return enviarServicosBotoesTelegram(chatId, cliente);
+          return enviarServicosBotoesTelegram(chatId, cliente, q.message);
         }
         if (data === 'menu_esim') {
           pedidoSessao.set(from, { etapa: 'esim_escolha' });
-          return enviarEsimBotoesTelegram(chatId);
+          return enviarEsimBotoesTelegram(chatId, q.message);
         }
         if (data === 'menu_historico') {
           pedidoSessao.delete(from);
