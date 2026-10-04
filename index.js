@@ -6661,7 +6661,11 @@ Digite /menu para solicitar serviços pelo Telegram.`);
     try {
       const chatId = q.message?.chat?.id;
       const data = String(q.data || '');
-      if (!chatId) return;
+      console.log(`🔎 V4940 TG CALLBACK RECEBIDO: data=${data || '(vazio)'} chat=${chatId || '(sem chat)'} from=${q.from?.id || '(sem from)'}`);
+      if (!chatId) {
+        console.log(`⚠️ V4940 CALLBACK SEM CHAT: data=${data || '(vazio)'}`);
+        return;
+      }
       const ehBotaoAdmin = data.startsWith('admin_') || data.startsWith('adm');
       if (ehBotaoAdmin) {
         if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
@@ -6782,7 +6786,9 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         const esimOpMatch=data.match(/^esim_op_(\d+)$/);
         if(esimOpMatch){
+          console.log(`📡 V4940 ROTA OPERADORA: callback=${data} operadora_id=${esimOpMatch[1]} chat=${chatId}`);
           const operadora=await get('SELECT * FROM telegram_esim_operadoras WHERE id=? AND ativo=1',[Number(esimOpMatch[1])]);
+          console.log(`📡 V4940 OPERADORA DB: ${operadora ? `${operadora.id}/${operadora.nome}/${operadora.slug}` : 'NÃO ENCONTRADA/INATIVA'}`);
           if(!operadora)return atualizarCardTelegram(chatId,q.message,'❌ Operadora indisponível.',[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
           await salvarSessaoPedido(from,{etapa:'esim_operadora',operadora_id:operadora.id});
           return enviarPlanosOperadoraTelegram(chatId,cliente,operadora,q.message);
@@ -7071,7 +7077,7 @@ Exemplo:
 💰 Estorno: ${brl(r.valor)}` : ''}` : `❌ ${r.erro || 'Erro ao cancelar.'}`);
       }
     } catch (e) {
-      console.log('❌ CALLBACK TG:', e);
+      console.log('❌ V4940 CALLBACK TG:', e?.stack || e);
       try { await tgBot.answerCallbackQuery(q.id, { text: 'Erro interno.' }); } catch (_) {}
     }
   });
