@@ -4247,7 +4247,14 @@ async function atualizarCardTelegram(chatId, message, texto, inline_keyboard) {
 }
 async function voltarHomeNoMesmoCard(chatId, cliente, message) {
   const texto = menuTelegramTexto(cliente);
-  const kb = tecladoTelegramMenu(cliente).reply_markup.inline_keyboard;
+  // tecladoTelegramMenu e async: aguardar o resultado antes de acessar reply_markup.
+  // O fallback evita derrubar o processo caso o teclado nao possa ser montado.
+  const menuOpts = await tecladoTelegramMenu(cliente);
+  const kb = menuOpts?.reply_markup?.inline_keyboard;
+  if (!Array.isArray(kb)) {
+    console.log('⚠️ VOLTAR HOME: teclado principal indisponível; abrindo menu por nova mensagem.');
+    return enviarMenuTelegram(chatId, cliente);
+  }
   return atualizarCardTelegram(chatId, message, texto, kb);
 }
 async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
