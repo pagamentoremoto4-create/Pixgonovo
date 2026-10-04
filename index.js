@@ -4431,62 +4431,20 @@ async function enviarEsimBotoesTelegram(chatId, message=null) {
   return enviarCardVisual(chatId,message,'cat_esim','📱 *COMPRA ESIM*\n\nEscolha a operadora:',kb);
 }
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
-  // V4.9.3.7 — vínculo manual é a fonte de verdade da operadora.
-  // Busca o estoque diretamente pelo nome vinculado, sem passar pela listagem global de planos.
-  const rows=await all(`
-    SELECT
-      TRIM(e.nome_plano) AS nome_plano,
-      COUNT(*) AS qtd,
-      MAX(COALESCE(e.preco_revenda,0)) AS estoque_preco_revenda,
-      MAX(COALESCE(e.preco_cliente,0)) AS estoque_preco_cliente,
-      (
-        SELECT p.id FROM esim_planos p
-        WHERE TRIM(UPPER(p.nome_plano))=TRIM(UPPER(e.nome_plano))
-        ORDER BY p.ativo DESC,p.id ASC LIMIT 1
-      ) AS plano_id
-    FROM esim_estoque e
-    INNER JOIN telegram_esim_operadora_planos l
-      ON l.operadora_id=?
-     AND TRIM(UPPER(l.nome_plano))=TRIM(UPPER(e.nome_plano))
-    WHERE e.status='DISPONIVEL'
-      AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>''
-    GROUP BY TRIM(UPPER(e.nome_plano))
-    ORDER BY nome_plano COLLATE NOCASE
-  `,[operadora.id]);
-
-  const planos=[];
-  for(const r of rows){
-    let planoId=Number(r.plano_id||0);
-    // Compatibilidade: se um nome existe no estoque mas nunca teve cadastro no catálogo,
-    // cria somente o registro de catálogo necessário aos callbacks. O estoque não é alterado.
-    if(!planoId){
-      const ins=await run(`INSERT INTO esim_planos
-        (nome_plano,preco_revenda,preco_cliente,ativo)
-        VALUES (?,?,?,1)`,[
-          String(r.nome_plano),
-          Number(r.estoque_preco_revenda||0),
-          Number(r.estoque_preco_cliente||r.estoque_preco_revenda||0)
-        ]);
-      planoId=Number(ins.lastID||0);
-    }
-    const cat=await get(`SELECT id,preco_revenda,preco_cliente FROM esim_planos WHERE id=?`,[planoId]);
-    const p={
-      id:planoId,
-      nome_plano:String(r.nome_plano),
-      preco_revenda:Number(cat?.preco_revenda ?? r.estoque_preco_revenda ?? 0),
-      preco_cliente:Number(cat?.preco_cliente ?? r.estoque_preco_cliente ?? 0),
-      qtd:Number(r.qtd||0)
-    };
-    if(cliente?.id) p.preco_revenda=await precoEsimDaRevenda(cliente.id,p.id);
-    planos.push(p);
-  }
-
-  console.log(`📦 V4937 ${String(operadora?.nome||'OPERADORA').toUpperCase()}: ${planos.length} plano(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) encontrados diretamente no vínculo manual.`);
-  if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano vinculado com estoque disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
-  let texto=`📱 *${String(operadora.nome).toUpperCase()}*\n\nEscolha o plano:\n\n`;
-  for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${qtd} eSIM${qtd===1?'':'s'} disponível${qtd===1?'':'is'}\n\n`;}
-  const kb=montarLinhasBotoes(planos,'esim','nome_plano');
-  kb[kb.length-1]=[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')];
+  // V4.9.3.8 — usa exatamente a lógica de listagem da V4.9.2.6 que funcionou,
+  // mantendo a tabela/visual de operadoras da versão atual.
+  const rows=await all(`SELECT p.id,p.nome_plano,p.preco_revenda,p.preco_cliente,COUNT(e.id) qtd
+    FROM telegram_esim_operadora_planos l
+    JOIN esim_planos p ON p.nome_plano=l.nome_plano AND p.ativo=1
+    JOIN esim_estoque e ON e.nome_plano=l.nome_plano AND e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>''
+    WHERE l.operadora_id=? GROUP BY p.id,p.nome_plano,p.preco_revenda,p.preco_cliente ORDER BY p.nome_plano`,[operadora.id]);
+  for(const p of rows)if(cliente?.id)p.preco_revenda=await precoEsimDaRevenda(cliente.id,p.id);
+  console.log(`📦 V4938 ${String(operadora?.nome||'OPERADORA').toUpperCase()}: ${rows.length} plano(s) pela lógica funcional V4.9.2.6.`);
+  if(!rows.length)return atualizarCardTelegram(chatId,message,`📱 *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano vinculado com estoque disponível.`,[[tgBtn('Operadoras','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+  let texto=`📱 *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nEscolha o plano:\n\n`;
+  for(const p of rows)texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${Number(p.qtd||0)} QR disponível${Number(p.qtd||0)===1?'':'s'}\n\n`;
+  const kb=montarLinhasBotoes(rows,'esim','nome_plano');
+  kb[kb.length-1]=[tgBtn('Operadoras','menu_esim','danger','TG_ICON_VOLTAR','⬅️')];
   return atualizarCardTelegram(chatId,message,texto.trim(),kb);
 }
 
