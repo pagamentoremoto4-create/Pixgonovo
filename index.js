@@ -6760,7 +6760,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('homecat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+|qty_(?:minus|plus)_\d+|pay_(?:saldo|pix)_\d+|manual_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('homecat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || data.startsWith('esim_op_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+|qty_(?:minus|plus)_\d+|pay_(?:saldo|pix)_\d+|manual_\d+)$/.test(data);
       if (ehBotaoCliente) {
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -6786,9 +6786,9 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         const esimOpMatch=data.match(/^esim_op_(\d+)$/);
         if(esimOpMatch){
-          console.log(`📡 V4940 ROTA OPERADORA: callback=${data} operadora_id=${esimOpMatch[1]} chat=${chatId}`);
+          console.log(`📡 V4941 ROTA OPERADORA: callback=${data} operadora_id=${esimOpMatch[1]} chat=${chatId}`);
           const operadora=await get('SELECT * FROM telegram_esim_operadoras WHERE id=? AND ativo=1',[Number(esimOpMatch[1])]);
-          console.log(`📡 V4940 OPERADORA DB: ${operadora ? `${operadora.id}/${operadora.nome}/${operadora.slug}` : 'NÃO ENCONTRADA/INATIVA'}`);
+          console.log(`📡 V4941 OPERADORA DB: ${operadora ? `${operadora.id}/${operadora.nome}/${operadora.slug}` : 'NÃO ENCONTRADA/INATIVA'}`);
           if(!operadora)return atualizarCardTelegram(chatId,q.message,'❌ Operadora indisponível.',[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
           await salvarSessaoPedido(from,{etapa:'esim_operadora',operadora_id:operadora.id});
           return enviarPlanosOperadoraTelegram(chatId,cliente,operadora,q.message);
