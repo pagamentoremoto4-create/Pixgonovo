@@ -4038,35 +4038,55 @@ ${linhaFinanceira}
 
 ⚡ Escolha uma opção para continuar:`;
 }
+// Layout Telegram premium inspirado no Telegramesim.
+// Bot API moderna aceita `style` e `icon_custom_emoji_id`; se um cliente antigo
+// ignorar esses campos, o botão continua funcionando normalmente.
+function tgBtn(text, callback_data, style='primary', iconKey='') {
+  const b = { text, callback_data };
+  if (['primary','success','danger'].includes(style)) b.style = style;
+  const icon = iconKey ? String(process.env[iconKey] || '').trim() : '';
+  if (icon) b.icon_custom_emoji_id = icon;
+  return b;
+}
 function tecladoTelegramMenu() {
   return {
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '📱 COMPRA eSIM', callback_data: 'menu_esim' }],
-        [{ text: '🔓 SERVIÇOS', callback_data: 'menu_servicos' }, { text: '⭐ PREMIUM', callback_data: 'menu_premium' }],
-        [{ text: '💰 CONTA / SALDO', callback_data: 'menu_conta' }, { text: '📦 MEUS PEDIDOS', callback_data: 'menu_historico' }],
-        [{ text: '💳 PAGAR / ADICIONAR SALDO', callback_data: 'menu_pagar' }],
-        [{ text: '🧾 CADASTRAR PIX', callback_data: 'menu_cadastrar_pix' }, { text: '🆘 SUPORTE', callback_data: 'menu_suporte' }],
-        [{ text: '🔗 VINCULAR WHATSAPP', callback_data: 'menu_vincular_whatsapp' }]
+        [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM')],
+        [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS'), tgBtn('PREMIUM', 'menu_premium', 'primary', 'TG_ICON_PREMIUM')],
+        [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS')],
+        [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR')],
+        [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE')],
+        [tgBtn('VINCULAR WHATSAPP', 'menu_vincular_whatsapp', 'primary', 'TG_ICON_WHATSAPP')]
       ]
     }
   };
 }
 async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
-  await tgBot.sendMessage(chatId, menuTelegramTexto(cliente), tecladoTelegramMenu());
+  const texto = menuTelegramTexto(cliente);
+  const animacao = String(process.env.TELEGRAM_HOME_ANIMATION || '').trim();
+  const banner = String(process.env.TELEGRAM_HOME_BANNER || '').trim();
+  if (animacao) {
+    try { await tgBot.sendAnimation(chatId, animacao, { caption: texto, ...tecladoTelegramMenu() }); return; }
+    catch (e) { console.log('⚠️ HOME animation:', e.message); }
+  }
+  if (banner) {
+    try { await tgBot.sendPhoto(chatId, banner, { caption: texto, ...tecladoTelegramMenu() }); return; }
+    catch (e) { console.log('⚠️ HOME banner:', e.message); }
+  }
+  await tgBot.sendMessage(chatId, texto, tecladoTelegramMenu());
 }
 function montarLinhasBotoes(items, prefixo, nomeCampo='nome') {
   const linhas = [];
   for (let i = 0; i < items.length; i += 2) {
     const linha = items.slice(i, i + 2).map(item => ({
-      text: String(item[nomeCampo] || item.nome_plano || item.nome || 'Opção').slice(0, 45),
-      callback_data: `${prefixo}_${item.id}`
+      ...tgBtn(String(item[nomeCampo] || item.nome_plano || item.nome || 'Opção').slice(0, 45), `${prefixo}_${item.id}`, 'primary', prefixo === 'esim' ? 'TG_ICON_ESIM' : 'TG_ICON_SERVICOS')
     }));
     linhas.push(linha);
   }
-  linhas.push([{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]);
+  linhas.push([tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR')]);
   return linhas;
 }
 async function enviarServicosBotoesTelegram(chatId, cliente) {
@@ -6248,7 +6268,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
       if (ehBotaoCliente) {
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -6322,9 +6342,9 @@ pagar 50
 
 Ou escolha um valor:`, {
             reply_markup: { inline_keyboard: [
-              [{ text: 'R$ 20', callback_data: 'pagar_20' }, { text: 'R$ 50', callback_data: 'pagar_50' }],
-              [{ text: 'R$ 100', callback_data: 'pagar_100' }, { text: 'Outro valor', callback_data: 'pagar_outro' }],
-              [{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]
+              [tgBtn('R$ 20', 'pagar_20', 'success', 'TG_ICON_PAGAR'), tgBtn('R$ 50', 'pagar_50', 'success', 'TG_ICON_PAGAR')],
+              [tgBtn('R$ 100', 'pagar_100', 'success', 'TG_ICON_PAGAR'), tgBtn('Outro valor', 'pagar_outro', 'primary', 'TG_ICON_PAGAR')],
+              [tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR')]
             ] }
           });
         }
@@ -6344,6 +6364,18 @@ Envie este código para o WhatsApp da CentralUnlocker:
 ⏳ O código é válido por 10 minutos.
 
 O número que enviar o código será vinculado automaticamente à sua conta do Telegram.`, { parse_mode: 'Markdown' });
+        }
+        if (data === 'gateway_pixgo' || data === 'gateway_mercadopago') {
+          const sess = await carregarSessaoPedido(from);
+          if (!sess || sess.etapa !== 'aguardando_gateway_pix') return tgBot.sendMessage(chatId, '⌛ Esta cobrança expirou. Gere um novo PIX.');
+          const gateway = data === 'gateway_pixgo' ? 'pixgo' : 'mercadopago';
+          const cfgGate = await gatewaysPagamentoAtivos();
+          if (!cfgGate.lista.includes(gateway)) return tgBot.sendMessage(chatId, '⚠️ Esta forma de pagamento está desativada.');
+          if (gateway === 'mercadopago') return finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => tgBot.sendMessage(chatId, m));
+          const doc = await documentoPixCliente(cliente);
+          if (doc) return finalizarGeracaoPix(from, { ...sess, gateway:'pixgo', documento_pix:doc }, cliente, async (m) => tgBot.sendMessage(chatId, m));
+          await salvarSessaoPedido(from, { ...sess, etapa:'aguardando_cpf_pix', gateway:'pixgo' });
+          return tgBot.sendMessage(chatId, '📄 Informe o CPF ou CNPJ do pagador para usar PixGo.\n\nEnvie somente os números.');
         }
         if (data === 'pagar_outro') {
           await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
@@ -6396,7 +6428,7 @@ Exemplo:
           return tgBot.sendMessage(chatId,`📍 ESCOLHA O DDD DO SEU eSIM
 
 📱 ${plano.nome_plano}
-💰 Valor: ${brl(plano.preco_revenda)}`,{reply_markup:{inline_keyboard:[...ddds.map(r=>[{text:`📍 DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`,callback_data:`esim_ddd_${plano.id}_${r.ddd}`}]),[{text:'⬅️ Voltar',callback_data:'menu_esim'}]]}});
+💰 Valor: ${brl(plano.preco_revenda)}`,{reply_markup:{inline_keyboard:[...ddds.map(r=>[tgBtn(`DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`,`esim_ddd_${plano.id}_${r.ddd}`,'primary','TG_ICON_ESIM')]),[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR')]]}});
         }
         const confMatch = data.match(/^esim_confirmar_(\d+)$/);
         if (confMatch) {
@@ -7663,7 +7695,16 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
   }
   if (cfg.lista.length > 1) {
     await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_gateway_pix' });
-    await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+    if (String(chave).startsWith('tg:')) {
+      const chatId = String(chave).slice(3);
+      await tgBot.sendMessage(chatId, '💳 *Escolha a forma de pagamento:*', { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[
+        [tgBtn('PixGo', 'gateway_pixgo', 'primary', 'TG_ICON_PIX')],
+        [tgBtn('Mercado Pago', 'gateway_mercadopago', 'success', 'TG_ICON_PAGAR')],
+        [tgBtn('Cancelar', 'saldo_cancelar', 'danger', 'TG_ICON_VOLTAR')]
+      ]}});
+    } else {
+      await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+    }
     return false;
   }
   const gateway = cfg.lista[0];
