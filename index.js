@@ -4112,7 +4112,8 @@ function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji=
 function tecladoTelegramMenu(cliente) {
   const linhas = [
     [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM', '📲')],
-    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️'), tgBtn('ASSINATURA PREMIUM', 'menu_assinatura_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
+    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️')],
+    [tgBtn('ASSINATURA PREMIUM', 'menu_assinatura_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
     [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')],
     [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')],
     [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')],
