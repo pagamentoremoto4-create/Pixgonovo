@@ -4247,8 +4247,22 @@ async function atualizarCardTelegram(chatId, message, texto, inline_keyboard) {
 }
 async function voltarHomeNoMesmoCard(chatId, cliente, message) {
   const texto = menuTelegramTexto(cliente);
-  const kb = tecladoTelegramMenu(cliente).reply_markup.inline_keyboard;
-  return atualizarCardTelegram(chatId, message, texto, kb);
+  try {
+    const menuOpts = await tecladoTelegramMenu(cliente);
+    const kb = menuOpts?.reply_markup?.inline_keyboard;
+    if (!Array.isArray(kb)) {
+      console.log('⚠️ HOME TELEGRAM: teclado sem inline_keyboard; usando menu completo.');
+      return enviarMenuTelegram(chatId, cliente);
+    }
+    return await atualizarCardTelegram(chatId, message, texto, kb);
+  } catch (e) {
+    console.error('❌ VOLTAR HOME TELEGRAM:', e?.stack || e?.message || e);
+    try { return await enviarMenuTelegram(chatId, cliente); }
+    catch (fallbackErr) {
+      console.error('❌ FALLBACK HOME TELEGRAM:', fallbackErr?.stack || fallbackErr?.message || fallbackErr);
+      return false;
+    }
+  }
 }
 async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
   const servicos = await all("SELECT * FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'PREMIUM' ORDER BY id ASC");
@@ -6487,7 +6501,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
 
         if (data === 'menu_voltar') {
           await apagarSessaoPedido(from);
-          return voltarHomeNoMesmoCard(chatId, cliente, q.message);
+          return await voltarHomeNoMesmoCard(chatId, cliente, q.message);
         }
         if(data.startsWith('homecat_custom_')){
           return atualizarCardTelegram(chatId,q.message,'📂 *CATEGORIA*\n\nNenhum produto foi vinculado a esta categoria ainda.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
