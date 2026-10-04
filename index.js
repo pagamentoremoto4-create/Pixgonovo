@@ -2084,6 +2084,18 @@ async function initDB() {
     FROM esim_estoque
     WHERE nome_plano IS NOT NULL AND TRIM(nome_plano) != ''`);
 
+  // V4.9.2.9 — migração dos planos antigos para as operadoras.
+  // O catálogo vindo do estoque é criado acima; por isso o vínculo precisa rodar depois dele.
+  await run(`UPDATE esim_planos SET operadora_slug='tim' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND UPPER(nome_plano) LIKE '%TIM%'`);
+  await run(`UPDATE esim_planos SET operadora_slug='claro' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND UPPER(nome_plano) LIKE '%CLARO%'`);
+  await run(`UPDATE esim_planos SET operadora_slug='vivo' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND UPPER(nome_plano) LIKE '%VIVO%'`);
+  // Compatibilidade com a base já existente: antes desta tela os planos do cliente eram TIM
+  // e não possuíam operadora_slug. Fazemos esta associação somente uma vez.
+  if(await getConfig('v4929_migracao_planos_antigos_operadora','0')!=='1'){
+    await run(`UPDATE esim_planos SET operadora_slug='tim' WHERE operadora_slug IS NULL OR TRIM(operadora_slug)=''`);
+    await setConfig('v4929_migracao_planos_antigos_operadora','1');
+  }
+
   await run(`CREATE TABLE IF NOT EXISTS destinatarios_avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
