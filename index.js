@@ -4271,44 +4271,25 @@ async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
   }
   await enviarCardVisual(chatId, message, 'cat_servicos', texto.trim(), montarLinhasBotoes(servicos, 'servico', 'nome'));
 }
-// V4.9.2.5 — Operadoras apenas como camada visual. O estoque/DDD continua 100% legado.
 async function enviarEsimBotoesTelegram(chatId, message=null) {
-  const planos = await planosEsimDisponiveis(null);
+  const clienteEsim = await get('SELECT * FROM revendas WHERE telegram_id=? AND status="ATIVA"', [String(chatId)]);
+  const planos = await planosEsimDisponiveis(clienteEsim?.id || null);
   if (!planos.length) {
-    return atualizarCardTelegram(chatId, message, '❌ *Nenhum plano eSIM disponível no momento.*', [[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
+    await tgBot.sendMessage(chatId, '❌ Nenhum plano eSIM cadastrado no momento.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
+    return;
   }
-  const kb = [
-    [tgBtn('TIM','esim_operadora_tim','primary','TG_ICON_ESIM','📱'), tgBtn('CLARO','esim_operadora_claro','primary','TG_ICON_ESIM','📱')],
-    [tgBtn('VIVO','esim_operadora_vivo','primary','TG_ICON_ESIM','📱')],
-    [tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]
-  ];
-  return atualizarCardTelegram(chatId, message, '📱 *COMPRA eSIM*\n\nEscolha a operadora:', kb);
-}
+  let texto = `📱 *Escolha um plano eSIM*
 
-function detectarOperadoraPlanoLegado(plano) {
-  const t = `${plano?.nome_plano || ''} ${plano?.categoria || ''}`.toUpperCase();
-  if (/\bCLARO\b/.test(t)) return 'claro';
-  if (/\bVIVO\b/.test(t)) return 'vivo';
-  if (/\bTIM\b/.test(t)) return 'tim';
-  return 'tim'; // compatibilidade: planos antigos sem operadora continuam visíveis em TIM
-}
+`;
+  for (const p of planos) {
+    const qtd = Number(p.qtd || 0);
+    const entrega = qtd > 0 ? `📦 ${qtd} QR disponível${qtd > 1 ? 's' : ''}` : '👨‍💻 Entrega manual';
+    texto += `• ${p.nome_plano} — ${brl(p.preco_revenda)}
+${entrega}
 
-async function enviarPlanosOperadoraLegadoTelegram(chatId, cliente, operadora, message=null) {
-  const todos = await planosEsimDisponiveis(cliente?.id || null);
-  const ids = todos.map(x => Number(x.id)).filter(Boolean);
-  if (!ids.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhum plano eSIM disponível no momento.*',[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
-  const marks = ids.map(()=>'?').join(',');
-  const metas = await all(`SELECT id,nome_plano,COALESCE(categoria,'') categoria FROM esim_planos WHERE id IN (${marks})`, ids);
-  const meta = new Map(metas.map(x => [Number(x.id), x]));
-  const planos = todos.filter(p => detectarOperadoraPlanoLegado(meta.get(Number(p.id)) || p) === operadora);
-  const nome = operadora.toUpperCase();
-  console.log(`📦 V4925 ${nome}: ${planos.length}/${todos.length} plano(s) do catálogo legado`);
-  if (!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${nome}*\n\nNenhum plano disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
-  let texto = `📱 *${nome}*\n\nEscolha o plano:\n\n`;
-  for (const p of planos) texto += `• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${Number(p.qtd||0)} QR disponível${Number(p.qtd||0)===1?'':'s'}\n\n`;
-  const kb = montarLinhasBotoes(planos, 'esim', 'nome_plano');
-  kb[kb.length-1] = [tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')];
-  return atualizarCardTelegram(chatId,message,texto.trim(),kb);
+`;
+  }
+  await enviarCardVisual(chatId, message, 'cat_esim', texto.trim(), montarLinhasBotoes(planos, 'esim', 'nome_plano'));
 }
 function normalizarOpcaoTelegram(texto) {
   const t = String(texto || '').trim().toLowerCase().replace(/^menu_/, '');
@@ -6527,11 +6508,6 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           pedidoSessao.set(from, { etapa: 'esim_escolha' });
           return enviarEsimBotoesTelegram(chatId, q.message);
         }
-        if (data === 'esim_operadora_tim' || data === 'esim_operadora_claro' || data === 'esim_operadora_vivo') {
-          const operadora = data.replace('esim_operadora_','');
-          pedidoSessao.set(from, { etapa: 'esim_escolha', operadora });
-          return enviarPlanosOperadoraLegadoTelegram(chatId, cliente, operadora, q.message);
-        }
         if (data === 'menu_historico') {
           pedidoSessao.delete(from);
           return enviarHistoricoRevenda(from, cliente);
@@ -7149,7 +7125,8 @@ async function planosEsimDisponiveis(revendaId=null) {
       COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
     FROM esim_planos p
     LEFT JOIN esim_estoque e
-      ON TRIM(e.nome_plano) = TRIM(p.nome_plano) COLLATE NOCASE
+      ON e.nome_plano = p.nome_plano
+     AND e.preco_revenda = p.preco_revenda
     WHERE p.ativo=1
     GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente
     ORDER BY p.nome_plano ASC
