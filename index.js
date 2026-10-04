@@ -2554,7 +2554,12 @@ async function initDB() {
   // Executa uma única vez: depois disso o administrador continua livre para apagar/desativar/adicionar itens.
   if(await getConfig('v4930_ops_iniciais_tim_claro_vivo','0')!=='1'){
     for(const o of esimOpsPadrao){
-      await run(`INSERT OR IGNORE INTO telegram_esim_operadoras(slug,nome,termo_busca,icon_key,fallback_emoji,estilo,ativo,sistema,ordem) VALUES(?,?,?,?,?,?,1,1,?)`,o);
+      // esimOpsPadrao possui 8 campos porque também é usado no INSERT inicial.
+      // Aqui ativo e sistema são constantes (1,1), então a query possui apenas 7 placeholders.
+      // Passar o array inteiro causava SQLITE_RANGE: column index out of range no boot.
+      const [slug,nome,termoBusca,iconKey,fallbackEmoji,estilo,_sistema,ordem] = o;
+      await run(`INSERT OR IGNORE INTO telegram_esim_operadoras(slug,nome,termo_busca,icon_key,fallback_emoji,estilo,ativo,sistema,ordem) VALUES(?,?,?,?,?,?,1,1,?)`,
+        [slug,nome,termoBusca,iconKey,fallbackEmoji,estilo,ordem]);
     }
     await run(`UPDATE telegram_esim_operadoras SET ativo=1,sistema=1 WHERE slug IN ('tim','claro','vivo')`);
     await setConfig('v4930_ops_iniciais_tim_claro_vivo','1');
