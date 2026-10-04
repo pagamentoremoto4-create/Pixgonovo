@@ -2072,11 +2072,6 @@ async function initDB() {
   await addColumnIfMissing('esim_planos', 'descricao', 'TEXT');
   await addColumnIfMissing('esim_planos', 'imagem', 'TEXT');
   await addColumnIfMissing('esim_planos', 'categoria', "TEXT DEFAULT 'eSIM'");
-  await addColumnIfMissing('esim_planos', 'operadora_slug', "TEXT DEFAULT ''");
-  // Classifica apenas quando a própria identificação do plano deixa a operadora clara.
-  await run(`UPDATE esim_planos SET operadora_slug='tim' WHERE COALESCE(operadora_slug,'')='' AND (UPPER(nome_plano) LIKE '%TIM%' OR UPPER(COALESCE(categoria,'')) LIKE '%TIM%')`);
-  await run(`UPDATE esim_planos SET operadora_slug='claro' WHERE COALESCE(operadora_slug,'')='' AND (UPPER(nome_plano) LIKE '%CLARO%' OR UPPER(COALESCE(categoria,'')) LIKE '%CLARO%')`);
-  await run(`UPDATE esim_planos SET operadora_slug='vivo' WHERE COALESCE(operadora_slug,'')='' AND (UPPER(nome_plano) LIKE '%VIVO%' OR UPPER(COALESCE(categoria,'')) LIKE '%VIVO%')`);
 
   // Migra os planos já existentes no estoque para o catálogo.
   await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
@@ -4276,48 +4271,44 @@ async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
   }
   await enviarCardVisual(chatId, message, 'cat_servicos', texto.trim(), montarLinhasBotoes(servicos, 'servico', 'nome'));
 }
-// V4.9.2.4 — mantém o fluxo eSIM funcional da V4.9.2.3 e adiciona somente a camada de operadoras.
-function operadoraDoPlanoEsim(plano) {
-  const nome = String(plano?.nome_plano || '').toUpperCase();
-  const categoria = String(plano?.categoria || '').toUpperCase();
-  const slugSalvo = String(plano?.operadora_slug || '').trim().toLowerCase();
-  if (nome.includes('CLARO') || categoria.includes('CLARO')) return 'claro';
-  if (nome.includes('VIVO') || categoria.includes('VIVO')) return 'vivo';
-  if (nome.includes('TIM') || categoria.includes('TIM')) return 'tim';
-  return slugSalvo;
-}
+// V4.9.2.5 — Operadoras apenas como camada visual. O estoque/DDD continua 100% legado.
 async function enviarEsimBotoesTelegram(chatId, message=null) {
-  // A entrada de COMPRA eSIM não consulta estoque: TIM/CLARO/VIVO aparecem sempre.
-  return atualizarCardTelegram(chatId, message, `📱 *COMPRA eSIM*
-
-Escolha a operadora:`, [
-    [tgBtn('TIM','esim_operadora_tim','primary','TG_ICON_TIM','📱'), tgBtn('CLARO','esim_operadora_claro','primary','TG_ICON_CLARO','📱')],
-    [tgBtn('VIVO','esim_operadora_vivo','primary','TG_ICON_VIVO','📱')],
-    [tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]
-  ]);
-}
-async function enviarPlanosOperadoraTelegram(chatId, cliente, slug, message=null) {
-  const nomes={tim:'TIM',claro:'CLARO',vivo:'VIVO'};
-  if(!nomes[slug]) return enviarEsimBotoesTelegram(chatId,message);
-  const todos=await planosEsimDisponiveis(cliente?.id||null);
-  const planos=todos.filter(p=>operadoraDoPlanoEsim(p)===slug);
-  if(!planos.length){
-    return atualizarCardTelegram(chatId,message,`⚠️ *${nomes[slug]}*
-
-Nenhum plano disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+  const planos = await planosEsimDisponiveis(null);
+  if (!planos.length) {
+    return atualizarCardTelegram(chatId, message, '❌ *Nenhum plano eSIM disponível no momento.*', [[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
   }
-  let texto=`📱 *${nomes[slug]}*
+  const kb = [
+    [tgBtn('TIM','esim_operadora_tim','primary','TG_ICON_ESIM','📱'), tgBtn('CLARO','esim_operadora_claro','primary','TG_ICON_ESIM','📱')],
+    [tgBtn('VIVO','esim_operadora_vivo','primary','TG_ICON_ESIM','📱')],
+    [tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]
+  ];
+  return atualizarCardTelegram(chatId, message, '📱 *COMPRA eSIM*\n\nEscolha a operadora:', kb);
+}
 
-Escolha o plano:
+function detectarOperadoraPlanoLegado(plano) {
+  const t = `${plano?.nome_plano || ''} ${plano?.categoria || ''}`.toUpperCase();
+  if (/\bCLARO\b/.test(t)) return 'claro';
+  if (/\bVIVO\b/.test(t)) return 'vivo';
+  if (/\bTIM\b/.test(t)) return 'tim';
+  return 'tim'; // compatibilidade: planos antigos sem operadora continuam visíveis em TIM
+}
 
-`;
-  for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}
-📦 ${qtd} QR disponível${qtd===1?'':'s'}
-
-`;}
-  const kb=montarLinhasBotoes(planos,'esim','nome_plano');
-  kb[kb.length-1]=[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')];
-  return enviarCardVisual(chatId,message,'cat_esim',texto.trim(),kb);
+async function enviarPlanosOperadoraLegadoTelegram(chatId, cliente, operadora, message=null) {
+  const todos = await planosEsimDisponiveis(cliente?.id || null);
+  const ids = todos.map(x => Number(x.id)).filter(Boolean);
+  if (!ids.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhum plano eSIM disponível no momento.*',[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+  const marks = ids.map(()=>'?').join(',');
+  const metas = await all(`SELECT id,nome_plano,COALESCE(categoria,'') categoria FROM esim_planos WHERE id IN (${marks})`, ids);
+  const meta = new Map(metas.map(x => [Number(x.id), x]));
+  const planos = todos.filter(p => detectarOperadoraPlanoLegado(meta.get(Number(p.id)) || p) === operadora);
+  const nome = operadora.toUpperCase();
+  console.log(`📦 V4925 ${nome}: ${planos.length}/${todos.length} plano(s) do catálogo legado`);
+  if (!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${nome}*\n\nNenhum plano disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+  let texto = `📱 *${nome}*\n\nEscolha o plano:\n\n`;
+  for (const p of planos) texto += `• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${Number(p.qtd||0)} QR disponível${Number(p.qtd||0)===1?'':'s'}\n\n`;
+  const kb = montarLinhasBotoes(planos, 'esim', 'nome_plano');
+  kb[kb.length-1] = [tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')];
+  return atualizarCardTelegram(chatId,message,texto.trim(),kb);
 }
 function normalizarOpcaoTelegram(texto) {
   const t = String(texto || '').trim().toLowerCase().replace(/^menu_/, '');
@@ -6536,11 +6527,10 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           pedidoSessao.set(from, { etapa: 'esim_escolha' });
           return enviarEsimBotoesTelegram(chatId, q.message);
         }
-        const opEsimMatch=data.match(/^esim_operadora_(tim|claro|vivo)$/);
-        if(opEsimMatch){
-          const operadora=opEsimMatch[1];
-          pedidoSessao.set(from,{etapa:'esim_escolha_plano',operadora});
-          return enviarPlanosOperadoraTelegram(chatId,cliente,operadora,q.message);
+        if (data === 'esim_operadora_tim' || data === 'esim_operadora_claro' || data === 'esim_operadora_vivo') {
+          const operadora = data.replace('esim_operadora_','');
+          pedidoSessao.set(from, { etapa: 'esim_escolha', operadora });
+          return enviarPlanosOperadoraLegadoTelegram(chatId, cliente, operadora, q.message);
         }
         if (data === 'menu_historico') {
           pedidoSessao.delete(from);
@@ -6680,7 +6670,7 @@ Exemplo:
         if (esimCardMatch) {
           // Ao tocar no plano, ir direto para a escolha do DDD (sem tela intermediária COMPRAR).
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
-            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano
+            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
             WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimCardMatch[1])]);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
           plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
@@ -6694,7 +6684,7 @@ Exemplo:
         const esimMatch = data.match(/^comprar_esim_(\d+)$/);
         if (esimMatch && !data.includes('entregar') && !data.includes('finalizar') && !data.includes('cancelar')) {
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
-            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano
+            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
             WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
           if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
@@ -7156,14 +7146,12 @@ async function planosEsimDisponiveis(revendaId=null) {
       p.nome_plano,
       p.preco_revenda,
       p.preco_cliente,
-      COALESCE(p.categoria,'') AS categoria,
-      COALESCE(p.operadora_slug,'') AS operadora_slug,
       COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
     FROM esim_planos p
     LEFT JOIN esim_estoque e
-      ON e.nome_plano = p.nome_plano
+      ON TRIM(e.nome_plano) = TRIM(p.nome_plano) COLLATE NOCASE
     WHERE p.ativo=1
-    GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, p.categoria, p.operadora_slug
+    GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente
     ORDER BY p.nome_plano ASC
   `);
   const disponiveis = rows.filter(row => Number(row.qtd || 0) > 0);
