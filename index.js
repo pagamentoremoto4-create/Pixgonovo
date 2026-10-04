@@ -6668,16 +6668,9 @@ Exemplo:
           if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
           const sessCompra = await carregarSessaoPedido(from);
-          const dispositivo = String(sessCompra?.dispositivo || '').toUpperCase();
-          if (!['IPHONE', 'ANDROID'].includes(dispositivo)) {
-            await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano });
-            return tgBot.sendMessage(chatId, '📱 Escolha primeiro o aparelho que vai utilizar.', {
-              reply_markup: { inline_keyboard: [
-                [{ text: '🍎 iPhone', callback_data: `esim_device_iphone_${plano.id}` }],
-                [{ text: '🤖 Android', callback_data: `esim_device_android_${plano.id}` }]
-              ] }
-            });
-          }
+          // V4.9.3: o cliente não escolhe mais iPhone/Android.
+          // A entrega usa o formato completo (QR + dados manuais), compatível com o fluxo único.
+          const dispositivo = 'ANDROID';
           await apagarSessaoPedido(from);
           const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
           return entregarEsimRevenda(from, revAtual || cliente, plano, dispositivo, sessCompra?.ddd || '');
@@ -6688,32 +6681,23 @@ Exemplo:
           if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
           const ddd=normalizarDddEsim(dddMatch[2]);
-          const q=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
-          if(!Number(q?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
-          await salvarSessaoPedido(from,{etapa:'esim_dispositivo',plano,ddd});
-          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*\n📍 DDD: ${ddd}\n\nEscolha o aparelho:`,[[tgBtn('iPhone',`esim_device_iphone_${plano.id}`,'primary','TG_ICON_ESIM','🍎')],[tgBtn('Android',`esim_device_android_${plano.id}`,'primary','TG_ICON_ESIM','🤖')],[tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'danger','TG_ICON_VOLTAR','⬅️')]]);
-        }
-        const deviceMatch = data.match(/^esim_device_(iphone|android)_(\d+)$/);
-        if (deviceMatch) {
-          const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(deviceMatch[2])]);
-          if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
-          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
-          const dispositivo = deviceMatch[1] === 'iphone' ? 'IPHONE' : 'ANDROID';
-          const sessDdd=await carregarSessaoPedido(from);
-          await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano, dispositivo, ddd:sessDdd?.ddd || '' });
+          // Não sombrear o callback `q`: isso quebrava q.message e podia derrubar o fluxo.
+          const estoqueDdd=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+          if(!Number(estoqueDdd?.qtd||0))return atualizarCardTelegram(chatId,q.message,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.',[[tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'danger','TG_ICON_VOLTAR','⬅️')]]);
+          // V4.9.3: após escolher o DDD vai direto ao resumo/pagamento; sem perguntar aparelho.
+          await salvarSessaoPedido(from,{etapa:'esim_confirmar',plano,ddd,dispositivo:'ANDROID'});
           return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*
 
-${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
-📍 DDD: ${sessDdd?.ddd || '-'}
+📍 DDD: ${ddd}
 💰 Valor: ${brl(plano.preco_revenda)}
 💳 Seu saldo: ${brl(cliente.saldo)}
 🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
 
 Agora confirme para seguir para o pagamento/compra.`,[
-              [tgBtn('Confirmar compra',`esim_confirmar_${plano.id}`,'success','TG_ICON_COMPRAR','✅')],
-              [tgBtn('Trocar aparelho',`esim_ddd_${plano.id}_${sessDdd?.ddd || ''}`,'primary','TG_ICON_VOLTAR','🔄')],
-              [tgBtn('Cancelar','esim_cancelar_compra','danger','TG_ICON_VOLTAR','❌')]
-            ]);
+            [tgBtn('Confirmar compra',`esim_confirmar_${plano.id}`,'success','TG_ICON_COMPRAR','✅')],
+            [tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'primary','TG_ICON_VOLTAR','🔄')],
+            [tgBtn('Cancelar','esim_cancelar_compra','danger','TG_ICON_VOLTAR','❌')]
+          ]);
         }
         if (data === 'esim_cancelar_compra') {
           await apagarSessaoPedido(from);
