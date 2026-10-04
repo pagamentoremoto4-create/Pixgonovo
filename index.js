@@ -2470,6 +2470,28 @@ async function initDB() {
     ativo INTEGER DEFAULT 1,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  // V4.7 — categorias da HOME editáveis pelo próprio Telegram.
+  await run(`CREATE TABLE IF NOT EXISTS telegram_home_categorias (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    nome TEXT NOT NULL,
+    callback_data TEXT NOT NULL,
+    icon_key TEXT DEFAULT '',
+    fallback_emoji TEXT DEFAULT '📂',
+    estilo TEXT DEFAULT 'primary',
+    ativo INTEGER DEFAULT 1,
+    sistema INTEGER DEFAULT 0,
+    ordem INTEGER DEFAULT 100,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  const homeCatsPadrao=[
+    ['esim','COMPRA ESIM','menu_esim','TG_ICON_ESIM','📲','primary',1,10],
+    ['servicos','SERVIÇOS','menu_servicos','TG_ICON_SERVICOS','🛠️','primary',1,20],
+    ['premium','ASSINATURA PREMIUM','menu_assinatura_premium','TG_ICON_PREMIUM','⭐','primary',1,30]
+  ];
+  const homeCatCount=await get('SELECT COUNT(*) qtd FROM telegram_home_categorias');
+  if(!Number(homeCatCount?.qtd||0)) for(const c of homeCatsPadrao) await run(`INSERT INTO telegram_home_categorias(slug,nome,callback_data,icon_key,fallback_emoji,estilo,sistema,ordem) VALUES(?,?,?,?,?,?,?,?)`,c);
+
   await run(`CREATE TABLE IF NOT EXISTS banners_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
@@ -4143,25 +4165,35 @@ function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji=
   if (icon) b.icon_custom_emoji_id = icon;
   return b;
 }
-function tecladoTelegramMenu(cliente) {
-  const linhas = [
-    [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM', '📲')],
-    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️')],
-    [tgBtn('ASSINATURA PREMIUM', 'menu_assinatura_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
-    [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')],
-    [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')],
-    [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')],
-    [tgBtn('VINCULAR WHATSAPP', 'menu_vincular_whatsapp', 'primary', 'TG_ICON_WHATSAPP', '🔗')]
-  ];
-  if (String(cliente?.telegram_id || '') === String(ADMIN_TELEGRAM_ID || '')) {
-    linhas.push([tgBtn('ADMINISTRAÇÃO', 'admin_inicio', 'success', 'TG_ICON_ADMIN', '🔐')]);
+async function tecladoTelegramMenu(cliente) {
+  await carregarVisualTelegram();
+  const cats=await all('SELECT * FROM telegram_home_categorias WHERE ativo=1 ORDER BY ordem,id');
+  const linhas=[];
+  for(const c of cats){
+    linhas.push([tgBtn(String(c.nome||'CATEGORIA').toUpperCase(), c.callback_data||`homecat_${c.id}`, c.estilo||'primary', c.icon_key||'', c.fallback_emoji||'📂')]);
   }
+  linhas.push([tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')]);
+  linhas.push([tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')]);
+  linhas.push([tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')]);
+  linhas.push([tgBtn('VINCULAR WHATSAPP', 'menu_vincular_whatsapp', 'primary', 'TG_ICON_WHATSAPP', '🔗')]);
+  if (String(cliente?.telegram_id || '') === String(ADMIN_TELEGRAM_ID || '')) linhas.push([tgBtn('ADMINISTRAÇÃO', 'admin_inicio', 'success', 'TG_ICON_ADMIN', '🔐')]);
   return { parse_mode:'Markdown', reply_markup:{ inline_keyboard:linhas } };
 }
+async function garantirMenuNativoTelegram(chatId){
+  try{
+    if(typeof tgBot?.setMyCommands==='function') await tgBot.setMyCommands([{command:'start',description:'Abrir menu principal'}],{scope:{type:'all_private_chats'}}).catch(()=>{});
+    if(typeof tgBot?.setChatMenuButton==='function'){
+      await tgBot.setChatMenuButton({menu_button:{type:'commands'}}).catch(()=>{});
+      if(chatId) await tgBot.setChatMenuButton({chat_id:Number(chatId),menu_button:{type:'commands'}}).catch(()=>{});
+    }
+  }catch(e){console.log('⚠️ MENU NATIVO TELEGRAM:',e?.message||e)}
+}
+
 async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
   const texto = menuTelegramTexto(cliente);
-  const opts = tecladoTelegramMenu(cliente);
+  await garantirMenuNativoTelegram(chatId);
+  const opts = await tecladoTelegramMenu(cliente);
   await carregarVisualTelegram();
   const vm=visualMedia('home');
   if(vm.id){ try { const o={caption:texto,...opts}; const ow={...o,width:1280,height:720}; if(vm.tipo==='animation') await tgBot.sendAnimation(chatId,vm.id,ow); else if(vm.tipo==='video') await tgBot.sendVideo(chatId,vm.id,ow); else await tgBot.sendPhoto(chatId,vm.id,o); return; } catch(e){console.log('⚠️ HOME painel:',e.message)} }
@@ -4290,6 +4322,18 @@ async function processarMensagemTelegram(msg) {
       await salvarVisualTelegram(`tg_visual_service_${sessAdmin.service_id}_media`,md.id);await salvarVisualTelegram(`tg_visual_service_${sessAdmin.service_id}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card do serviço salvo.');return listarServicosLayout(msg.chat.id);
     }
 
+    if(sessAdmin.etapa==='homecat_nova'){
+      if(!txt)return; const nome=txt.trim().toUpperCase(); const slug='custom_'+Date.now();
+      const r=await run(`INSERT INTO telegram_home_categorias(slug,nome,callback_data,icon_key,fallback_emoji,estilo,ativo,sistema,ordem) VALUES(?,?,?,?,'📂','primary',1,0,(SELECT COALESCE(MAX(ordem),0)+10 FROM telegram_home_categorias))`,[slug,nome,`homecat_${slug}`,`TG_ICON_HOMECAT_${slug}`]);
+      adminSessao.delete(fromAdmin); return verCategoriaTG(msg.chat.id,r.lastID);
+    }
+    if(sessAdmin.etapa==='homecat_nome'){
+      if(!txt)return; await run('UPDATE telegram_home_categorias SET nome=? WHERE id=?',[txt.trim().toUpperCase(),sessAdmin.id]);adminSessao.delete(fromAdmin);return verCategoriaTG(msg.chat.id,sessAdmin.id);
+    }
+    if(sessAdmin.etapa==='homecat_emoji'){
+      const id=customEmojiDaMensagem(msg);if(!id)return tgBot.sendMessage(msg.chat.id,'❌ Envie um Custom Emoji/Premium diretamente pelo seletor do Telegram.');
+      const c=await get('SELECT * FROM telegram_home_categorias WHERE id=?',[sessAdmin.id]);if(c?.icon_key)await salvarVisualTelegram(c.icon_key,id);adminSessao.delete(fromAdmin);return verCategoriaTG(msg.chat.id,sessAdmin.id);
+    }
     if(sessAdmin.etapa==='categoria_nova'){if(!txt)return;await run('INSERT OR IGNORE INTO categorias_produtos(nome) VALUES(?)',[txt]);adminSessao.delete(fromAdmin);return menuCategoriasTG(msg.chat.id)}
     if(sessAdmin.etapa==='categoria_nome'){const old=await get('SELECT nome FROM categorias_produtos WHERE id=?',[sessAdmin.id]);await run('UPDATE categorias_produtos SET nome=? WHERE id=?',[txt,sessAdmin.id]);if(old)await run('UPDATE esim_planos SET categoria=? WHERE categoria=?',[txt,old.nome]);adminSessao.delete(fromAdmin);return verCategoriaTG(msg.chat.id,sessAdmin.id)}
     if(sessAdmin.etapa==='cliente_saldo'){const v=Number(txt.replace(',','.'));if(!Number.isFinite(v))return tgBot.sendMessage(msg.chat.id,'❌ Valor inválido.');await run('UPDATE revendas SET saldo=? WHERE id=?',[v,sessAdmin.id]);adminSessao.delete(fromAdmin);return verClienteTG(msg.chat.id,sessAdmin.id)}
@@ -6218,18 +6262,25 @@ async function verCampanhaTG(chatId,id){
 
 
 function adminVoltar(botao='admin_inicio') { return { inline_keyboard: [[{text:'⬅️ Voltar', callback_data:botao}]] }; }
-async function menuCategoriasTG(chatId) {
+async function menuCategoriasEsimTG(chatId) {
   const cats=await all('SELECT * FROM categorias_produtos ORDER BY ativo DESC,nome');
-  const kb=[[{text:'➕ Nova categoria',callback_data:'admcat_nova'}]];
-  cats.forEach(c=>kb.push([{text:`${c.ativo?'✅':'⛔'} ${c.nome}`,callback_data:`admcat_${c.id}`}]))
+  const kb=cats.map(c=>[{text:`${c.ativo?'✅':'⛔'} ${c.nome}`,callback_data:`admesimcat_${c.id}`}]);
+  kb.push([{text:'⬅️ Categorias da HOME',callback_data:'admin_categorias'}]);
+  return tgBot.sendMessage(chatId,'📦 *CATEGORIAS DOS PLANOS ESIM*\n\nEstas são as categorias internas dos planos.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function menuCategoriasTG(chatId) {
+  const cats=await all('SELECT * FROM telegram_home_categorias ORDER BY ativo DESC,ordem,id');
+  const kb=[[{text:'➕ ADICIONAR CATEGORIA',callback_data:'admhomecat_nova'}]];
+  cats.forEach(c=>kb.push([{text:`${c.ativo?'✅':'⛔'} ${String(c.nome).toUpperCase()}`,callback_data:`admhomecat_${c.id}`}]))
+  kb.push([{text:'📦 Categorias internas dos planos eSIM',callback_data:'admin_categorias_esim'}]);
   kb.push([{text:'⬅️ Painel',callback_data:'admin_inicio'}]);
-  return tgBot.sendMessage(chatId,`📂 *CATEGORIAS*\n\nTotal: ${cats.length}\nEscolha uma categoria para editar.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+  return tgBot.sendMessage(chatId,`📂 *CATEGORIAS DA HOME*\n\nAqui você altera exatamente as categorias que aparecem no menu do cliente.\n\nTotal: ${cats.length}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
 }
 async function verCategoriaTG(chatId,id){
- const c=await get('SELECT * FROM categorias_produtos WHERE id=?',[id]); if(!c)return tgBot.sendMessage(chatId,'❌ Categoria não encontrada.');
- const q=await get('SELECT COUNT(*) qtd FROM esim_planos WHERE categoria=?',[c.nome]);
- return tgBot.sendMessage(chatId,`📂 *${c.nome}*\n\n📦 Produtos: ${q?.qtd||0}\n📍 Status: ${c.ativo?'ATIVA':'DESATIVADA'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'✏️ Renomear',callback_data:`admcat_nome_${id}`}],[{text:c.ativo?'⛔ Desativar':'✅ Ativar',callback_data:`admcat_toggle_${id}`}],[{text:'🗑️ Excluir',callback_data:`admcat_del_${id}`}],[{text:'⬅️ Categorias',callback_data:'admin_categorias'}]]}})
+ const c=await get('SELECT * FROM telegram_home_categorias WHERE id=?',[id]); if(!c)return tgBot.sendMessage(chatId,'❌ Categoria não encontrada.');
+ return tgBot.sendMessage(chatId,`📂 *${String(c.nome).toUpperCase()}*\n\n📍 Status: ${c.ativo?'ATIVA':'DESATIVADA'}\n${c.sistema?'🔒 Categoria do sistema: a função é preservada.':'🆕 Categoria personalizada.'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'✏️ Alterar nome',callback_data:`admhomecat_nome_${id}`}],[{text:'✨ Alterar emoji',callback_data:`admhomecat_emoji_${id}`}],[{text:c.ativo?'⛔ Desativar':'✅ Ativar',callback_data:`admhomecat_toggle_${id}`}],[{text:'🗑️ Apagar',callback_data:`admhomecat_del_${id}`}],[{text:'⬅️ Categorias',callback_data:'admin_categorias'}]]}})
 }
+
 async function menuEstoqueTG(chatId){
  const ps=await all(`SELECT p.*,COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' THEN 1 ELSE 0 END),0) qtd FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano GROUP BY p.id ORDER BY p.nome_plano`);
  const kb=[[{text:'➕ Adicionar estoque',callback_data:'admstock_escolher'}]];
@@ -6276,6 +6327,7 @@ async function responderBotaoAdminTelegram(chatId, data) {
   if (data === 'admin_layout_tg') return menuLayoutTelegramAdmin(chatId);
   if (data === 'admin_produtos') return enviarListaProdutosAdminTelegram(chatId);
   if (data === 'admin_categorias') return menuCategoriasTG(chatId);
+  if (data === 'admin_categorias_esim') return menuCategoriasEsimTG(chatId);
   if (data === 'admin_pedidos') return menuPedidosTG(chatId);
   if (data === 'admin_campanhas') return enviarMenuCampanhasTelegram(chatId);
   if (data === 'admin_clientes') return menuClientesTG(chatId);
@@ -6308,10 +6360,7 @@ async function iniciarTelegram() {
   console.log('✅ BOT TELEGRAM INICIADO');
   // V4.6 — botão Menu nativo do Telegram (canto inferior esquerdo).
   // Abre a lista de comandos; /start é o atalho principal para a HOME.
-  try {
-    if (typeof tgBot.setMyCommands === 'function') await tgBot.setMyCommands([{ command:'start', description:'Abrir menu principal' }]);
-    if (typeof tgBot.setChatMenuButton === 'function') await tgBot.setChatMenuButton({ menu_button:{ type:'commands' } });
-  } catch (e) { console.log('⚠️ MENU NATIVO TELEGRAM:', e?.message || e); }
+  await garantirMenuNativoTelegram();
   tgBot.onText(/\/start/, async (msg) => {
     try {
       try { const r=await tgBot.sendMessage(msg.chat.id, '⌨️', { reply_markup:{ remove_keyboard:true } }); await tgBot.deleteMessage(msg.chat.id, r.message_id).catch(()=>{}); } catch(_) {}
@@ -6392,6 +6441,15 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         lm=data.match(/^admlay_clear_(home|esim|servicos|premium)$/);if(lm){const visualSlug={esim:'cat_esim',servicos:'cat_servicos',premium:'cat_premium',home:'home'}[lm[1]]||lm[1];await salvarVisualTelegram(`tg_visual_${visualSlug}_media`,'');await salvarVisualTelegram(`tg_visual_${visualSlug}_type`,'');await tgBot.sendMessage(chatId,'✅ Mídia removida.');await editarVisualCategoria(chatId,lm[1]);return;}
         lm=data.match(/^admlay_srv_(\d+)$/);if(lm){const sv=await get('SELECT id,COALESCE(NULLIF(nome_exibicao,""),nome) nome FROM servicos_catalogo WHERE id=?',[Number(lm[1])]);if(!sv)return;adminSessao.set(adminKey,{etapa:'layout_service_media',service_id:sv.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${sv.nome}*`,{parse_mode:'Markdown'});return;}
         let z;
+        if(data==='admhomecat_nova'){adminSessao.set(adminKey,{etapa:'homecat_nova'});await tgBot.sendMessage(chatId,'Digite o nome da nova categoria:');return;}
+        let hc=data.match(/^admhomecat_(\d+)$/);if(hc){await verCategoriaTG(chatId,Number(hc[1]));return;}
+        hc=data.match(/^admhomecat_nome_(\d+)$/);if(hc){adminSessao.set(adminKey,{etapa:'homecat_nome',id:Number(hc[1])});await tgBot.sendMessage(chatId,'Digite o novo nome da categoria:');return;}
+        hc=data.match(/^admhomecat_emoji_(\d+)$/);if(hc){adminSessao.set(adminKey,{etapa:'homecat_emoji',id:Number(hc[1])});await tgBot.sendMessage(chatId,'✨ Envie agora 1 Custom Emoji/Premium para esta categoria.');return;}
+        hc=data.match(/^admhomecat_toggle_(\d+)$/);if(hc){const c=await get('SELECT ativo FROM telegram_home_categorias WHERE id=?',[Number(hc[1])]);await run('UPDATE telegram_home_categorias SET ativo=? WHERE id=?',[c?.ativo?0:1,Number(hc[1])]);return verCategoriaTG(chatId,Number(hc[1]));}
+        hc=data.match(/^admhomecat_del_(\d+)$/);if(hc){const id=Number(hc[1]);const c=await get('SELECT * FROM telegram_home_categorias WHERE id=?',[id]);if(!c)return;return tgBot.sendMessage(chatId,`⚠️ Apagar a categoria *${String(c.nome).toUpperCase()}*?\n\n${c.sistema?'A função interna não será apagada; apenas o botão da HOME.':'A categoria será removida da HOME.'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'🗑️ SIM, APAGAR',callback_data:`admhomecat_delok_${id}`}],[{text:'❌ Cancelar',callback_data:`admhomecat_${id}`}]]}});}
+        hc=data.match(/^admhomecat_delok_(\d+)$/);if(hc){await run('DELETE FROM telegram_home_categorias WHERE id=?',[Number(hc[1])]);return menuCategoriasTG(chatId);}
+        if(data==='admin_categorias_esim'){await menuCategoriasEsimTG(chatId);return;}
+        let ec=data.match(/^admesimcat_(\d+)$/);if(ec){const c=await get('SELECT * FROM categorias_produtos WHERE id=?',[Number(ec[1])]);return tgBot.sendMessage(chatId,`📦 ${c?.nome||'Categoria'}\n\nCategoria interna dos planos eSIM.`,{reply_markup:{inline_keyboard:[[{text:'⬅️ Voltar',callback_data:'admin_categorias_esim'}]]}});}
         if(data==='admcat_nova'){adminSessao.set(adminKey,{etapa:'categoria_nova'});await tgBot.sendMessage(chatId,'Digite o nome da nova categoria:');return;}
         z=data.match(/^admcat_(\d+)$/);if(z){await verCategoriaTG(chatId,Number(z[1]));return;}
         z=data.match(/^admcat_nome_(\d+)$/);if(z){adminSessao.set(adminKey,{etapa:'categoria_nome',id:Number(z[1])});await tgBot.sendMessage(chatId,'Digite o novo nome da categoria:');return;}
@@ -6419,7 +6477,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('homecat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
       if (ehBotaoCliente) {
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -6430,6 +6488,9 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if (data === 'menu_voltar') {
           await apagarSessaoPedido(from);
           return voltarHomeNoMesmoCard(chatId, cliente, q.message);
+        }
+        if(data.startsWith('homecat_custom_')){
+          return atualizarCardTelegram(chatId,q.message,'📂 *CATEGORIA*\n\nNenhum produto foi vinculado a esta categoria ainda.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
         }
         if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
         if (data === 'menu_servicos') {
