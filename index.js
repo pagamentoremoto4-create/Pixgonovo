@@ -2545,6 +2545,16 @@ async function initDB() {
     ordem INTEGER DEFAULT 100,
     criado_em TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  // V4.9.3.6 — vínculo manual entre cada operadora e os nomes reais encontrados no estoque.
+  // Não altera QR Code, DDD, preço, status ou qualquer registro do estoque.
+  await run(`CREATE TABLE IF NOT EXISTS telegram_esim_operadora_planos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operadora_id INTEGER NOT NULL,
+    nome_plano TEXT NOT NULL,
+    criado_em TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(operadora_id, nome_plano)
+  )`);
+
   const esimOpsPadrao=[
     ['tim','TIM','TIM','TG_ICON_TIM','📱','primary',1,10],
     ['claro','CLARO','CLARO','TG_ICON_CLARO','🔴','primary',1,20],
@@ -4421,21 +4431,14 @@ async function enviarEsimBotoesTelegram(chatId, message=null) {
   return enviarCardVisual(chatId,message,'cat_esim','📱 *COMPRA ESIM*\n\nEscolha a operadora:',kb);
 }
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
-  // V4.9.3.4 — fonte real: estoque do /data. A operadora é identificada pelo nome
-  // do plano que já existe no estoque, sem depender de operadora_slug/migrações.
-  const slug=String(operadora?.slug||'').trim().toLowerCase();
+  // V4.9.3.6 — somente os planos que o administrador vinculou manualmente à operadora.
+  // A disponibilidade/quantidade continua vindo do estoque real.
   const todos=await planosEsimDisponiveis(cliente?.id||null);
-  const pertence=(nome)=>{
-    const n=String(nome||'').trim().toUpperCase();
-    if(slug==='tim') return /(^|[^A-Z])TIM([^A-Z]|$)/.test(n);
-    if(slug==='claro') return n.includes('CLARO');
-    if(slug==='vivo') return n.includes('VIVO');
-    const termo=String(operadora?.termo_busca||operadora?.nome||'').trim().toUpperCase();
-    return termo ? n.includes(termo) : false;
-  };
-  const planos=todos.filter(p=>pertence(p.nome_plano));
-  console.log(`📦 V4935 ESTOQUE DIRETO ${slug.toUpperCase()}: ${planos.length} plano(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) disponível(is).`);
-  if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum eSIM disponível no estoque desta operadora no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+  const links=await all(`SELECT nome_plano FROM telegram_esim_operadora_planos WHERE operadora_id=?`,[operadora.id]);
+  const vinculados=new Set(links.map(x=>String(x.nome_plano||'').trim().toUpperCase()));
+  const planos=todos.filter(p=>vinculados.has(String(p.nome_plano||'').trim().toUpperCase()));
+  console.log(`📦 V4936 ${String(operadora?.nome||'OPERADORA').toUpperCase()}: ${planos.length} plano(s) vinculado(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) disponível(is).`);
+  if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano vinculado com estoque disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
   let texto=`📱 *${String(operadora.nome).toUpperCase()}*\n\nEscolha o plano:\n\n`;
   for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${qtd} eSIM${qtd===1?'':'s'} disponível${qtd===1?'':'is'}\n\n`;}
   const kb=montarLinhasBotoes(planos,'esim','nome_plano');
@@ -6375,14 +6378,36 @@ async function listarOperadorasEsimAdmin(chatId){
 }
 async function verOperadoraEsimAdmin(chatId,id){
   const o=await get('SELECT * FROM telegram_esim_operadoras WHERE id=?',[id]); if(!o)return tgBot.sendMessage(chatId,'❌ Item não encontrado.');
-  return tgBot.sendMessage(chatId,`📱 *${String(o.nome).toUpperCase()}*\n\n🔎 Identifica planos contendo: *${o.termo_busca}*\n📍 Status: ${o.ativo?'ATIVO':'DESATIVADO'}\n↕️ Posição: ${o.ordem}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
+  const links=await all('SELECT nome_plano FROM telegram_esim_operadora_planos WHERE operadora_id=? ORDER BY nome_plano',[id]);
+  const total=await get(`SELECT COUNT(*) qtd FROM esim_estoque e WHERE e.status='DISPONIVEL' AND EXISTS (SELECT 1 FROM telegram_esim_operadora_planos l WHERE l.operadora_id=? AND TRIM(UPPER(l.nome_plano))=TRIM(UPPER(e.nome_plano)))`,[id]);
+  const lista=links.length?`\n\n🔗 *Planos vinculados:*\n${links.map(x=>'• '+x.nome_plano).join('\n')}`:'\n\n🔗 Nenhum plano do estoque vinculado.';
+  return tgBot.sendMessage(chatId,`📱 *${String(o.nome).toUpperCase()}*\n\n📍 Status: ${o.ativo?'ATIVO':'DESATIVADO'}\n↕️ Posição: ${o.ordem}\n📦 eSIMs disponíveis vinculados: ${Number(total?.qtd||0)}${lista}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
+    [{text:'🔗 VINCULAR PLANOS DO ESTOQUE',callback_data:`admesimop_link_${id}`}],
+    [{text:'📦 VER ESTOQUE DESTA OPERADORA',callback_data:`admesimop_stock_${id}`}],
     [{text:'✏️ Alterar nome',callback_data:`admesimop_nome_${id}`},{text:'✨ Alterar emoji',callback_data:`admesimop_emoji_${id}`}],
-    [{text:'🔎 Alterar vínculo/busca',callback_data:`admesimop_busca_${id}`}],
     [{text:'⬆️ Subir',callback_data:`admesimop_up_${id}`},{text:'⬇️ Descer',callback_data:`admesimop_down_${id}`}],
     [{text:o.ativo?'⛔ Desativar':'✅ Ativar',callback_data:`admesimop_toggle_${id}`}],
     [{text:'🗑️ Apagar',callback_data:`admesimop_del_${id}`}],
     [{text:'⬅️ Itens',callback_data:'admin_esim_operadoras'}]
   ]}});
+}
+const adminEsimEstoqueMap=new Map();
+async function vincularPlanosEstoqueOperadoraTelegram(chatId,id){
+  const o=await get('SELECT * FROM telegram_esim_operadoras WHERE id=?',[id]); if(!o)return;
+  const rows=await all(`SELECT TRIM(nome_plano) nome_plano,COUNT(*) total,SUM(CASE WHEN status='DISPONIVEL' THEN 1 ELSE 0 END) disponiveis FROM esim_estoque WHERE nome_plano IS NOT NULL AND TRIM(nome_plano)<>'' GROUP BY TRIM(UPPER(nome_plano)) ORDER BY nome_plano COLLATE NOCASE`);
+  const links=await all('SELECT nome_plano FROM telegram_esim_operadora_planos WHERE operadora_id=?',[id]);
+  const set=new Set(links.map(x=>String(x.nome_plano||'').trim().toUpperCase()));
+  adminEsimEstoqueMap.set(String(chatId)+':'+id,rows.map(r=>r.nome_plano));
+  const kb=rows.map((r,i)=>[{text:`${set.has(String(r.nome_plano).trim().toUpperCase())?'☑️':'⬜'} ${r.nome_plano} • ${Number(r.disponiveis||0)} disp.`,callback_data:`admesimop_pick_${id}_${i}`}]);
+  kb.push([{text:'✅ CONCLUIR',callback_data:`admesimop_${id}`}]);
+  return tgBot.sendMessage(chatId,`🔗 *VINCULAR ESTOQUE → ${String(o.nome).toUpperCase()}*\n\nToque nos planos para marcar/desmarcar. Isso não altera o estoque nem os QR Codes.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function estoqueOperadoraEsimTelegram(chatId,id){
+  const o=await get('SELECT * FROM telegram_esim_operadoras WHERE id=?',[id]); if(!o)return;
+  const rows=await all(`SELECT TRIM(e.nome_plano) nome_plano,e.ddd,COUNT(*) qtd FROM esim_estoque e WHERE e.status='DISPONIVEL' AND EXISTS(SELECT 1 FROM telegram_esim_operadora_planos l WHERE l.operadora_id=? AND TRIM(UPPER(l.nome_plano))=TRIM(UPPER(e.nome_plano))) GROUP BY TRIM(UPPER(e.nome_plano)),e.ddd ORDER BY nome_plano,CAST(e.ddd AS INTEGER),e.ddd`,[id]);
+  let txt=`📦 *ESTOQUE ${String(o.nome).toUpperCase()}*\n\n`;
+  if(!rows.length) txt+='Nenhum eSIM disponível nos planos vinculados.'; else rows.forEach(r=>{txt+=`• ${r.nome_plano}${r.ddd?` • DDD ${r.ddd}`:''}: ${Number(r.qtd||0)}\n`;});
+  return tgBot.sendMessage(chatId,txt,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'⬅️ Operadora',callback_data:`admesimop_${id}`}]]}});
 }
 async function enviarListaPlanosAdminTelegram(chatId, titulo='📦 *PLANOS eSIM*') {
   const produtos = await all('SELECT * FROM esim_planos ORDER BY ativo DESC, id DESC LIMIT 80');
@@ -6623,6 +6648,15 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if(data==='admin_planos_esim'){return enviarListaPlanosAdminTelegram(chatId);}
         if(data==='admin_esim_operadoras'){return listarOperadorasEsimAdmin(chatId);}
         if(data==='admesimop_nova'){adminSessao.set(adminKey,{etapa:'esimop_nova_nome'});await tgBot.sendMessage(chatId,'➕ Digite o nome que aparecerá no botão (ex.: TIM):');return;}
+        let eo=data.match(/^admesimop_link_(\d+)$/);if(eo){return vincularPlanosEstoqueOperadoraTelegram(chatId,Number(eo[1]));}
+        eo=data.match(/^admesimop_stock_(\d+)$/);if(eo){return estoqueOperadoraEsimTelegram(chatId,Number(eo[1]));}
+        eo=data.match(/^admesimop_pick_(\d+)_(\d+)$/);if(eo){
+          const id=Number(eo[1]),idx=Number(eo[2]);const nomes=adminEsimEstoqueMap.get(String(chatId)+':'+id)||[];const nome=nomes[idx];
+          if(!nome)return tgBot.sendMessage(chatId,'⌛ Lista expirada. Abra a operadora novamente.');
+          const ja=await get('SELECT id FROM telegram_esim_operadora_planos WHERE operadora_id=? AND TRIM(UPPER(nome_plano))=TRIM(UPPER(?))',[id,nome]);
+          if(ja)await run('DELETE FROM telegram_esim_operadora_planos WHERE id=?',[ja.id]);else await run('INSERT OR IGNORE INTO telegram_esim_operadora_planos (operadora_id,nome_plano) VALUES (?,?)',[id,nome]);
+          return vincularPlanosEstoqueOperadoraTelegram(chatId,id);
+        }
         let om=data.match(/^admesimop_(nome|emoji|busca|toggle|up|down|del)_(\d+)$/);
         if(om){const ac=om[1],id=Number(om[2]);const o=await get('SELECT * FROM telegram_esim_operadoras WHERE id=?',[id]);if(!o)return;
           if(ac==='toggle'){await run('UPDATE telegram_esim_operadoras SET ativo=? WHERE id=?',[o.ativo?0:1,id]);return verOperadoraEsimAdmin(chatId,id);}
@@ -6631,7 +6665,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           adminSessao.set(adminKey,{etapa:`esimop_${ac}`,id});const prompts={nome:'Digite o novo nome do botão:',busca:'Digite o texto usado para identificar os planos desta operadora (ex.: TIM):',emoji:'✨ Envie agora 1 Custom Emoji/Premium para este botão.'};await tgBot.sendMessage(chatId,prompts[ac]);return;
         }
         om=data.match(/^admesimop_(\d+)$/);if(om){return verOperadoraEsimAdmin(chatId,Number(om[1]));}
-        om=data.match(/^admesimop_delok_(\d+)$/);if(om){await run('DELETE FROM telegram_esim_operadoras WHERE id=?',[Number(om[1])]);return listarOperadorasEsimAdmin(chatId);}
+        om=data.match(/^admesimop_delok_(\d+)$/);if(om){const id=Number(om[1]);await run('DELETE FROM telegram_esim_operadora_planos WHERE operadora_id=?',[id]);await run('DELETE FROM telegram_esim_operadoras WHERE id=?',[id]);return listarOperadorasEsimAdmin(chatId);}
 
         if(data==='admprod_novo'){ adminSessao.set(adminKey,{etapa:'produto_novo_nome'}); await tgBot.sendMessage(chatId,'➕ Digite o nome do novo produto:'); return; }
         let mop=data.match(/^admprod_operadora_(\d+)$/);
