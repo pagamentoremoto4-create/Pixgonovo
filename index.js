@@ -2072,6 +2072,11 @@ async function initDB() {
   await addColumnIfMissing('esim_planos', 'descricao', 'TEXT');
   await addColumnIfMissing('esim_planos', 'imagem', 'TEXT');
   await addColumnIfMissing('esim_planos', 'categoria', "TEXT DEFAULT 'eSIM'");
+  // V4.9.2.8 — vínculo fixo do plano com TIM/CLARO/VIVO (não depende do nome do plano).
+  await addColumnIfMissing('esim_planos', 'operadora_slug', 'TEXT');
+  await run(`UPDATE esim_planos SET operadora_slug='tim' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND (UPPER(nome_plano) LIKE '%TIM%' OR UPPER(COALESCE(categoria,'')) LIKE '%TIM%')`);
+  await run(`UPDATE esim_planos SET operadora_slug='claro' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND (UPPER(nome_plano) LIKE '%CLARO%' OR UPPER(COALESCE(categoria,'')) LIKE '%CLARO%')`);
+  await run(`UPDATE esim_planos SET operadora_slug='vivo' WHERE (operadora_slug IS NULL OR TRIM(operadora_slug)='') AND (UPPER(nome_plano) LIKE '%VIVO%' OR UPPER(COALESCE(categoria,'')) LIKE '%VIVO%')`);
 
   // Migra os planos já existentes no estoque para o catálogo.
   await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
@@ -2513,6 +2518,12 @@ async function initDB() {
   ];
   const esimOpCount=await get('SELECT COUNT(*) qtd FROM telegram_esim_operadoras');
   if(!Number(esimOpCount?.qtd||0)) for(const o of esimOpsPadrao) await run(`INSERT INTO telegram_esim_operadoras(slug,nome,termo_busca,icon_key,fallback_emoji,estilo,sistema,ordem) VALUES(?,?,?,?,?,?,?,?)`,o);
+  // Na atualização para V4.9.2.8, volta uma única vez ao padrão TIM/CLARO/VIVO.
+  if(await getConfig('v4928_ops_padrao_limpo','0')!=='1'){
+    await run(`DELETE FROM telegram_esim_operadoras WHERE slug NOT IN ('tim','claro','vivo')`);
+    await run(`UPDATE telegram_esim_operadoras SET sistema=1,ativo=1 WHERE slug IN ('tim','claro','vivo')`);
+    await setConfig('v4928_ops_padrao_limpo','1');
+  }
 
   await run(`CREATE TABLE IF NOT EXISTS banners_catalogo (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4349,10 +4360,10 @@ async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
 }
 async function enviarEsimBotoesTelegram(chatId, message=null) {
   await carregarVisualTelegram();
-  const ops=await all('SELECT * FROM telegram_esim_operadoras WHERE ativo=1 ORDER BY ordem,id');
+  const ops=await all(`SELECT * FROM telegram_esim_operadoras WHERE ativo=1 AND slug IN ('tim','claro','vivo') ORDER BY ordem,id`);
   const disponiveis=[];
   for(const o of ops){
-    const q=await get(`SELECT COUNT(*) qtd FROM esim_planos WHERE ativo=1 AND UPPER(nome_plano) LIKE ?`,[`%${String(o.termo_busca||o.nome).toUpperCase()}%`]);
+    const q=await get(`SELECT COUNT(DISTINCT p.id) qtd FROM esim_planos p JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda WHERE p.ativo=1 AND p.operadora_slug=? AND e.status='DISPONIVEL'`,[String(o.slug)]);
     if(Number(q?.qtd||0)>0) disponiveis.push(o);
   }
   if(!disponiveis.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhuma operadora eSIM disponível no momento.*',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
@@ -4366,7 +4377,9 @@ async function enviarEsimBotoesTelegram(chatId, message=null) {
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
   const termo=String(operadora?.termo_busca||operadora?.nome||'').trim();
   const todos=await planosEsimDisponiveis(cliente?.id||null);
-  const planos=todos.filter(p=>String(p.nome_plano||'').toUpperCase().includes(termo.toUpperCase()));
+  const ids=await all('SELECT id FROM esim_planos WHERE operadora_slug=?',[String(operadora?.slug||'')]);
+  const permitidos=new Set(ids.map(x=>Number(x.id)));
+  const planos=todos.filter(p=>permitidos.has(Number(p.id)));
   if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
   let texto=`📱 *${String(operadora.nome).toUpperCase()}*\n\nEscolha o plano:\n\n`;
   for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n${qtd>0?`📦 ${qtd} QR disponível${qtd>1?'s':''}`:'👨‍💻 Entrega manual'}\n\n`;}
@@ -4495,7 +4508,7 @@ Envie outro QR Code ou digite FINALIZAR.`);
     }
     if(sessAdmin.etapa==='produto_novo_nome'){adminSessao.set(fromAdmin,{etapa:'produto_novo_preco',nome:txt});await tgBot.sendMessage(msg.chat.id,'💰 Digite o preço do produto:');return;}
     if(sessAdmin.etapa==='produto_novo_preco'){const preco=Number(txt.replace(',','.'));if(!Number.isFinite(preco)||preco<0)return tgBot.sendMessage(msg.chat.id,'❌ Preço inválido. Digite novamente:');adminSessao.set(fromAdmin,{...sessAdmin,etapa:'produto_novo_desc',preco});await tgBot.sendMessage(msg.chat.id,'📝 Digite a descrição do produto:');return;}
-    if(sessAdmin.etapa==='produto_novo_desc'){const r=await run('INSERT INTO esim_planos (nome_plano,preco_revenda,preco_cliente,descricao,ativo) VALUES (?,?,?,?,1)',[sessAdmin.nome,sessAdmin.preco,sessAdmin.preco,txt]);adminSessao.set(fromAdmin,{etapa:'produto_novo_foto',produto_id:r.lastID});await tgBot.sendMessage(msg.chat.id,'📷 Envie a foto do produto agora. Para cadastrar sem foto, digite PULAR.');return;}
+    if(sessAdmin.etapa==='produto_novo_desc'){const nomeUp=String(sessAdmin.nome||'').toUpperCase();const opAuto=nomeUp.includes('TIM')?'tim':nomeUp.includes('CLARO')?'claro':nomeUp.includes('VIVO')?'vivo':null;const r=await run('INSERT INTO esim_planos (nome_plano,preco_revenda,preco_cliente,descricao,ativo,operadora_slug) VALUES (?,?,?,?,1,?)',[sessAdmin.nome,sessAdmin.preco,sessAdmin.preco,txt,opAuto]);adminSessao.set(fromAdmin,{etapa:'produto_novo_foto',produto_id:r.lastID});await tgBot.sendMessage(msg.chat.id,'📷 Envie a foto do produto agora. Para cadastrar sem foto, digite PULAR.');return;}
     if(sessAdmin.etapa==='produto_novo_foto'){if(txt.toLowerCase()==='pular'){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Produto cadastrado sem foto.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}const ok=await salvarFotoProdutoTelegram(msg,sessAdmin.produto_id);if(!ok)return tgBot.sendMessage(msg.chat.id,'❌ Envie uma imagem ou digite PULAR.');adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Produto e foto cadastrados.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}
     if(sessAdmin.etapa==='produto_editar_foto'){const ok=await salvarFotoProdutoTelegram(msg,sessAdmin.produto_id);if(!ok)return tgBot.sendMessage(msg.chat.id,'❌ Envie uma imagem válida.');adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Foto atualizada.');return mostrarProdutoAdminTelegram(msg.chat.id,sessAdmin.produto_id);}
     if(!txt)return;
@@ -6325,11 +6338,12 @@ async function enviarListaPlanosAdminTelegram(chatId, titulo='📦 *PLANOS eSIM*
 async function mostrarProdutoAdminTelegram(chatId, id) {
   const p = await get('SELECT * FROM esim_planos WHERE id=?', [id]);
   if (!p) return tgBot.sendMessage(chatId, '❌ Produto não encontrado.');
-  const legenda = `📦 *${p.nome_plano}*\n\n🏷 Categoria: ${p.categoria || 'eSIM'}\n💰 Preço: ${brl(p.preco_revenda)}\n📝 Descrição: ${p.descricao || 'Não cadastrada'}\n📷 Foto: ${p.imagem ? 'Cadastrada' : 'Não cadastrada'}\n📍 Status: ${p.ativo ? 'ATIVO' : 'DESATIVADO'}`;
+  const opNome=({tim:'TIM',claro:'CLARO',vivo:'VIVO'})[String(p.operadora_slug||'')]||'NÃO VINCULADA';
+  const legenda = `📦 *${p.nome_plano}*\n\n📡 Operadora: ${opNome}\n🏷 Categoria: ${p.categoria || 'eSIM'}\n💰 Preço: ${brl(p.preco_revenda)}\n📝 Descrição: ${p.descricao || 'Não cadastrada'}\n📷 Foto: ${p.imagem ? 'Cadastrada' : 'Não cadastrada'}\n📍 Status: ${p.ativo ? 'ATIVO' : 'DESATIVADO'}`;
   const kb={inline_keyboard:[
     [{text:'✏️ Nome',callback_data:`admprod_nome_${id}`},{text:'💰 Preço',callback_data:`admprod_preco_${id}`}],
     [{text:'📝 Descrição',callback_data:`admprod_desc_${id}`},{text:'📷 Foto',callback_data:`admprod_foto_${id}`}],
-    [{text:'📂 Categoria',callback_data:`admprod_cat_${id}`}],
+    [{text:'📡 Operadora',callback_data:`admprod_operadora_${id}`},{text:'📂 Categoria',callback_data:`admprod_cat_${id}`}],
     [{text:p.ativo?'⛔ Desativar':'✅ Ativar',callback_data:`admprod_toggle_${id}`}],
     [{text:'📣 Criar campanha',callback_data:`admcamp_prod_${id}`}],
     [{text:'⬅️ Produtos',callback_data:'admin_produtos'}]
@@ -6564,6 +6578,10 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         om=data.match(/^admesimop_delok_(\d+)$/);if(om){await run('DELETE FROM telegram_esim_operadoras WHERE id=?',[Number(om[1])]);return listarOperadorasEsimAdmin(chatId);}
 
         if(data==='admprod_novo'){ adminSessao.set(adminKey,{etapa:'produto_novo_nome'}); await tgBot.sendMessage(chatId,'➕ Digite o nome do novo produto:'); return; }
+        let mop=data.match(/^admprod_operadora_(\d+)$/);
+        if(mop){const id=Number(mop[1]);return tgBot.sendMessage(chatId,'📡 *VINCULAR OPERADORA*\n\nEscolha onde este eSIM deve aparecer:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'TIM',callback_data:`admprod_op_${id}_tim`},{text:'CLARO',callback_data:`admprod_op_${id}_claro`}],[{text:'VIVO',callback_data:`admprod_op_${id}_vivo`}],[{text:'⬅️ Voltar',callback_data:`admprod_${id}`}]]}});}
+        mop=data.match(/^admprod_op_(\d+)_(tim|claro|vivo)$/);
+        if(mop){await run('UPDATE esim_planos SET operadora_slug=? WHERE id=?',[mop[2],Number(mop[1])]);return mostrarProdutoAdminTelegram(chatId,Number(mop[1]));}
         let m=data.match(/^admprod_(nome|preco|desc|foto|cat|toggle)_(\d+)$/);
         if(m){ const ac=m[1],id=Number(m[2]); if(ac==='toggle'){const p=await get('SELECT ativo FROM esim_planos WHERE id=?',[id]);await run('UPDATE esim_planos SET ativo=? WHERE id=?',[p?.ativo?0:1,id]);return mostrarProdutoAdminTelegram(chatId,id);} adminSessao.set(adminKey,{etapa:`produto_editar_${ac}`,produto_id:id}); const prompts={nome:'Digite o novo nome:',preco:'Digite o novo preço:',desc:'Digite a nova descrição:',cat:'Digite o nome da categoria:',foto:'Envie agora a foto do produto (imagem ou documento):'}; await tgBot.sendMessage(chatId,prompts[ac]); return;}
         m=data.match(/^admprod_(\d+)$/); if(m){await mostrarProdutoAdminTelegram(chatId,Number(m[1]));return;}
