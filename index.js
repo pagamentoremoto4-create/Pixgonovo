@@ -2096,6 +2096,19 @@ async function initDB() {
     await setConfig('v4929_migracao_planos_antigos_operadora','1');
   }
 
+  // V4.9.3.0 — compatibilidade definitiva com os planos eSIM que já existiam antes das abas por operadora.
+  // A flag da V4.9.2.9 pode ter sido gravada antes de todos os planos antigos serem recuperados do estoque.
+  // Nesta migração, recuperamos novamente o catálogo legado e só então vinculamos o que ainda estiver sem operadora à TIM.
+  if(await getConfig('v4930_migracao_catalogo_esim_legado','0')!=='1'){
+    await run(`INSERT OR IGNORE INTO esim_planos (nome_plano, preco_revenda, preco_cliente, ativo)
+      SELECT nome_plano, preco_revenda, COALESCE(preco_cliente, preco_revenda), 1
+      FROM esim_estoque
+      WHERE nome_plano IS NOT NULL AND TRIM(nome_plano)<>''`);
+    await run(`UPDATE esim_planos SET operadora_slug='tim'
+      WHERE operadora_slug IS NULL OR TRIM(operadora_slug)=''`);
+    await setConfig('v4930_migracao_catalogo_esim_legado','1');
+  }
+
   await run(`CREATE TABLE IF NOT EXISTS destinatarios_avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
@@ -2535,6 +2548,16 @@ async function initDB() {
     await run(`DELETE FROM telegram_esim_operadoras WHERE slug NOT IN ('tim','claro','vivo')`);
     await run(`UPDATE telegram_esim_operadoras SET sistema=1,ativo=1 WHERE slug IN ('tim','claro','vivo')`);
     await setConfig('v4928_ops_padrao_limpo','1');
+  }
+
+  // V4.9.3.0 — garante a configuração inicial TIM/CLARO/VIVO mesmo em bases onde só TIM foi criado.
+  // Executa uma única vez: depois disso o administrador continua livre para apagar/desativar/adicionar itens.
+  if(await getConfig('v4930_ops_iniciais_tim_claro_vivo','0')!=='1'){
+    for(const o of esimOpsPadrao){
+      await run(`INSERT OR IGNORE INTO telegram_esim_operadoras(slug,nome,termo_busca,icon_key,fallback_emoji,estilo,ativo,sistema,ordem) VALUES(?,?,?,?,?,?,1,1,?)`,o);
+    }
+    await run(`UPDATE telegram_esim_operadoras SET ativo=1,sistema=1 WHERE slug IN ('tim','claro','vivo')`);
+    await setConfig('v4930_ops_iniciais_tim_claro_vivo','1');
   }
 
   await run(`CREATE TABLE IF NOT EXISTS banners_catalogo (
@@ -4372,16 +4395,13 @@ async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
 }
 async function enviarEsimBotoesTelegram(chatId, message=null) {
   await carregarVisualTelegram();
-  const ops=await all(`SELECT * FROM telegram_esim_operadoras WHERE ativo=1 AND slug IN ('tim','claro','vivo') ORDER BY ordem,id`);
-  const disponiveis=[];
-  for(const o of ops){
-    const q=await get(`SELECT COUNT(DISTINCT p.id) qtd FROM esim_planos p JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda WHERE p.ativo=1 AND p.operadora_slug=? AND e.status='DISPONIVEL'`,[String(o.slug)]);
-    if(Number(q?.qtd||0)>0) disponiveis.push(o);
-  }
-  if(!disponiveis.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhuma operadora eSIM disponível no momento.*',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
+  // A operadora aparece pelo cadastro administrativo, não pela existência de estoque.
+  // Assim TIM/CLARO/VIVO podem ser exibidas mesmo vazias e o admin mantém controle de ativar/apagar/adicionar.
+  const ops=await all(`SELECT * FROM telegram_esim_operadoras WHERE ativo=1 ORDER BY ordem,id`);
+  if(!ops.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhuma operadora eSIM cadastrada no momento.*',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
   const kb=[];
-  for(let i=0;i<disponiveis.length;i+=2){
-    kb.push(disponiveis.slice(i,i+2).map(o=>tgBtn(String(o.nome).toUpperCase(),`esim_op_${o.id}`,o.estilo||'primary',o.icon_key||'',o.fallback_emoji||'📲')));
+  for(let i=0;i<ops.length;i+=2){
+    kb.push(ops.slice(i,i+2).map(o=>tgBtn(String(o.nome).toUpperCase(),`esim_op_${o.id}`,o.estilo||'primary',o.icon_key||'',o.fallback_emoji||'📲')));
   }
   kb.push([tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]);
   return enviarCardVisual(chatId,message,'cat_esim','📱 *COMPRA ESIM*\n\nEscolha a operadora:',kb);
