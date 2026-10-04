@@ -4434,7 +4434,7 @@ async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=nu
     return termo ? n.includes(termo) : false;
   };
   const planos=todos.filter(p=>pertence(p.nome_plano));
-  console.log(`📦 V4934 ESTOQUE REAL ${slug.toUpperCase()}: ${planos.length} plano(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) disponível(is).`);
+  console.log(`📦 V4935 ESTOQUE DIRETO ${slug.toUpperCase()}: ${planos.length} plano(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) disponível(is).`);
   if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum eSIM disponível no estoque desta operadora no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
   let texto=`📱 *${String(operadora.nome).toUpperCase()}*\n\nEscolha o plano:\n\n`;
   for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${qtd} eSIM${qtd===1?'':'s'} disponível${qtd===1?'':'is'}\n\n`;}
@@ -6891,8 +6891,8 @@ Exemplo:
         if (esimCardMatch) {
           // Ao tocar no plano, ir direto para a escolha do DDD (sem tela intermediária COMPRAR).
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
-            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
-            WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimCardMatch[1])]);
+            FROM esim_planos p LEFT JOIN esim_estoque e ON TRIM(UPPER(e.nome_plano))=TRIM(UPPER(p.nome_plano))
+            WHERE p.id=? GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimCardMatch[1])]);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
           plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           const ddds = await dddsEsimDisponiveis(plano);
@@ -6905,8 +6905,8 @@ Exemplo:
         const esimMatch = data.match(/^comprar_esim_(\d+)$/);
         if (esimMatch && !data.includes('entregar') && !data.includes('finalizar') && !data.includes('cancelar')) {
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
-            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
-            WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
+            FROM esim_planos p LEFT JOIN esim_estoque e ON TRIM(UPPER(e.nome_plano))=TRIM(UPPER(p.nome_plano))
+            WHERE p.id=? GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimMatch[1])]);
           if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
           const ddds=await dddsEsimDisponiveis(plano);
@@ -6916,7 +6916,7 @@ Exemplo:
         }
         const confMatch = data.match(/^esim_confirmar_(\d+)$/);
         if (confMatch) {
-          const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(confMatch[1])]);
+          const plano = await get('SELECT * FROM esim_planos WHERE id=?', [Number(confMatch[1])]);
           if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
           if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
           const sessCompra = await carregarSessaoPedido(from);
@@ -6936,7 +6936,7 @@ Exemplo:
         }
         const dddMatch = data.match(/^esim_ddd_(\d+)_(\d{2})$/);
         if (dddMatch) {
-          const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(dddMatch[1])]);
+          const plano=await get('SELECT * FROM esim_planos WHERE id=?',[Number(dddMatch[1])]);
           if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
           const ddd=normalizarDddEsim(dddMatch[2]);
@@ -6949,7 +6949,7 @@ Exemplo:
         const qtyMatch = data.match(/^esim_qty_(minus|plus)_(\d+)$/);
         if (qtyMatch) {
           const sess=await carregarSessaoPedido(from);
-          const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(qtyMatch[2])]);
+          const plano=await get('SELECT * FROM esim_planos WHERE id=?',[Number(qtyMatch[2])]);
           if(!sess?.ddd || !plano)return tgBot.sendMessage(chatId,'⌛ Esta compra expirou. Escolha o eSIM novamente.');
           plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           const est=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,sess.ddd]);
@@ -6963,7 +6963,7 @@ Exemplo:
         const payEsimMatch = data.match(/^esim_pay_(saldo|pix)_(\d+)$/);
         if (payEsimMatch) {
           const sess=await carregarSessaoPedido(from);
-          const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(payEsimMatch[2])]);
+          const plano=await get('SELECT * FROM esim_planos WHERE id=?',[Number(payEsimMatch[2])]);
           if(!sess?.ddd || !plano)return tgBot.sendMessage(chatId,'⌛ Esta compra expirou. Escolha o eSIM novamente.');
           plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           const quantidade=Math.max(1,Number(sess.quantidade||1));
@@ -7360,24 +7360,38 @@ async function enviarEscolhaDddEsim(from, plano, saldo) {
 }
 
 async function planosEsimDisponiveis(revendaId=null) {
-  // Lista todos os planos cadastrados; se não tiver QR disponível, fica como entrega manual.
-  const rows = await all(`
-    SELECT
-      p.id,
-      p.nome_plano,
-      p.preco_revenda,
-      p.preco_cliente,
-      COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
-    FROM esim_planos p
-    LEFT JOIN esim_estoque e
-      ON TRIM(UPPER(e.nome_plano)) = TRIM(UPPER(p.nome_plano))
-    WHERE p.ativo=1
-    GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente
-    ORDER BY p.nome_plano ASC
+  // V4.9.3.5 — o estoque real é a fonte de verdade para venda.
+  // Não depende de ativo/operadora_slug/preço do catálogo para um eSIM aparecer.
+  const estoque = await all(`
+    SELECT TRIM(nome_plano) AS nome_plano,
+           COUNT(*) AS qtd,
+           MAX(COALESCE(preco_revenda,0)) AS estoque_preco_revenda,
+           MAX(COALESCE(preco_cliente,0)) AS estoque_preco_cliente
+    FROM esim_estoque
+    WHERE status='DISPONIVEL'
+      AND nome_plano IS NOT NULL AND TRIM(nome_plano)<>''
+      AND ddd IS NOT NULL AND TRIM(ddd)<>''
+    GROUP BY TRIM(UPPER(nome_plano))
+    ORDER BY nome_plano COLLATE NOCASE
   `);
-  const disponiveis = rows.filter(row => Number(row.qtd || 0) > 0);
-  if (revendaId) {
-    for (const row of disponiveis) row.preco_revenda = await precoEsimDaRevenda(revendaId, row.id);
+  const disponiveis=[];
+  for(const e of estoque){
+    // Recupera o ID do catálogo apenas para manter os callbacks/precificação existentes.
+    // O plano pode estar inativo: se há estoque DISPONIVEL com DDD, ele continua vendável.
+    const p = await get(`SELECT id,nome_plano,preco_revenda,preco_cliente
+                         FROM esim_planos
+                         WHERE TRIM(UPPER(nome_plano))=TRIM(UPPER(?))
+                         ORDER BY ativo DESC,id ASC LIMIT 1`, [e.nome_plano]);
+    if(!p) continue;
+    const row={
+      id:Number(p.id),
+      nome_plano:String(e.nome_plano),
+      preco_revenda:Number(p.preco_revenda ?? e.estoque_preco_revenda ?? 0),
+      preco_cliente:Number(p.preco_cliente ?? e.estoque_preco_cliente ?? 0),
+      qtd:Number(e.qtd||0)
+    };
+    if(revendaId) row.preco_revenda=await precoEsimDaRevenda(revendaId,row.id);
+    disponiveis.push(row);
   }
   return disponiveis;
 }
@@ -7466,7 +7480,7 @@ async function entregarEsimRevenda(from, revenda, plano, dispositivo, ddd='') {
     return;
   }
 
-  const planoId = Number(plano.id || 0) || Number((await get('SELECT id FROM esim_planos WHERE nome_plano=? AND ativo=1 ORDER BY id ASC LIMIT 1', [item.nome_plano]))?.id || 0);
+  const planoId = Number(plano.id || 0) || Number((await get('SELECT id FROM esim_planos WHERE TRIM(UPPER(nome_plano))=TRIM(UPPER(?)) ORDER BY ativo DESC,id ASC LIMIT 1', [item.nome_plano]))?.id || 0);
   const valor = planoId ? await precoEsimDaRevenda(revenda.id, planoId) : Number(item.preco_revenda || 0);
   const prePago = await modalidadeEsimRevenda(revenda) === 'PRE_PAGO';
   if (prePago && Number(revenda.saldo || 0) < valor) {
@@ -12595,7 +12609,7 @@ app.post('/admin/esim/plano/:id/apagar', async (req, res) => {
 
 app.post('/admin/esim/qrcode', uploadEsim.single('qr'), async (req, res) => {
   const planoId = Number(req.body.plano_id || 0);
-  const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [planoId]);
+  const plano = await get('SELECT * FROM esim_planos WHERE id=?', [planoId]);
   const ddd = normalizarDddEsim(req.body.ddd);
   if (plano && req.file && ddd) {
     try {
