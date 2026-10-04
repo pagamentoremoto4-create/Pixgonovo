@@ -4431,13 +4431,57 @@ async function enviarEsimBotoesTelegram(chatId, message=null) {
   return enviarCardVisual(chatId,message,'cat_esim','📱 *COMPRA ESIM*\n\nEscolha a operadora:',kb);
 }
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
-  // V4.9.3.6 — somente os planos que o administrador vinculou manualmente à operadora.
-  // A disponibilidade/quantidade continua vindo do estoque real.
-  const todos=await planosEsimDisponiveis(cliente?.id||null);
-  const links=await all(`SELECT nome_plano FROM telegram_esim_operadora_planos WHERE operadora_id=?`,[operadora.id]);
-  const vinculados=new Set(links.map(x=>String(x.nome_plano||'').trim().toUpperCase()));
-  const planos=todos.filter(p=>vinculados.has(String(p.nome_plano||'').trim().toUpperCase()));
-  console.log(`📦 V4936 ${String(operadora?.nome||'OPERADORA').toUpperCase()}: ${planos.length} plano(s) vinculado(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) disponível(is).`);
+  // V4.9.3.7 — vínculo manual é a fonte de verdade da operadora.
+  // Busca o estoque diretamente pelo nome vinculado, sem passar pela listagem global de planos.
+  const rows=await all(`
+    SELECT
+      TRIM(e.nome_plano) AS nome_plano,
+      COUNT(*) AS qtd,
+      MAX(COALESCE(e.preco_revenda,0)) AS estoque_preco_revenda,
+      MAX(COALESCE(e.preco_cliente,0)) AS estoque_preco_cliente,
+      (
+        SELECT p.id FROM esim_planos p
+        WHERE TRIM(UPPER(p.nome_plano))=TRIM(UPPER(e.nome_plano))
+        ORDER BY p.ativo DESC,p.id ASC LIMIT 1
+      ) AS plano_id
+    FROM esim_estoque e
+    INNER JOIN telegram_esim_operadora_planos l
+      ON l.operadora_id=?
+     AND TRIM(UPPER(l.nome_plano))=TRIM(UPPER(e.nome_plano))
+    WHERE e.status='DISPONIVEL'
+      AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>''
+    GROUP BY TRIM(UPPER(e.nome_plano))
+    ORDER BY nome_plano COLLATE NOCASE
+  `,[operadora.id]);
+
+  const planos=[];
+  for(const r of rows){
+    let planoId=Number(r.plano_id||0);
+    // Compatibilidade: se um nome existe no estoque mas nunca teve cadastro no catálogo,
+    // cria somente o registro de catálogo necessário aos callbacks. O estoque não é alterado.
+    if(!planoId){
+      const ins=await run(`INSERT INTO esim_planos
+        (nome_plano,preco_revenda,preco_cliente,ativo)
+        VALUES (?,?,?,1)`,[
+          String(r.nome_plano),
+          Number(r.estoque_preco_revenda||0),
+          Number(r.estoque_preco_cliente||r.estoque_preco_revenda||0)
+        ]);
+      planoId=Number(ins.lastID||0);
+    }
+    const cat=await get(`SELECT id,preco_revenda,preco_cliente FROM esim_planos WHERE id=?`,[planoId]);
+    const p={
+      id:planoId,
+      nome_plano:String(r.nome_plano),
+      preco_revenda:Number(cat?.preco_revenda ?? r.estoque_preco_revenda ?? 0),
+      preco_cliente:Number(cat?.preco_cliente ?? r.estoque_preco_cliente ?? 0),
+      qtd:Number(r.qtd||0)
+    };
+    if(cliente?.id) p.preco_revenda=await precoEsimDaRevenda(cliente.id,p.id);
+    planos.push(p);
+  }
+
+  console.log(`📦 V4937 ${String(operadora?.nome||'OPERADORA').toUpperCase()}: ${planos.length} plano(s), ${planos.reduce((a,p)=>a+Number(p.qtd||0),0)} eSIM(s) encontrados diretamente no vínculo manual.`);
   if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano vinculado com estoque disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
   let texto=`📱 *${String(operadora.nome).toUpperCase()}*\n\nEscolha o plano:\n\n`;
   for(const p of planos){const qtd=Number(p.qtd||0);texto+=`• ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${qtd} eSIM${qtd===1?'':'s'} disponível${qtd===1?'':'is'}\n\n`;}
