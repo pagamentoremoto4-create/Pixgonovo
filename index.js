@@ -4050,11 +4050,14 @@ function visualMedia(prefix){return {tipo:tgVisualCache[`tg_visual_${prefix}_typ
 async function enviarCardVisual(chatId,message,prefix,texto,kb){
   await carregarVisualTelegram();
   const m=visualMedia(prefix), opts={caption:texto,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}};
+  // V4.2: força metadados widescreen nas mídias animadas/vídeo para o Telegram
+  // renderizar o card e o teclado na largura ampla, igual ao Telegramesim de referência.
+  const wideOpts={...opts,width:1280,height:720};
   if(m.id){
     try{
       const media={type:m.tipo||'photo',media:m.id,caption:texto,parse_mode:'Markdown'};
       if(message?.message_id){await tgBot.editMessageMedia(media,{chat_id:chatId,message_id:message.message_id,reply_markup:{inline_keyboard:kb}});return true;}
-      if(m.tipo==='animation')await tgBot.sendAnimation(chatId,m.id,opts);else if(m.tipo==='video')await tgBot.sendVideo(chatId,m.id,opts);else await tgBot.sendPhoto(chatId,m.id,opts);return true;
+      if(m.tipo==='animation')await tgBot.sendAnimation(chatId,m.id,wideOpts);else if(m.tipo==='video')await tgBot.sendVideo(chatId,m.id,wideOpts);else await tgBot.sendPhoto(chatId,m.id,opts);return true;
     }catch(e){console.log('⚠️ card visual',prefix,e.message)}
   }
   return atualizarCardTelegram(chatId,message,texto,kb);
@@ -4126,11 +4129,11 @@ async function enviarMenuTelegram(chatId, cliente) {
   const opts = tecladoTelegramMenu(cliente);
   await carregarVisualTelegram();
   const vm=visualMedia('home');
-  if(vm.id){ try { const o={caption:texto,...opts}; if(vm.tipo==='animation') await tgBot.sendAnimation(chatId,vm.id,o); else if(vm.tipo==='video') await tgBot.sendVideo(chatId,vm.id,o); else await tgBot.sendPhoto(chatId,vm.id,o); return; } catch(e){console.log('⚠️ HOME painel:',e.message)} }
+  if(vm.id){ try { const o={caption:texto,...opts}; const ow={...o,width:1280,height:720}; if(vm.tipo==='animation') await tgBot.sendAnimation(chatId,vm.id,ow); else if(vm.tipo==='video') await tgBot.sendVideo(chatId,vm.id,ow); else await tgBot.sendPhoto(chatId,vm.id,o); return; } catch(e){console.log('⚠️ HOME painel:',e.message)} }
   const animacao = String(process.env.TELEGRAM_HOME_ANIMATION || '').trim();
   const banner = String(process.env.TELEGRAM_HOME_BANNER || '').trim();
   if (animacao) {
-    try { await tgBot.sendAnimation(chatId, animacao, { caption:texto, ...opts }); return; }
+    try { await tgBot.sendAnimation(chatId, animacao, { caption:texto, ...opts, width:1280, height:720 }); return; }
     catch (e) { console.log('⚠️ HOME animation:', e.message); }
   }
   if (banner) {
