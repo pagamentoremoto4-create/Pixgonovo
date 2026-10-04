@@ -2109,6 +2109,15 @@ async function initDB() {
     await setConfig('v4930_migracao_catalogo_esim_legado','1');
   }
 
+  // V4.9.3.2 — corrige vínculos gravados pela migração anterior usando os nomes legados.
+  // É seguro repetir: não altera estoque, QR, DDD, preço nem status; apenas a aba da operadora.
+  await run(`UPDATE esim_planos SET operadora_slug='tim'
+    WHERE UPPER(nome_plano) LIKE '%TIM%' OR UPPER(COALESCE(categoria,'')) LIKE '%TIM%'`);
+  await run(`UPDATE esim_planos SET operadora_slug='claro'
+    WHERE UPPER(nome_plano) LIKE '%CLARO%' OR UPPER(COALESCE(categoria,'')) LIKE '%CLARO%'`);
+  await run(`UPDATE esim_planos SET operadora_slug='vivo'
+    WHERE UPPER(nome_plano) LIKE '%VIVO%' OR UPPER(COALESCE(categoria,'')) LIKE '%VIVO%'`);
+
   await run(`CREATE TABLE IF NOT EXISTS destinatarios_avisos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL,
@@ -4414,7 +4423,16 @@ async function enviarEsimBotoesTelegram(chatId, message=null) {
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
   const termo=String(operadora?.termo_busca||operadora?.nome||'').trim();
   const todos=await planosEsimDisponiveis(cliente?.id||null);
-  const ids=await all('SELECT id FROM esim_planos WHERE operadora_slug=?',[String(operadora?.slug||'')]);
+  const slug=String(operadora?.slug||'').toLowerCase();
+  // V4.9.3.2 — compatibilidade com o estoque legado: antes das abas por operadora,
+  // o vínculo do eSIM era feito por nome_plano. Mantemos o vínculo administrativo,
+  // mas também reconhecemos TIM/CLARO/VIVO pelo nome/categoria do catálogo antigo.
+  const ids=await all(`SELECT id FROM esim_planos
+    WHERE operadora_slug=?
+       OR (?='tim'   AND (UPPER(nome_plano) LIKE '%TIM%'   OR UPPER(COALESCE(categoria,'')) LIKE '%TIM%'))
+       OR (?='claro' AND (UPPER(nome_plano) LIKE '%CLARO%' OR UPPER(COALESCE(categoria,'')) LIKE '%CLARO%'))
+       OR (?='vivo'  AND (UPPER(nome_plano) LIKE '%VIVO%'  OR UPPER(COALESCE(categoria,'')) LIKE '%VIVO%'))`,
+    [slug,slug,slug,slug]);
   const permitidos=new Set(ids.map(x=>Number(x.id)));
   const planos=todos.filter(p=>permitidos.has(Number(p.id)));
   if(!planos.length) return atualizarCardTelegram(chatId,message,`⚠️ *${String(operadora?.nome||'OPERADORA').toUpperCase()}*\n\nNenhum plano disponível no momento.`,[[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
