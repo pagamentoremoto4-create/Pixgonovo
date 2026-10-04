@@ -3444,7 +3444,10 @@ async function entregarEsimQrCompacto(destino, item, nomePlano, pedidoId) {
   const legenda = `✅ *eSIM ENTREGUE*\n\n📡 *${nomePlano}${ddd}*\n📷 Escaneie o QR Code para instalar.\n\n🍎 *iPhone:* Ajustes → Celular → Adicionar eSIM → Usar QR Code\n🤖 *Android:* Configurações → SIM/eSIM → Adicionar eSIM → Escanear QR Code\n\n⚠️ Conecte-se ao Wi-Fi durante a instalação.`;
   if (String(destino).startsWith('tg:') && tgBot) {
     const chatId=String(destino).slice(3);
-    const reply_markup={inline_keyboard:[[tgBtn('INSTALAÇÃO MANUAL',`esim_manual_${pedidoId}`,'primary','TG_ICON_ESIM','🛠️')],[tgBtn('MENU','menu_voltar','danger','TG_ICON_VOLTAR','🏠')]]};
+    const reply_markup={inline_keyboard:[
+      [tgBtn('INSTALAÇÃO MANUAL',`esim_manual_${pedidoId}`,'primary','TG_ICON_ESIM','🛠️')],
+      [tgBtn('MENU','menu_voltar','danger','TG_ICON_VOLTAR','🏠')]
+    ]};
     if(fs.existsSync(qrPath)) await tgBot.sendPhoto(chatId,qrPath,{caption:legenda,parse_mode:'Markdown',reply_markup});
     else await tgBot.sendMessage(chatId,legenda,{parse_mode:'Markdown',reply_markup});
     return;
@@ -6685,8 +6688,8 @@ Exemplo:
           if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
           const ddd=normalizarDddEsim(dddMatch[2]);
-          const estoqueDdd=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
-          if(!Number(estoqueDdd?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
+          const estoque=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+          if(!Number(estoque?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
           await salvarSessaoPedido(from,{etapa:'esim_pagamento',plano,ddd});
           const revAtual=await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]);
           return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*\n📍 DDD: ${ddd}\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Saldo: ${brl(Number(revAtual?.saldo||0))}\n\nEscolha como deseja pagar:`,[
@@ -6702,8 +6705,8 @@ Exemplo:
           if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
           const ddd=normalizarDddEsim(payMatch[3]);
-          const estoqueDdd=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
-          if(!Number(estoqueDdd?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
+          const estoque=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+          if(!Number(estoque?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
           if(forma==='saldo'){
             const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
             if(Number(revAtual?.saldo||0)<Number(plano.preco_revenda||0)){
@@ -6715,12 +6718,13 @@ Exemplo:
             await apagarSessaoPedido(from);
             return entregarEsimRevenda(from,revAtual||cliente,plano,'QR',ddd);
           }
+          await salvarSessaoPedido(from,{etapa:'esim_pix',tipo_compra:'ESIM',plano,ddd,totalPedido:Number(plano.preco_revenda||0)});
           return iniciarFluxoPagamento(from,{valor_pix:Number(plano.preco_revenda||0),tipo_pix:'SERVICO',tipo_compra:'ESIM',plano,ddd,totalPedido:Number(plano.preco_revenda||0),saldo_usado:0},cliente,async(m)=>tgBot.sendMessage(chatId,m));
         }
         const manualMenuMatch=data.match(/^esim_manual_(\d+)$/);
         if(manualMenuMatch){
           const pedidoId=Number(manualMenuMatch[1]);
-          const item=await get('SELECT * FROM esim_estoque WHERE pedido_id=? AND status="VENDIDO"',[pedidoId]);
+          const item=await get(`SELECT * FROM esim_estoque WHERE pedido_id=? AND status='VENDIDO'`,[pedidoId]);
           if(!item)return tgBot.sendMessage(chatId,'❌ Não encontrei os dados deste eSIM.');
           return tgBot.sendMessage(chatId,'🛠️ *INSTALAÇÃO MANUAL*\n\nEscolha o aparelho:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
             [tgBtn('iPhone',`esim_manual_iphone_${pedidoId}`,'primary','TG_ICON_ESIM','🍎'),tgBtn('Android',`esim_manual_android_${pedidoId}`,'primary','TG_ICON_ESIM','🤖')],
@@ -6730,11 +6734,11 @@ Exemplo:
         const manualDeviceMatch=data.match(/^esim_manual_(iphone|android)_(\d+)$/);
         if(manualDeviceMatch){
           const pedidoId=Number(manualDeviceMatch[2]);
-          let item=await get('SELECT * FROM esim_estoque WHERE pedido_id=? AND status="VENDIDO"',[pedidoId]);
+          let item=await get(`SELECT * FROM esim_estoque WHERE pedido_id=? AND status='VENDIDO'`,[pedidoId]);
           if(!item)return tgBot.sendMessage(chatId,'❌ Não encontrei os dados deste eSIM.');
           item=await garantirDadosAtivacaoEsim(item);
-          if(manualDeviceMatch[1]==='iphone')return tgBot.sendMessage(chatId,textoIphoneEsim(item,item.nome_plano),{parse_mode:'Markdown'});
-          return tgBot.sendMessage(chatId,textoAndroidEsim(item,item.nome_plano),{parse_mode:'Markdown'});
+          const texto=manualDeviceMatch[1]==='iphone'?textoIphoneEsim(item,item.nome_plano):textoAndroidEsim(item,item.nome_plano);
+          return tgBot.sendMessage(chatId,texto,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[tgBtn('MENU','menu_voltar','danger','TG_ICON_VOLTAR','🏠')]]}});
         }
         if (data === 'esim_cancelar_compra') {
           await apagarSessaoPedido(from);
@@ -7189,71 +7193,6 @@ async function criarPedidoEsimManualRevenda(from, revenda, plano) {
   await avisarNovoPedidoAdmins(pedido, `\n📱 *Entrega manual eSIM*\nPedido aguardando QR Code. Use os botões enviados no Telegram do admin ou abra o painel administrativo.`);
   await avisarEsimManualAdminTelegram(pedido);
 
-  await enviarTexto(from, `✅ Compra aprovada
-
-📱 ${plano.nome_plano}
-💰 Valor: ${brl(valor)}
-
-💳 Situação da conta:
-${textoSituacaoSaldo(revAtual?.saldo || 0)}
-
-👨‍💻 *Entrega manual*
-O estoque automático de QR acabou.
-Seu pedido ficou pendente para o admin enviar o QR.
-
-🆔 Pedido #${pedido.id}`);
-}
-
-async function entregarEsimRevenda(from, revenda, plano, dispositivo, ddd='') {
-  const dddNorm = normalizarDddEsim(ddd);
-  const item = dddNorm
-    ? await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=? ORDER BY id ASC LIMIT 1`, [plano.nome_plano, dddNorm])
-    : await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND (ddd IS NULL OR TRIM(ddd)='') ORDER BY id ASC LIMIT 1`, [plano.nome_plano]);
-
-  // Sem QR no estoque: cria pedido manual em vez de bloquear a venda.
-  if (!item) {
-    await criarPedidoEsimManualRevenda(from, revenda, plano);
-    return;
-  }
-
-  const planoId = Number(plano.id || 0) || Number((await get('SELECT id FROM esim_planos WHERE nome_plano=? AND ativo=1 ORDER BY id ASC LIMIT 1', [item.nome_plano]))?.id || 0);
-  const valor = planoId ? await precoEsimDaRevenda(revenda.id, planoId) : Number(item.preco_revenda || 0);
-  const prePago = await modalidadeEsimRevenda(revenda) === 'PRE_PAGO';
-  if (prePago && Number(revenda.saldo || 0) < valor) {
-    await salvarSessaoPedido(from, {
-      etapa: 'saldo_insuficiente_servico',
-      tipo_compra: 'ESIM',
-      plano: {
-        id: planoId,
-        nome_plano: item.nome_plano,
-        preco_revenda: valor
-      },
-      dispositivo: dispositivo || null,
-      totalPedido: valor,
-      entradas: []
-    });
-    await enviarTexto(from, textoSaldoInsuficiente(revenda, valor, `eSIM ${item.nome_plano}`));
-    return;
-  }
-
-  const itemPreparado = await garantirDadosAtivacaoEsim(item);
-  if (!itemPreparado?.lpa_completo || !itemPreparado?.smdp || !itemPreparado?.codigo_ativacao) {
-    await enviarTexto(from, '❌ Este QR Code do estoque não pôde ser lido corretamente. Nenhum eSIM foi consumido. O administrador foi avisado.');
-    await avisarAdminTelegram(`⚠️ Falha ao ler QR eSIM do estoque #${item.id}\nPlano: ${item.nome_plano}\nO item não foi vendido.`);
-    return;
-  }
-
-  const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
-    VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', ?, CURRENT_TIMESTAMP)`,
-    [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor, 1]);
-  await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
-  const tipo = String(dispositivo || 'ANDROID').toUpperCase();
-  await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, dispositivo_entrega=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`,
-    [revenda.id, revenda.nome, ins.lastID, tipo, item.id]);
-  const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
-  notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
-  const pedidoAuto = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
-  await avisarEsimAutomaticoAdminTelegram(pedidoAuto, itemPreparado);
   await entregarEsimQrCompacto(from, itemPreparado, item.nome_plano, ins.lastID);
 }
 
