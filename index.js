@@ -4234,7 +4234,8 @@ async function processarMensagemTelegram(msg) {
     if(['cancelar','sair','voltar'].includes(low)){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Operação cancelada.');return enviarPainelAdminTelegram(msg.chat.id);}
     if(sessAdmin.etapa==='layout_media'){
       const md=midiaTelegramDaMensagem(msg);if(!md)return tgBot.sendMessage(msg.chat.id,'❌ Envie um GIF, vídeo MP4 ou foto.');
-      await salvarVisualTelegram(`tg_visual_${sessAdmin.slug}_media`,md.id);await salvarVisualTelegram(`tg_visual_${sessAdmin.slug}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card/animação salvo.');return editarVisualCategoria(msg.chat.id,sessAdmin.slug);
+      const visualSlug={esim:'cat_esim',servicos:'cat_servicos',premium:'cat_premium',home:'home'}[sessAdmin.slug]||sessAdmin.slug;
+      await salvarVisualTelegram(`tg_visual_${visualSlug}_media`,md.id);await salvarVisualTelegram(`tg_visual_${visualSlug}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card/animação salvo e aplicado.');return editarVisualCategoria(msg.chat.id,sessAdmin.slug);
     }
     if(sessAdmin.etapa==='layout_icon'){
       const id=customEmojiDaMensagem(msg);if(!id)return tgBot.sendMessage(msg.chat.id,'❌ Não reconheci como Custom Emoji/Premium. Envie diretamente pelo seletor do Telegram.');
@@ -6348,7 +6349,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         lm=data.match(/^admlay_esim_(\d+)$/);if(lm){const p=await get('SELECT id,nome_plano FROM esim_planos WHERE id=?',[Number(lm[1])]);if(!p)return;adminSessao.set(adminKey,{etapa:'layout_esim_media',esim_id:p.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${p.nome_plano}*`,{parse_mode:'Markdown'});return;}
         lm=data.match(/^admlay_media_(home|esim|servicos|premium)$/);if(lm){adminSessao.set(adminKey,{etapa:'layout_media',slug:lm[1]});await tgBot.sendMessage(chatId,'🎬 Envie agora o GIF, vídeo MP4 ou foto que será o card.\n\n/cancelar para sair.');return;}
         lm=data.match(/^admlay_icon_(esim|servicos|premium)$/);if(lm){adminSessao.set(adminKey,{etapa:'layout_icon',slug:lm[1]});await tgBot.sendMessage(chatId,'✨ Envie agora 1 Custom Emoji/Premium diretamente pelo seletor do Telegram.\n\n/cancelar para sair.');return;}
-        lm=data.match(/^admlay_clear_(home|esim|servicos|premium)$/);if(lm){await salvarVisualTelegram(`tg_visual_${lm[1]}_media`,'');await salvarVisualTelegram(`tg_visual_${lm[1]}_type`,'');await tgBot.sendMessage(chatId,'✅ Mídia removida.');await editarVisualCategoria(chatId,lm[1]);return;}
+        lm=data.match(/^admlay_clear_(home|esim|servicos|premium)$/);if(lm){const visualSlug={esim:'cat_esim',servicos:'cat_servicos',premium:'cat_premium',home:'home'}[lm[1]]||lm[1];await salvarVisualTelegram(`tg_visual_${visualSlug}_media`,'');await salvarVisualTelegram(`tg_visual_${visualSlug}_type`,'');await tgBot.sendMessage(chatId,'✅ Mídia removida.');await editarVisualCategoria(chatId,lm[1]);return;}
         lm=data.match(/^admlay_srv_(\d+)$/);if(lm){const sv=await get('SELECT id,COALESCE(NULLIF(nome_exibicao,""),nome) nome FROM servicos_catalogo WHERE id=?',[Number(lm[1])]);if(!sv)return;adminSessao.set(adminKey,{etapa:'layout_service_media',service_id:sv.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${sv.nome}*`,{parse_mode:'Markdown'});return;}
         let z;
         if(data==='admcat_nova'){adminSessao.set(adminKey,{etapa:'categoria_nova'});await tgBot.sendMessage(chatId,'Digite o nome da nova categoria:');return;}
