@@ -4026,6 +4026,72 @@ async function vincularContaWhatsAppPeloAdmin(whatsappId, telegramId) {
   return { ok:true, cliente };
 }
 
+
+// V4 — Layout Telegram configurável inteiramente pelo painel do próprio bot.
+// Nenhuma mídia/Custom Emoji depende do Render; configs ficam na tabela `configs`.
+const tgVisualCache = {};
+async function carregarVisualTelegram(){
+  const rows=await all("SELECT chave,valor FROM configs WHERE chave LIKE 'tg_visual_%' OR chave LIKE 'TG_ICON_%'");
+  for(const r of rows) tgVisualCache[r.chave]=r.valor||'';
+}
+async function salvarVisualTelegram(chave,valor){ tgVisualCache[chave]=String(valor||''); await setConfig(chave,String(valor||'')); }
+function midiaTelegramDaMensagem(msg){
+  if(msg?.animation?.file_id)return {tipo:'animation',id:msg.animation.file_id};
+  if(msg?.video?.file_id)return {tipo:'video',id:msg.video.file_id};
+  if(msg?.photo?.length)return {tipo:'photo',id:msg.photo[msg.photo.length-1].file_id};
+  return null;
+}
+function customEmojiDaMensagem(msg){
+  const ents=[...(msg?.entities||[]),...(msg?.caption_entities||[])];
+  const e=ents.find(x=>x.type==='custom_emoji'&&x.custom_emoji_id);
+  return e?.custom_emoji_id||'';
+}
+function visualMedia(prefix){return {tipo:tgVisualCache[`tg_visual_${prefix}_type`]||'',id:tgVisualCache[`tg_visual_${prefix}_media`]||''};}
+async function enviarCardVisual(chatId,message,prefix,texto,kb){
+  await carregarVisualTelegram();
+  const m=visualMedia(prefix), opts={caption:texto,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}};
+  if(m.id){
+    try{
+      const media={type:m.tipo||'photo',media:m.id,caption:texto,parse_mode:'Markdown'};
+      if(message?.message_id){await tgBot.editMessageMedia(media,{chat_id:chatId,message_id:message.message_id,reply_markup:{inline_keyboard:kb}});return true;}
+      if(m.tipo==='animation')await tgBot.sendAnimation(chatId,m.id,opts);else if(m.tipo==='video')await tgBot.sendVideo(chatId,m.id,opts);else await tgBot.sendPhoto(chatId,m.id,opts);return true;
+    }catch(e){console.log('⚠️ card visual',prefix,e.message)}
+  }
+  return atualizarCardTelegram(chatId,message,texto,kb);
+}
+async function menuLayoutTelegramAdmin(chatId){
+  await carregarVisualTelegram();
+  return tgBot.sendMessage(chatId,'🎨 *LAYOUT DO TELEGRAM*\n\nConfigure tudo aqui, sem Render.\n\n• HOME: vídeo/GIF/foto\n• Categorias: card + Custom Emoji\n• Serviços: card individual\n\nEscolha o que deseja editar:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
+    [{text:'🏠 HOME',callback_data:'admlay_home'}],
+    [{text:'📲 COMPRA eSIM',callback_data:'admlay_cat_esim'},{text:'🛠️ SERVIÇOS',callback_data:'admlay_cat_servicos'}],
+    [{text:'⭐ ASSINATURA PREMIUM',callback_data:'admlay_cat_premium'}],
+    [{text:'🧩 Cards dos serviços',callback_data:'admlay_services'}],[{text:'📲 Cards dos planos eSIM',callback_data:'admlay_esims'}],
+    [{text:'👁️ Visualizar HOME',callback_data:'admin_menucliente'}],
+    [{text:'⬅️ Painel',callback_data:'admin_inicio'}]
+  ]}});
+}
+async function editarVisualCategoria(chatId,slug){
+  const nomes={home:'HOME',esim:'COMPRA eSIM',servicos:'SERVIÇOS',premium:'ASSINATURA PREMIUM'};
+  return tgBot.sendMessage(chatId,`🎨 *${nomes[slug]||slug}*\n\nEscolha o item para configurar.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
+    [{text:'🎬 Trocar card / animação',callback_data:`admlay_media_${slug}`}],
+    ...(slug==='home'?[]:[[{text:'✨ Trocar Custom Emoji',callback_data:`admlay_icon_${slug}`}]]),
+    [{text:'🗑️ Remover mídia',callback_data:`admlay_clear_${slug}`}],
+    [{text:'⬅️ Layout',callback_data:'admin_layout_tg'}]
+  ]}});
+}
+async function listarServicosLayout(chatId){
+ const rows=await all("SELECT id,COALESCE(NULLIF(nome_exibicao,''),nome) nome,api_provider FROM servicos_catalogo WHERE ativo=1 AND COALESCE(api_provider,'')<>'PREMIUM' ORDER BY nome COLLATE NOCASE LIMIT 80");
+ const kb=rows.map(x=>[{text:`${x.api_provider==='GGSOMA'?'⭐':'🧩'} ${String(x.nome).slice(0,48)}`,callback_data:`admlay_srv_${x.id}`}]);kb.push([{text:'⬅️ Layout',callback_data:'admin_layout_tg'}]);
+ return tgBot.sendMessage(chatId,'🧩 *CARDS DOS SERVIÇOS*\n\nEscolha um serviço para enviar o card dele:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function listarEsimsLayout(chatId){const rows=await all('SELECT id,nome_plano FROM esim_planos WHERE ativo=1 ORDER BY nome_plano');const kb=rows.map(x=>[{text:`📲 ${String(x.nome_plano).slice(0,48)}`,callback_data:`admlay_esim_${x.id}`}]);kb.push([{text:'⬅️ Layout',callback_data:'admin_layout_tg'}]);return tgBot.sendMessage(chatId,'📲 *CARDS DOS PLANOS eSIM*\n\nEscolha um plano:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});}
+async function menuAssinaturaPremiumTelegram(chatId,cliente,message=null){
+ const rows=await all("SELECT * FROM servicos_catalogo WHERE ativo=1 AND api_provider='GGSOMA' ORDER BY COALESCE(NULLIF(nome_exibicao,''),nome) COLLATE NOCASE");
+ if(!rows.length)return enviarCardVisual(chatId,message,'cat_premium','⭐ *ASSINATURA PREMIUM*\n\nNenhum produto GGSOMA está ativado no momento.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
+ const kb=[]; for(const s of rows){const nome=s.nome_exibicao||s.nome;kb.push([tgBtn(String(nome).slice(0,45),`servico_${s.id}`,'primary','TG_ICON_PREMIUM','⭐')]);} kb.push([tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]);
+ return enviarCardVisual(chatId,message,'cat_premium','⭐ *ASSINATURA PREMIUM*\n\nEscolha uma assinatura:',kb);
+}
+
 function menuTelegramTexto(cliente) {
   const saldo = brl(cliente?.saldo || 0);
   return `⚙️ *CENTRAL UNLOCKER*\n\n👤 *Nome:* ${cliente?.nome || 'Cliente'}\n🏷 *Perfil:* REVENDA\n💰 *Saldo:* ${saldo}\n\nEscolha uma opção abaixo:`;
@@ -4034,7 +4100,7 @@ function menuTelegramTexto(cliente) {
 // Botões no mesmo padrão visual do Telegramesim: cor + Custom Emoji configurável.
 // Quando não houver Custom Emoji configurado, mantém um emoji comum visível no texto.
 function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji='') {
-  const icon = iconKey ? String(process.env[iconKey] || '').trim() : '';
+  const icon = iconKey ? String(tgVisualCache[iconKey] || process.env[iconKey] || '').trim() : '';
   const b = { text: icon ? label : `${fallbackEmoji ? fallbackEmoji + ' ' : ''}${label}`, callback_data };
   if (['primary','success','danger'].includes(style)) b.style = style;
   if (icon) b.icon_custom_emoji_id = icon;
@@ -4043,7 +4109,7 @@ function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji=
 function tecladoTelegramMenu(cliente) {
   const linhas = [
     [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM', '📲')],
-    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️'), tgBtn('PREMIUM', 'menu_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
+    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️'), tgBtn('ASSINATURA PREMIUM', 'menu_assinatura_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
     [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')],
     [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')],
     [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')],
@@ -4058,6 +4124,9 @@ async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
   const texto = menuTelegramTexto(cliente);
   const opts = tecladoTelegramMenu(cliente);
+  await carregarVisualTelegram();
+  const vm=visualMedia('home');
+  if(vm.id){ try { const o={caption:texto,...opts}; if(vm.tipo==='animation') await tgBot.sendAnimation(chatId,vm.id,o); else if(vm.tipo==='video') await tgBot.sendVideo(chatId,vm.id,o); else await tgBot.sendPhoto(chatId,vm.id,o); return; } catch(e){console.log('⚠️ HOME painel:',e.message)} }
   const animacao = String(process.env.TELEGRAM_HOME_ANIMATION || '').trim();
   const banner = String(process.env.TELEGRAM_HOME_BANNER || '').trim();
   if (animacao) {
@@ -4123,7 +4192,7 @@ async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
     texto += `• ${s.nome} — ${brl(preco)}
 `;
   }
-  await atualizarCardTelegram(chatId, message, texto.trim(), montarLinhasBotoes(servicos, 'servico', 'nome'));
+  await enviarCardVisual(chatId, message, 'cat_servicos', texto.trim(), montarLinhasBotoes(servicos, 'servico', 'nome'));
 }
 async function enviarEsimBotoesTelegram(chatId, message=null) {
   const clienteEsim = await get('SELECT * FROM revendas WHERE telegram_id=? AND status="ATIVA"', [String(chatId)]);
@@ -4143,7 +4212,7 @@ ${entrega}
 
 `;
   }
-  await atualizarCardTelegram(chatId, message, texto.trim(), montarLinhasBotoes(planos, 'esim', 'nome_plano'));
+  await enviarCardVisual(chatId, message, 'cat_esim', texto.trim(), montarLinhasBotoes(planos, 'esim', 'nome_plano'));
 }
 function normalizarOpcaoTelegram(texto) {
   const t = String(texto || '').trim().toLowerCase().replace(/^menu_/, '');
@@ -4163,6 +4232,20 @@ async function processarMensagemTelegram(msg) {
   if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '') && sessAdmin && !sessAdmin.etapa?.startsWith('produto_') && sessAdmin.etapa !== 'entregar_esim_manual_tg') {
     const txt=String(msg.text||'').trim(); const low=txt.toLowerCase();
     if(['cancelar','sair','voltar'].includes(low)){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Operação cancelada.');return enviarPainelAdminTelegram(msg.chat.id);}
+    if(sessAdmin.etapa==='layout_media'){
+      const md=midiaTelegramDaMensagem(msg);if(!md)return tgBot.sendMessage(msg.chat.id,'❌ Envie um GIF, vídeo MP4 ou foto.');
+      await salvarVisualTelegram(`tg_visual_${sessAdmin.slug}_media`,md.id);await salvarVisualTelegram(`tg_visual_${sessAdmin.slug}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card/animação salvo.');return editarVisualCategoria(msg.chat.id,sessAdmin.slug);
+    }
+    if(sessAdmin.etapa==='layout_icon'){
+      const id=customEmojiDaMensagem(msg);if(!id)return tgBot.sendMessage(msg.chat.id,'❌ Não reconheci como Custom Emoji/Premium. Envie diretamente pelo seletor do Telegram.');
+      const key={esim:'TG_ICON_ESIM',servicos:'TG_ICON_SERVICOS',premium:'TG_ICON_PREMIUM'}[sessAdmin.slug];await salvarVisualTelegram(key,id);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Custom Emoji salvo.');return editarVisualCategoria(msg.chat.id,sessAdmin.slug);
+    }
+    if(sessAdmin.etapa==='layout_esim_media'){const md=midiaTelegramDaMensagem(msg);if(!md)return tgBot.sendMessage(msg.chat.id,'❌ Envie um GIF, vídeo MP4 ou foto.');await salvarVisualTelegram(`tg_visual_esim_${sessAdmin.esim_id}_media`,md.id);await salvarVisualTelegram(`tg_visual_esim_${sessAdmin.esim_id}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card do plano eSIM salvo.');return listarEsimsLayout(msg.chat.id);}
+    if(sessAdmin.etapa==='layout_service_media'){
+      const md=midiaTelegramDaMensagem(msg);if(!md)return tgBot.sendMessage(msg.chat.id,'❌ Envie um GIF, vídeo MP4 ou foto.');
+      await salvarVisualTelegram(`tg_visual_service_${sessAdmin.service_id}_media`,md.id);await salvarVisualTelegram(`tg_visual_service_${sessAdmin.service_id}_type`,md.tipo);adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Card do serviço salvo.');return listarServicosLayout(msg.chat.id);
+    }
+
     if(sessAdmin.etapa==='categoria_nova'){if(!txt)return;await run('INSERT OR IGNORE INTO categorias_produtos(nome) VALUES(?)',[txt]);adminSessao.delete(fromAdmin);return menuCategoriasTG(msg.chat.id)}
     if(sessAdmin.etapa==='categoria_nome'){const old=await get('SELECT nome FROM categorias_produtos WHERE id=?',[sessAdmin.id]);await run('UPDATE categorias_produtos SET nome=? WHERE id=?',[txt,sessAdmin.id]);if(old)await run('UPDATE esim_planos SET categoria=? WHERE categoria=?',[txt,old.nome]);adminSessao.delete(fromAdmin);return verCategoriaTG(msg.chat.id,sessAdmin.id)}
     if(sessAdmin.etapa==='cliente_saldo'){const v=Number(txt.replace(',','.'));if(!Number.isFinite(v))return tgBot.sendMessage(msg.chat.id,'❌ Valor inválido.');await run('UPDATE revendas SET saldo=? WHERE id=?',[v,sessAdmin.id]);adminSessao.delete(fromAdmin);return verClienteTG(msg.chat.id,sessAdmin.id)}
@@ -6138,7 +6221,7 @@ function adminTelegramKeyboard() {
     [{ text: '📢 Mensagens', callback_data: 'admin_mensagens' }, { text: '🖼️ Banners', callback_data: 'admin_banners' }],
     [{ text: '📣 Anúncios automáticos', callback_data: 'admin_campanhas' }],
     [{ text: '📊 Relatórios', callback_data: 'admin_relatorios' }, { text: '⚙️ Configurações', callback_data: 'admin_configuracoes' }],
-    [{ text: '⭐ Assinaturas Premium', callback_data: 'admpr_menu' }],
+    [{ text: '🎨 Layout Telegram', callback_data: 'admin_layout_tg' }],
     [{ text: '📥 Estoque', callback_data: 'admin_estoque' }, { text: '💾 Backup', callback_data: 'admin_backup' }],
     [{ text: '🛒 Menu do cliente', callback_data: 'admin_menucliente' }]
   ] };
@@ -6155,6 +6238,7 @@ async function enviarPainelAdminTelegram(chatId, mostrarAtalho = false) {
 }
 async function responderBotaoAdminTelegram(chatId, data) {
   if (data === 'admin_inicio') return enviarPainelAdminTelegram(chatId);
+  if (data === 'admin_layout_tg') return menuLayoutTelegramAdmin(chatId);
   if (data === 'admin_produtos') return enviarListaProdutosAdminTelegram(chatId);
   if (data === 'admin_categorias') return menuCategoriasTG(chatId);
   if (data === 'admin_pedidos') return menuPedidosTG(chatId);
@@ -6256,6 +6340,16 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         m=data.match(/^admcamp_(clientes|grupot|var|stop|wa|tg)_(\d+)$/); if(m){const col={clientes:'destino_clientes',grupot:'destino_grupo',var:'variar_texto',stop:'parar_sem_estoque',wa:'enviar_whatsapp',tg:'enviar_telegram'}[m[1]],id=Number(m[2]);const c=await get(`SELECT ${col} valor FROM campanhas_anuncios WHERE id=?`,[id]);await run(`UPDATE campanhas_anuncios SET ${col}=? WHERE id=?`,[Number(c?.valor||0)?0:1,id]);return verCampanhaTG(chatId,id);}
         m=data.match(/^admcamp_h_(1|2|4|12|24)_(\d+)$/); if(m){const h=Number(m[1]),id=Number(m[2]);await run(`UPDATE campanhas_anuncios SET intervalo_horas=?,proximo_envio=CASE WHEN ativo=1 THEN datetime('now',?) ELSE proximo_envio END WHERE id=?`,[h,`+${h} hours`,id]);return verCampanhaTG(chatId,id);}
         m=data.match(/^admcamp_agora_(\d+)$/); if(m){const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[Number(m[1])]);if(!c)return tgBot.sendMessage(chatId,'❌ Campanha não encontrada.');const est=await estoqueDisponivelCampanha(c.produto_id);if(est!==null&&est<=0&&Number(c.parar_sem_estoque??1))return tgBot.sendMessage(chatId,'⛔ Estoque zerado. A campanha não foi enviada.');await tgBot.sendMessage(chatId,'⏳ Enviando campanha...');const r=await enviarCampanhaAnuncio(c);await run('UPDATE campanhas_anuncios SET ultimo_envio=CURRENT_TIMESTAMP,total_envios=total_envios+1,ciclos_enviados=ciclos_enviados+1,ultima_enviadas=?,ultima_falhas=? WHERE id=?',[r.enviadas,r.falhas,c.id]);await tgBot.sendMessage(chatId,`✅ Envio concluído: ${r.enviadas}/${r.total}. Falhas: ${r.falhas}.`);return;}
+        if(data==='admin_layout_tg'){await menuLayoutTelegramAdmin(chatId);return;}
+        let lm=data.match(/^admlay_cat_(home|esim|servicos|premium)$/);if(lm){await editarVisualCategoria(chatId,lm[1]);return;}
+        if(data==='admlay_home'){await editarVisualCategoria(chatId,'home');return;}
+        if(data==='admlay_services'){await listarServicosLayout(chatId);return;}
+        if(data==='admlay_esims'){await listarEsimsLayout(chatId);return;}
+        lm=data.match(/^admlay_esim_(\d+)$/);if(lm){const p=await get('SELECT id,nome_plano FROM esim_planos WHERE id=?',[Number(lm[1])]);if(!p)return;adminSessao.set(adminKey,{etapa:'layout_esim_media',esim_id:p.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${p.nome_plano}*`,{parse_mode:'Markdown'});return;}
+        lm=data.match(/^admlay_media_(home|esim|servicos|premium)$/);if(lm){adminSessao.set(adminKey,{etapa:'layout_media',slug:lm[1]});await tgBot.sendMessage(chatId,'🎬 Envie agora o GIF, vídeo MP4 ou foto que será o card.\n\n/cancelar para sair.');return;}
+        lm=data.match(/^admlay_icon_(esim|servicos|premium)$/);if(lm){adminSessao.set(adminKey,{etapa:'layout_icon',slug:lm[1]});await tgBot.sendMessage(chatId,'✨ Envie agora 1 Custom Emoji/Premium diretamente pelo seletor do Telegram.\n\n/cancelar para sair.');return;}
+        lm=data.match(/^admlay_clear_(home|esim|servicos|premium)$/);if(lm){await salvarVisualTelegram(`tg_visual_${lm[1]}_media`,'');await salvarVisualTelegram(`tg_visual_${lm[1]}_type`,'');await tgBot.sendMessage(chatId,'✅ Mídia removida.');await editarVisualCategoria(chatId,lm[1]);return;}
+        lm=data.match(/^admlay_srv_(\d+)$/);if(lm){const sv=await get('SELECT id,COALESCE(NULLIF(nome_exibicao,""),nome) nome FROM servicos_catalogo WHERE id=?',[Number(lm[1])]);if(!sv)return;adminSessao.set(adminKey,{etapa:'layout_service_media',service_id:sv.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${sv.nome}*`,{parse_mode:'Markdown'});return;}
         let z;
         if(data==='admcat_nova'){adminSessao.set(adminKey,{etapa:'categoria_nova'});await tgBot.sendMessage(chatId,'Digite o nome da nova categoria:');return;}
         z=data.match(/^admcat_(\d+)$/);if(z){await verCategoriaTG(chatId,Number(z[1]));return;}
@@ -6284,7 +6378,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
       if (ehBotaoCliente) {
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -6296,6 +6390,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           await apagarSessaoPedido(from);
           return voltarHomeNoMesmoCard(chatId, cliente, q.message);
         }
+        if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });
           return enviarServicosBotoesTelegram(chatId, cliente, q.message);
@@ -6407,9 +6502,16 @@ Exemplo: 50`);
         }
         const servMatch = data.match(/^servico_(\d+)$/);
         if (servMatch) {
-          const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [Number(servMatch[1])]);
-          if (!servico) return tgBot.sendMessage(chatId, '❌ Serviço indisponível.', { reply_markup: { inline_keyboard: [[{ text: '⬅️ Voltar', callback_data: 'menu_voltar' }]] } });
-          if(servico.api_provider==='PREMIUM'){const p=await get('SELECT id FROM premium_products WHERE catalogo_id=?',[servico.id]);if(p)return premium.show(from,cliente,p.id,true);return;}
+          const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[Number(servMatch[1])]);
+          if(!servico)return tgBot.sendMessage(chatId,'❌ Serviço indisponível.');
+          if(servico.api_provider==='PREMIUM')return tgBot.sendMessage(chatId,'❌ Esta categoria antiga foi desativada.');
+          const preco=await precoDaRevenda(cliente.id,servico.id),nome=servico.nome_exibicao||servico.nome,desc=String(servico.descricao||servico.descricao_cliente||'').trim();
+          const voltar=servico.api_provider==='GGSOMA'?'menu_assinatura_premium':'menu_servicos';
+          return enviarCardVisual(chatId,q.message,`service_${servico.id}`,`🛍️ *${nome}*\n\n${desc?desc+'\n\n':''}💰 *Valor:* ${brl(preco)}`,[[tgBtn('COMPRAR',`comprar_servico_${servico.id}`,'success','TG_ICON_COMPRAR','🛒')],[tgBtn('Voltar',voltar,'danger','TG_ICON_VOLTAR','⬅️')]]);
+        }
+        const comprarServMatch=data.match(/^comprar_servico_(\d+)$/);
+        if(comprarServMatch){
+          const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[Number(comprarServMatch[1])]);if(!servico)return tgBot.sendMessage(chatId,'❌ Serviço indisponível.');
           if(servico.api_provider==='GGSOMA')return iniciarServicoWhatsApp(from,cliente,servico);
           await salvarSessaoPedido(from, { etapa: 'entrada', servicoId: servico.id });
           if (servico.api_provider === 'DHRU') {
@@ -6431,7 +6533,9 @@ Exemplo:
           }
           return tgBot.sendMessage(chatId, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
         }
-        const esimMatch = data.match(/^esim_(\d+)$/);
+        const esimCardMatch=data.match(/^esim_(\d+)$/);
+        if(esimCardMatch){const p=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(esimCardMatch[1])]);if(!p)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');p.preco_revenda=await precoEsimDaRevenda(cliente.id,p.id);return enviarCardVisual(chatId,q.message,`esim_${p.id}`,`📲 *${p.nome_plano}*\n\n${p.descricao?String(p.descricao)+'\n\n':''}💰 *Valor:* ${brl(p.preco_revenda)}`,[[tgBtn('COMPRAR',`comprar_esim_${p.id}`,'success','TG_ICON_COMPRAR','🛒')],[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);}
+        const esimMatch = data.match(/^comprar_esim_(\d+)$/);
         if (esimMatch && !data.includes('entregar') && !data.includes('finalizar') && !data.includes('cancelar')) {
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
             FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
