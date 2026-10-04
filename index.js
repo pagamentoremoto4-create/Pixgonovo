@@ -6647,10 +6647,7 @@ Exemplo:
           const ddds=await dddsEsimDisponiveis(plano);
           if(!ddds.length)return tgBot.sendMessage(chatId,'⚠️ Nenhum eSIM deste plano possui DDD cadastrado no estoque.');
           await salvarSessaoPedido(from,{etapa:'esim_ddd',plano});
-          return tgBot.sendMessage(chatId,`📍 ESCOLHA O DDD DO SEU eSIM
-
-📱 ${plano.nome_plano}
-💰 Valor: ${brl(plano.preco_revenda)}`,{reply_markup:{inline_keyboard:[...ddds.map(r=>[tgBtn(`DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`,`esim_ddd_${plano.id}_${r.ddd}`,'primary','TG_ICON_ESIM')]),[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR')]]}});
+          return atualizarCardTelegram(chatId,q.message,`📍 *ESCOLHA O DDD DO SEU eSIM*\n\n📱 ${plano.nome_plano}\n💰 Valor: ${brl(plano.preco_revenda)}`,[...ddds.map(r=>[tgBtn(`DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`,`esim_ddd_${plano.id}_${r.ddd}`,'primary','TG_ICON_ESIM')]),[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
         }
         const confMatch = data.match(/^esim_confirmar_(\d+)$/);
         if (confMatch) {
@@ -6681,7 +6678,7 @@ Exemplo:
           const q=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
           if(!Number(q?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
           await salvarSessaoPedido(from,{etapa:'esim_dispositivo',plano,ddd});
-          return tgBot.sendMessage(chatId,`📱 ${plano.nome_plano}\n📍 DDD: ${ddd}\n\nEscolha o aparelho:`,{reply_markup:{inline_keyboard:[[{text:'🍎 iPhone',callback_data:`esim_device_iphone_${plano.id}`}],[{text:'🤖 Android',callback_data:`esim_device_android_${plano.id}`}],[{text:'⬅️ Trocar DDD',callback_data:`esim_${plano.id}`}]]}});
+          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*\n📍 DDD: ${ddd}\n\nEscolha o aparelho:`,[[tgBtn('iPhone',`esim_device_iphone_${plano.id}`,'primary','TG_ICON_ESIM','🍎')],[tgBtn('Android',`esim_device_android_${plano.id}`,'primary','TG_ICON_ESIM','🤖')],[tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'danger','TG_ICON_VOLTAR','⬅️')]]);
         }
         const deviceMatch = data.match(/^esim_device_(iphone|android)_(\d+)$/);
         if (deviceMatch) {
@@ -6691,7 +6688,7 @@ Exemplo:
           const dispositivo = deviceMatch[1] === 'iphone' ? 'IPHONE' : 'ANDROID';
           const sessDdd=await carregarSessaoPedido(from);
           await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano, dispositivo, ddd:sessDdd?.ddd || '' });
-          return tgBot.sendMessage(chatId, `📱 ${plano.nome_plano}
+          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*
 
 ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
 📍 DDD: ${sessDdd?.ddd || '-'}
@@ -6699,17 +6696,15 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
 💳 Seu saldo: ${brl(cliente.saldo)}
 🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
 
-Agora confirme para seguir para o pagamento/compra.`, {
-            reply_markup: { inline_keyboard: [
-              [{ text: '✅ Confirmar compra', callback_data: `esim_confirmar_${plano.id}` }],
-              [{ text: '🔄 Trocar aparelho', callback_data: `esim_${plano.id}` }],
-              [{ text: '❌ Cancelar', callback_data: 'esim_cancelar_compra' }]
-            ] }
-          });
+Agora confirme para seguir para o pagamento/compra.`,[
+              [tgBtn('Confirmar compra',`esim_confirmar_${plano.id}`,'success','TG_ICON_COMPRAR','✅')],
+              [tgBtn('Trocar aparelho',`esim_ddd_${plano.id}_${sessDdd?.ddd || ''}`,'primary','TG_ICON_VOLTAR','🔄')],
+              [tgBtn('Cancelar','esim_cancelar_compra','danger','TG_ICON_VOLTAR','❌')]
+            ]);
         }
         if (data === 'esim_cancelar_compra') {
-          pedidoSessao.delete(from);
-          return tgBot.sendMessage(chatId, '✅ Compra de eSIM cancelada.', { reply_markup: { inline_keyboard: [[{ text: '🏠 Menu', callback_data: 'menu_voltar' }]] } });
+          await apagarSessaoPedido(from);
+          return voltarHomeNoMesmoCard(chatId, cliente, q.message);
         }
         return;
       }
