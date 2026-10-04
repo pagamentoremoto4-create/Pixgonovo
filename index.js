@@ -6636,7 +6636,20 @@ Exemplo:
           return tgBot.sendMessage(chatId, `${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
         }
         const esimCardMatch=data.match(/^esim_(\d+)$/);
-        if(esimCardMatch){const p=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(esimCardMatch[1])]);if(!p)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');p.preco_revenda=await precoEsimDaRevenda(cliente.id,p.id);return enviarCardVisual(chatId,q.message,`esim_${p.id}`,`📲 *${p.nome_plano}*\n\n${p.descricao?String(p.descricao)+'\n\n':''}💰 *Valor:* ${brl(p.preco_revenda)}`,[[tgBtn('COMPRAR',`comprar_esim_${p.id}`,'success','TG_ICON_COMPRAR','🛒')],[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);}
+        if (esimCardMatch) {
+          // Ao tocar no plano, ir direto para a escolha do DDD (sem tela intermediária COMPRAR).
+          const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
+            FROM esim_planos p LEFT JOIN esim_estoque e ON e.nome_plano=p.nome_plano AND e.preco_revenda=p.preco_revenda
+            WHERE p.id=? AND p.ativo=1 GROUP BY p.id, p.nome_plano, p.preco_revenda, p.preco_cliente`, [Number(esimCardMatch[1])]);
+          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
+          plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
+          const ddds = await dddsEsimDisponiveis(plano);
+          if (!ddds.length) {
+            return atualizarCardTelegram(chatId, q.message, `⚠️ *SEM DDD DISPONÍVEL*\n\n📱 ${plano.nome_plano}\n\nNenhum eSIM deste plano possui DDD disponível no estoque.`, [[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+          }
+          await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano });
+          return atualizarCardTelegram(chatId, q.message, `📍 *ESCOLHA O DDD DO SEU eSIM*\n\n📱 ${plano.nome_plano}\n💰 Valor: ${brl(plano.preco_revenda)}`, [...ddds.map(r => [tgBtn(`DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`, `esim_ddd_${plano.id}_${r.ddd}`, 'primary', 'TG_ICON_ESIM')]), [tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
+        }
         const esimMatch = data.match(/^comprar_esim_(\d+)$/);
         if (esimMatch && !data.includes('entregar') && !data.includes('finalizar') && !data.includes('cancelar')) {
           const plano = await get(`SELECT p.id, p.nome_plano, p.preco_revenda, p.preco_cliente, COALESCE(SUM(CASE WHEN e.status='DISPONIVEL' AND e.ddd IS NOT NULL AND TRIM(e.ddd)<>'' THEN 1 ELSE 0 END), 0) AS qtd
