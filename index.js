@@ -3437,6 +3437,22 @@ ${item.lpa_completo}
 🏢 CentralUnlocker`;
 }
 
+async function entregarEsimQrCompacto(destino, item, nomePlano, pedidoId) {
+  item = await garantirDadosAtivacaoEsim(item);
+  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+  const ddd = item.ddd ? ` • DDD ${item.ddd}` : '';
+  const legenda = `✅ *eSIM ENTREGUE*\n\n📡 *${nomePlano}${ddd}*\n📷 Escaneie o QR Code para instalar.\n\n🍎 *iPhone:* Ajustes → Celular → Adicionar eSIM → Usar QR Code\n🤖 *Android:* Configurações → SIM/eSIM → Adicionar eSIM → Escanear QR Code\n\n⚠️ Conecte-se ao Wi-Fi durante a instalação.`;
+  if (String(destino).startsWith('tg:') && tgBot) {
+    const chatId=String(destino).slice(3);
+    const reply_markup={inline_keyboard:[[tgBtn('INSTALAÇÃO MANUAL',`esim_manual_${pedidoId}`,'primary','TG_ICON_ESIM','🛠️')],[tgBtn('MENU','menu_voltar','danger','TG_ICON_VOLTAR','🏠')]]};
+    if(fs.existsSync(qrPath)) await tgBot.sendPhoto(chatId,qrPath,{caption:legenda,parse_mode:'Markdown',reply_markup});
+    else await tgBot.sendMessage(chatId,legenda,{parse_mode:'Markdown',reply_markup});
+    return;
+  }
+  if(fs.existsSync(qrPath)) await enviarImagem(destino,qrPath,`✅ eSIM ENTREGUE\n📡 ${nomePlano}${ddd}\n📷 Escaneie o QR Code para instalar.`);
+  await enviarTexto(destino,'🍎 iPhone: Ajustes → Celular → Adicionar eSIM → Usar QR Code\n🤖 Android: Configurações → SIM/eSIM → Adicionar eSIM → Escanear QR Code\n⚠️ Conecte-se ao Wi-Fi durante a instalação.');
+}
+
 async function entregarEsimPorDispositivo(destino, item, dispositivo, nomePlano) {
   item = await garantirDadosAtivacaoEsim(item);
   const tipo = String(dispositivo || '').toUpperCase();
@@ -6491,7 +6507,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         return;
       }
       // Botões do cliente no Telegram
-      const ehBotaoCliente = data.startsWith('homecat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|device_(?:iphone|android)_\d+)$/.test(data);
+      const ehBotaoCliente = data.startsWith('homecat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || /^esim_(\d+|cancelar_compra|ddd_\d+_\d{2}|pay_(?:saldo|pix)_\d+_\d{2}|manual_\d+|manual_(?:iphone|android)_\d+)$/.test(data);
       if (ehBotaoCliente) {
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -6663,58 +6679,62 @@ Exemplo:
           await salvarSessaoPedido(from,{etapa:'esim_ddd',plano});
           return atualizarCardTelegram(chatId,q.message,`📍 *ESCOLHA O DDD DO SEU eSIM*\n\n📱 ${plano.nome_plano}\n💰 Valor: ${brl(plano.preco_revenda)}`,[...ddds.map(r=>[tgBtn(`DDD ${r.ddd} — ${r.qtd} disponível${Number(r.qtd)===1?'':'is'}`,`esim_ddd_${plano.id}_${r.ddd}`,'primary','TG_ICON_ESIM')]),[tgBtn('Voltar','menu_esim','danger','TG_ICON_VOLTAR','⬅️')]]);
         }
-        const confMatch = data.match(/^esim_confirmar_(\d+)$/);
-        if (confMatch) {
-          const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(confMatch[1])]);
-          if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
-          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
-          const sessCompra = await carregarSessaoPedido(from);
-          const dispositivo = String(sessCompra?.dispositivo || '').toUpperCase();
-          if (!['IPHONE', 'ANDROID'].includes(dispositivo)) {
-            await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano });
-            return tgBot.sendMessage(chatId, '📱 Escolha primeiro o aparelho que vai utilizar.', {
-              reply_markup: { inline_keyboard: [
-                [{ text: '🍎 iPhone', callback_data: `esim_device_iphone_${plano.id}` }],
-                [{ text: '🤖 Android', callback_data: `esim_device_android_${plano.id}` }]
-              ] }
-            });
-          }
-          await apagarSessaoPedido(from);
-          const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
-          return entregarEsimRevenda(from, revAtual || cliente, plano, dispositivo, sessCompra?.ddd || '');
-        }
         const dddMatch = data.match(/^esim_ddd_(\d+)_(\d{2})$/);
         if (dddMatch) {
           const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(dddMatch[1])]);
           if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
           if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
           const ddd=normalizarDddEsim(dddMatch[2]);
-          const q=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
-          if(!Number(q?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
-          await salvarSessaoPedido(from,{etapa:'esim_dispositivo',plano,ddd});
-          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*\n📍 DDD: ${ddd}\n\nEscolha o aparelho:`,[[tgBtn('iPhone',`esim_device_iphone_${plano.id}`,'primary','TG_ICON_ESIM','🍎')],[tgBtn('Android',`esim_device_android_${plano.id}`,'primary','TG_ICON_ESIM','🤖')],[tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'danger','TG_ICON_VOLTAR','⬅️')]]);
+          const estoqueDdd=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+          if(!Number(estoqueDdd?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
+          await salvarSessaoPedido(from,{etapa:'esim_pagamento',plano,ddd});
+          const revAtual=await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]);
+          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*\n📍 DDD: ${ddd}\n💰 Valor: ${brl(plano.preco_revenda)}\n💳 Saldo: ${brl(Number(revAtual?.saldo||0))}\n\nEscolha como deseja pagar:`,[
+            [tgBtn('USAR SALDO',`esim_pay_saldo_${plano.id}_${ddd}`,'success','TG_ICON_CARTEIRA','💰')],
+            [tgBtn('PAGAR VIA PIX',`esim_pay_pix_${plano.id}_${ddd}`,'primary','TG_ICON_PIX','💠')],
+            [tgBtn('Trocar DDD',`comprar_esim_${plano.id}`,'danger','TG_ICON_VOLTAR','⬅️')]
+          ]);
         }
-        const deviceMatch = data.match(/^esim_device_(iphone|android)_(\d+)$/);
-        if (deviceMatch) {
-          const plano = await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1', [Number(deviceMatch[2])]);
-          if (plano) plano.preco_revenda = await precoEsimDaRevenda(cliente.id, plano.id);
-          if (!plano) return tgBot.sendMessage(chatId, '❌ Plano indisponível.');
-          const dispositivo = deviceMatch[1] === 'iphone' ? 'IPHONE' : 'ANDROID';
-          const sessDdd=await carregarSessaoPedido(from);
-          await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano, dispositivo, ddd:sessDdd?.ddd || '' });
-          return atualizarCardTelegram(chatId,q.message,`📱 *${plano.nome_plano}*
-
-${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
-📍 DDD: ${sessDdd?.ddd || '-'}
-💰 Valor: ${brl(plano.preco_revenda)}
-💳 Seu saldo: ${brl(cliente.saldo)}
-🏷 Cobrança eSIM: ${labelTipoRevenda(await modalidadeEsimRevenda(cliente))}
-
-Agora confirme para seguir para o pagamento/compra.`,[
-              [tgBtn('Confirmar compra',`esim_confirmar_${plano.id}`,'success','TG_ICON_COMPRAR','✅')],
-              [tgBtn('Trocar aparelho',`esim_ddd_${plano.id}_${sessDdd?.ddd || ''}`,'primary','TG_ICON_VOLTAR','🔄')],
-              [tgBtn('Cancelar','esim_cancelar_compra','danger','TG_ICON_VOLTAR','❌')]
-            ]);
+        const payMatch = data.match(/^esim_pay_(saldo|pix)_(\d+)_(\d{2})$/);
+        if (payMatch) {
+          const forma=payMatch[1];
+          const plano=await get('SELECT * FROM esim_planos WHERE id=? AND ativo=1',[Number(payMatch[2])]);
+          if(plano) plano.preco_revenda=await precoEsimDaRevenda(cliente.id,plano.id);
+          if(!plano)return tgBot.sendMessage(chatId,'❌ Plano indisponível.');
+          const ddd=normalizarDddEsim(payMatch[3]);
+          const estoqueDdd=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+          if(!Number(estoqueDdd?.qtd||0))return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
+          if(forma==='saldo'){
+            const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
+            if(Number(revAtual?.saldo||0)<Number(plano.preco_revenda||0)){
+              return atualizarCardTelegram(chatId,q.message,`⚠️ *SALDO INSUFICIENTE*\n\n💳 Saldo: ${brl(Number(revAtual?.saldo||0))}\n💰 Valor: ${brl(plano.preco_revenda)}\n\nVocê pode pagar este eSIM via PIX.`,[
+                [tgBtn('PAGAR VIA PIX',`esim_pay_pix_${plano.id}_${ddd}`,'primary','TG_ICON_PIX','💠')],
+                [tgBtn('Voltar',`esim_ddd_${plano.id}_${ddd}`,'danger','TG_ICON_VOLTAR','⬅️')]
+              ]);
+            }
+            await apagarSessaoPedido(from);
+            return entregarEsimRevenda(from,revAtual||cliente,plano,'QR',ddd);
+          }
+          return iniciarFluxoPagamento(from,{valor_pix:Number(plano.preco_revenda||0),tipo_pix:'SERVICO',tipo_compra:'ESIM',plano,ddd,totalPedido:Number(plano.preco_revenda||0),saldo_usado:0},cliente,async(m)=>tgBot.sendMessage(chatId,m));
+        }
+        const manualMenuMatch=data.match(/^esim_manual_(\d+)$/);
+        if(manualMenuMatch){
+          const pedidoId=Number(manualMenuMatch[1]);
+          const item=await get('SELECT * FROM esim_estoque WHERE pedido_id=? AND status="VENDIDO"',[pedidoId]);
+          if(!item)return tgBot.sendMessage(chatId,'❌ Não encontrei os dados deste eSIM.');
+          return tgBot.sendMessage(chatId,'🛠️ *INSTALAÇÃO MANUAL*\n\nEscolha o aparelho:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
+            [tgBtn('iPhone',`esim_manual_iphone_${pedidoId}`,'primary','TG_ICON_ESIM','🍎'),tgBtn('Android',`esim_manual_android_${pedidoId}`,'primary','TG_ICON_ESIM','🤖')],
+            [tgBtn('MENU','menu_voltar','danger','TG_ICON_VOLTAR','🏠')]
+          ]}});
+        }
+        const manualDeviceMatch=data.match(/^esim_manual_(iphone|android)_(\d+)$/);
+        if(manualDeviceMatch){
+          const pedidoId=Number(manualDeviceMatch[2]);
+          let item=await get('SELECT * FROM esim_estoque WHERE pedido_id=? AND status="VENDIDO"',[pedidoId]);
+          if(!item)return tgBot.sendMessage(chatId,'❌ Não encontrei os dados deste eSIM.');
+          item=await garantirDadosAtivacaoEsim(item);
+          if(manualDeviceMatch[1]==='iphone')return tgBot.sendMessage(chatId,textoIphoneEsim(item,item.nome_plano),{parse_mode:'Markdown'});
+          return tgBot.sendMessage(chatId,textoAndroidEsim(item,item.nome_plano),{parse_mode:'Markdown'});
         }
         if (data === 'esim_cancelar_compra') {
           await apagarSessaoPedido(from);
@@ -7234,8 +7254,7 @@ async function entregarEsimRevenda(from, revenda, plano, dispositivo, ddd='') {
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
   const pedidoAuto = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
   await avisarEsimAutomaticoAdminTelegram(pedidoAuto, itemPreparado);
-  await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n📍 DDD: ${item.ddd || 'Não informado'}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n${tipo === 'IPHONE' ? '🍎 Dados para instalação manual enviados abaixo.' : '🤖 QR Code + código manual serão enviados abaixo.'}`);
-  await entregarEsimPorDispositivo(from, itemPreparado, tipo, item.nome_plano);
+  await entregarEsimQrCompacto(from, itemPreparado, item.nome_plano, ins.lastID);
 }
 
 async function iniciarEntregaEsimManualTelegram(chatId, pedidoId) {
@@ -7862,7 +7881,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   if (paymentId) {
     const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : (sess.tipo_pix === 'ASSINATURA' ? 'ASSINATURA' : 'SALDO');
     const contextoJson = tipoPagamento === 'SERVICO'
-      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, ggsomaToken: sess.ggsomaToken, premiumId:sess.premiumId, premiumToken:sess.premiumToken, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
+      ? JSON.stringify({ tipoCompra: sess.tipo_compra || 'SERVICO', servicoId: sess.servicoId, ggsomaToken: sess.ggsomaToken, premiumId:sess.premiumId, premiumToken:sess.premiumToken, entradas: sess.entradas || [], plano: sess.plano || null, dispositivo: sess.dispositivo || null, ddd: sess.ddd || null, totalPedido: sess.totalPedido, saldoUsado: Number(sess.saldo_usado || 0) })
       : (tipoPagamento === 'ASSINATURA' ? JSON.stringify(sess.contexto_assinatura || {}) : null);
     await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
@@ -7993,15 +8012,16 @@ async function entregarEsimPagoDireto(revendaId, jid, contexto) {
   const plano = contexto?.plano || {};
   const nomePlano = String(plano.nome_plano || '').trim();
   const valor = Number(contexto?.totalPedido || plano.preco_revenda || 0);
-  const dispositivo = String(contexto?.dispositivo || 'ANDROID').toUpperCase();
+  const dispositivo = 'QR';
+  const ddd = normalizarDddEsim(contexto?.ddd || '');
   if (!cliente || !nomePlano || valor <= 0) return false;
 
   // O PIX do serviço já foi creditado na carteira. Debita agora o valor integral do eSIM.
   await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, cliente.id]);
 
-  let item = await get(`SELECT * FROM esim_estoque
-    WHERE status='DISPONIVEL' AND nome_plano=?
-    ORDER BY id ASC LIMIT 1`, [nomePlano]);
+  let item = ddd
+    ? await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=? ORDER BY id ASC LIMIT 1`, [nomePlano, ddd])
+    : await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? ORDER BY id ASC LIMIT 1`, [nomePlano]);
 
   if (!item) {
     const ins = await run(`INSERT INTO pedidos
@@ -8033,8 +8053,7 @@ async function entregarEsimPagoDireto(revendaId, jid, contexto) {
   const pedido = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
   await avisarEsimAutomaticoAdminTelegram(pedido, item);
   notificarPainel('esim', '📱 eSIM vendido por PIX', `${cliente.nome} - ${nomePlano}`);
-  await enviarParaCanaisCliente(cliente, `✅ Compra aprovada\n\n📱 ${nomePlano}\n💰 Valor: ${brl(valor)}\n\n${dispositivo === 'IPHONE' ? '🍎 Dados para instalação manual enviados abaixo.' : '🤖 QR Code + código manual serão enviados abaixo.'}`, jid);
-  await entregarEsimPorDispositivo(jid, item, dispositivo, nomePlano);
+  await entregarEsimQrCompacto(jid, item, nomePlano, ins.lastID);
   return true;
 }
 
