@@ -4028,65 +4028,63 @@ async function vincularContaWhatsAppPeloAdmin(whatsappId, telegramId) {
 
 function menuTelegramTexto(cliente) {
   const saldo = brl(cliente?.saldo || 0);
-  const linhaFinanceira = `🏷 Perfil: REVENDA
-💰 Saldo / situação: ${saldo}`;
-  return `✨ *CENTRAL UNLOCKER*
-━━━━━━━━━━━━━━━━━━
-
-👋 Olá, *${cliente?.nome || 'cliente'}*!
-${linhaFinanceira}
-
-⚡ Escolha uma opção para continuar:`;
+  return `⚙️ *CENTRAL UNLOCKER*\n\n👤 *Nome:* ${cliente?.nome || 'Cliente'}\n🏷 *Perfil:* REVENDA\n💰 *Saldo:* ${saldo}\n\nEscolha uma opção abaixo:`;
 }
-// Layout Telegram premium inspirado no Telegramesim.
-// Bot API moderna aceita `style` e `icon_custom_emoji_id`; se um cliente antigo
-// ignorar esses campos, o botão continua funcionando normalmente.
-function tgBtn(text, callback_data, style='primary', iconKey='') {
-  const b = { text, callback_data };
-  if (['primary','success','danger'].includes(style)) b.style = style;
+
+// Botões no mesmo padrão visual do Telegramesim: cor + Custom Emoji configurável.
+// Quando não houver Custom Emoji configurado, mantém um emoji comum visível no texto.
+function tgBtn(label, callback_data, style='primary', iconKey='', fallbackEmoji='') {
   const icon = iconKey ? String(process.env[iconKey] || '').trim() : '';
+  const b = { text: icon ? label : `${fallbackEmoji ? fallbackEmoji + ' ' : ''}${label}`, callback_data };
+  if (['primary','success','danger'].includes(style)) b.style = style;
   if (icon) b.icon_custom_emoji_id = icon;
   return b;
 }
-function tecladoTelegramMenu() {
-  return {
-    parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [
-        [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM')],
-        [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS'), tgBtn('PREMIUM', 'menu_premium', 'primary', 'TG_ICON_PREMIUM')],
-        [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS')],
-        [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR')],
-        [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE')],
-        [tgBtn('VINCULAR WHATSAPP', 'menu_vincular_whatsapp', 'primary', 'TG_ICON_WHATSAPP')]
-      ]
-    }
-  };
+function tecladoTelegramMenu(cliente) {
+  const linhas = [
+    [tgBtn('COMPRA eSIM', 'menu_esim', 'primary', 'TG_ICON_ESIM', '📲')],
+    [tgBtn('SERVIÇOS', 'menu_servicos', 'primary', 'TG_ICON_SERVICOS', '🛠️'), tgBtn('PREMIUM', 'menu_premium', 'primary', 'TG_ICON_PREMIUM', '⭐')],
+    [tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')],
+    [tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')],
+    [tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')],
+    [tgBtn('VINCULAR WHATSAPP', 'menu_vincular_whatsapp', 'primary', 'TG_ICON_WHATSAPP', '🔗')]
+  ];
+  if (String(cliente?.telegram_id || '') === String(ADMIN_TELEGRAM_ID || '')) {
+    linhas.push([tgBtn('ADMINISTRAÇÃO', 'admin_inicio', 'success', 'TG_ICON_ADMIN', '🔐')]);
+  }
+  return { parse_mode:'Markdown', reply_markup:{ inline_keyboard:linhas } };
 }
 async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
   const texto = menuTelegramTexto(cliente);
+  const opts = tecladoTelegramMenu(cliente);
   const animacao = String(process.env.TELEGRAM_HOME_ANIMATION || '').trim();
   const banner = String(process.env.TELEGRAM_HOME_BANNER || '').trim();
   if (animacao) {
-    try { await tgBot.sendAnimation(chatId, animacao, { caption: texto, ...tecladoTelegramMenu() }); return; }
+    try { await tgBot.sendAnimation(chatId, animacao, { caption:texto, ...opts }); return; }
     catch (e) { console.log('⚠️ HOME animation:', e.message); }
   }
   if (banner) {
-    try { await tgBot.sendPhoto(chatId, banner, { caption: texto, ...tecladoTelegramMenu() }); return; }
+    try { await tgBot.sendPhoto(chatId, banner, { caption:texto, ...opts }); return; }
     catch (e) { console.log('⚠️ HOME banner:', e.message); }
   }
-  await tgBot.sendMessage(chatId, texto, tecladoTelegramMenu());
+  // Se ainda não foi configurado um file_id/URL, usa o banner do próprio projeto.
+  const bannerLocal = path.join(__dirname, 'central-hacker-pro-banner.jpg');
+  if (fs.existsSync(bannerLocal)) {
+    try { await tgBot.sendPhoto(chatId, fs.createReadStream(bannerLocal), { caption:texto, ...opts }); return; }
+    catch (e) { console.log('⚠️ HOME banner local:', e.message); }
+  }
+  await tgBot.sendMessage(chatId, texto, opts);
 }
 function montarLinhasBotoes(items, prefixo, nomeCampo='nome') {
   const linhas = [];
   for (let i = 0; i < items.length; i += 2) {
     const linha = items.slice(i, i + 2).map(item => ({
-      ...tgBtn(String(item[nomeCampo] || item.nome_plano || item.nome || 'Opção').slice(0, 45), `${prefixo}_${item.id}`, 'primary', prefixo === 'esim' ? 'TG_ICON_ESIM' : 'TG_ICON_SERVICOS')
+      ...tgBtn(String(item[nomeCampo] || item.nome_plano || item.nome || 'Opção').slice(0, 45), `${prefixo}_${item.id}`, 'primary', prefixo === 'esim' ? 'TG_ICON_ESIM' : 'TG_ICON_SERVICOS', prefixo === 'esim' ? '📲' : '📦')
     }));
     linhas.push(linha);
   }
-  linhas.push([tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR')]);
+  linhas.push([tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR', '⬅️')]);
   return linhas;
 }
 async function enviarServicosBotoesTelegram(chatId, cliente) {
@@ -6344,7 +6342,7 @@ Ou escolha um valor:`, {
             reply_markup: { inline_keyboard: [
               [tgBtn('R$ 20', 'pagar_20', 'success', 'TG_ICON_PAGAR'), tgBtn('R$ 50', 'pagar_50', 'success', 'TG_ICON_PAGAR')],
               [tgBtn('R$ 100', 'pagar_100', 'success', 'TG_ICON_PAGAR'), tgBtn('Outro valor', 'pagar_outro', 'primary', 'TG_ICON_PAGAR')],
-              [tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR')]
+              [tgBtn('Voltar', 'menu_voltar', 'danger', 'TG_ICON_VOLTAR', '⬅️')]
             ] }
           });
         }
