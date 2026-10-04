@@ -7874,9 +7874,10 @@ async function gerarPix(valor, cliente, documento, gateway='pixgo') {
 
 async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
   const gateway = sess.gateway || 'pixgo';
-  await enviarMensagem('⏳ Gerando PIX...');
+  const ehTelegram = String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:');
+  if (!ehTelegram) await enviarMensagem('⏳ Gerando PIX...');
   const documento = gateway === 'pixgo' ? String(sess.documento_pix || '') : '';
-  const pix = await gerarPix(sess.valor_pix, `${chave.startsWith('tg:')||chave.startsWith('cvtg:') ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
+  const pix = await gerarPix(sess.valor_pix, `${ehTelegram ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
   await apagarSessaoPedido(chave);
   if (!pix) {
     await enviarMensagem(`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)}. Tente novamente ou escolha outra forma de pagamento.`);
@@ -7894,51 +7895,62 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
     verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
   }
-  await enviarMensagem(`✅ PIX GERADO
 
-🏦 ${nomeGateway(gateway)}
-💰 Valor: ${brl(valor)}`);
+  // Telegram: checkout PIX visual — QR grande + valor + botão nativo COPIAR PIX.
+  // O código PIX não é mais despejado como uma mensagem enorme no chat.
+  if (ehTelegram && qrCode) {
+    try {
+      const botDestino = String(chave).startsWith('cvtg:') ? consultaVipBot : tgBot;
+      if (!botDestino) throw new Error('Telegram não inicializado');
+      const idDestino = String(chave).replace(/^(?:cvtg:|tg:)/, '');
+      const codigoPix = String(qrCode).replace(/[\r\n\t]/g, '').trim();
+      let qrBuffer = null;
+      if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
+        const base64Limpo = String(pix.qrCodeBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').replace(/\s+/g, '');
+        qrBuffer = Buffer.from(base64Limpo, 'base64');
+      }
+      if (!qrBuffer?.length) {
+        qrBuffer = await QRCode.toBuffer(codigoPix, { width: 620, margin: 2, errorCorrectionLevel: 'M' });
+      }
+      const planoNome = String(sess?.plano?.nome_plano || '').trim();
+      const ddd = String(sess?.ddd || '').trim();
+      const qtd = Math.max(1, Number(sess?.quantidade || 1));
+      const detalhe = planoNome
+        ? `${planoNome}${ddd ? ` • DDD ${ddd}` : ''}${qtd > 1 ? ` • ${qtd} eSIMs` : ' • 1 eSIM'}`
+        : (sess.tipo_pix === 'SALDO' ? 'Adicionar saldo' : 'Pagamento do pedido');
+      const caption = `💠 PIX\n\n💰 ${brl(valor)}\n\n${detalhe}\n\n📷 Aponte a câmera ou copie o PIX\n\n🟡 Aguardando pagamento`;
+      const teclado = [[{ text: '📋 COPIAR PIX', copy_text: { text: codigoPix } }]];
+      if (sess?.tipo_compra === 'ESIM') teclado.push([{ text: '⬅️ VOLTAR AO MENU', callback_data: 'menu_voltar' }]);
+      await botDestino.sendPhoto(idDestino, qrBuffer, { caption, reply_markup: { inline_keyboard: teclado } });
+      return true;
+    } catch (e) {
+      console.log('⚠️ Checkout PIX visual Telegram:', e.message);
+      // Fallback abaixo preserva o pagamento mesmo em clientes/API antigos.
+    }
+  }
 
-  // O Mercado Pago retorna o QR Code em Base64.
-  // Enviamos diretamente pelo canal correto. Números do WhatsApp também
-  // contêm apenas dígitos e não podem passar pela detecção genérica de Telegram.
+  await enviarMensagem(`✅ PIX GERADO\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}`);
+
   if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
     try {
-      const base64Limpo = String(pix.qrCodeBase64)
-        .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '')
-        .replace(/\s+/g, '');
+      const base64Limpo = String(pix.qrCodeBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').replace(/\s+/g, '');
       const bufferQr = Buffer.from(base64Limpo, 'base64');
-
       if (!bufferQr.length) throw new Error('QR Code Base64 vazio');
-
-      if (String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:')) {
+      if (ehTelegram) {
         const botDestino=String(chave).startsWith('cvtg:')?consultaVipBot:tgBot;
         if (!botDestino) throw new Error('Telegram não inicializado');
         const idDestino=String(chave).replace(/^(?:cvtg:|tg:)/,'');
-        await botDestino.sendPhoto(idDestino, bufferQr, {
-          caption: '📷 Escaneie o QR Code para pagar'
-        });
+        await botDestino.sendPhoto(idDestino, bufferQr, { caption: '📷 Escaneie o QR Code para pagar' });
       } else {
         if (!whatsappSocket || !conectado) throw new Error('WhatsApp não conectado');
-        const numeroWhatsApp = String(chave).startsWith('wa:')
-          ? String(chave).slice(3)
-          : (String(chave).includes('@s.whatsapp.net') ? jidToNumber(chave) : String(chave));
-        await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(numeroWhatsApp)), {
-          image: bufferQr,
-          mimetype: 'image/png',
-          caption: '📷 Escaneie o QR Code para pagar'
-        });
+        const numeroWhatsApp = String(chave).startsWith('wa:') ? String(chave).slice(3) : (String(chave).includes('@s.whatsapp.net') ? jidToNumber(chave) : String(chave));
+        await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(numeroWhatsApp)), { image: bufferQr, mimetype: 'image/png', caption: '📷 Escaneie o QR Code para pagar' });
       }
-      console.log(`✅ QR Code Mercado Pago enviado por ${String(chave).startsWith('tg:')||String(chave).startsWith('cvtg:') ? 'Telegram' : 'WhatsApp'}`);
-    } catch (e) {
-      // O copia e cola continua sendo enviado mesmo se a imagem falhar.
-      console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message);
-    }
+    } catch (e) { console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message); }
   }
 
   await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
-  // Enviado sozinho, sem crases, aspas ou caracteres extras.
   await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
   return true;
 }
