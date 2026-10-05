@@ -3314,8 +3314,8 @@ async function enviarWhatsAppTexto(numero, text) {
       }
       const destino = await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
-      await sock.sendMessage(destino, { text: String(text || '') });
-      console.log(`✅ WhatsApp enviado para ${number} (${destino})`);
+      const envio = await sock.sendMessage(destino, { text: String(text || '') });
+      console.log(`✅ V4.9.5.3 WhatsApp enviado para ${number} (${destino}) id=${envio?.key?.id || 'sem-id'}`);
       return true;
     }
     if (WHATSAPP_PROVIDER === 'evolution') {
@@ -5607,7 +5607,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'hub_menu' });
-    console.log(`🏠 V4.9.5.1 MENU GLOBAL: +${numeroNorm} — ${textoOriginal}`);
+    console.log(`🏠 V4.9.5.3 MENU GLOBAL: +${numeroNorm} — ${textoOriginal} | destino=${whatsappJidPorNumero.get(numeroNorm) || 'resolver'}`);
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
@@ -9376,7 +9376,10 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           if (mensagemWhatsAppJaProcessada(idMensagem)) continue;
           const jidTelefone = [jidAlternativo, jidPrincipal].find(j => String(j || '').endsWith('@s.whatsapp.net')) || '';
           const numero = normalizarNumeroWhatsApp(jidToNumber(jidTelefone || jidPrincipal));
-          const jidResposta = jidTelefone || jidPrincipal;
+          // V4.9.5.3 — se a conversa entrou por @lid, responde no MESMO JID da conversa.
+          // O remoteJidAlt (@s.whatsapp.net) serve apenas para descobrir/cadastrar o número.
+          // Isso evita reconstruir a saída pelo PN quando o WhatsApp já migrou a conversa para LID.
+          const jidResposta = String(jidPrincipal || '').endsWith('@lid') ? jidPrincipal : (jidTelefone || jidPrincipal);
           const texto = textoMensagemBaileys(msg?.message || {});
           if (!numero || !texto) continue;
           whatsappJidPorNumero.set(numero, jidResposta);
@@ -9983,7 +9986,10 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           // Quando existir o JID telefônico alternativo, ele deve ser usado para cadastro e respostas.
           const jidTelefone = [jidAlternativo, jidPrincipal].find(j => String(j || '').endsWith('@s.whatsapp.net')) || '';
           const numero = normalizarNumeroWhatsApp(jidToNumber(jidTelefone || jidPrincipal));
-          const jidResposta = jidTelefone || jidPrincipal;
+          // V4.9.5.3 — se a conversa entrou por @lid, responde no MESMO JID da conversa.
+          // O remoteJidAlt (@s.whatsapp.net) serve apenas para descobrir/cadastrar o número.
+          // Isso evita reconstruir a saída pelo PN quando o WhatsApp já migrou a conversa para LID.
+          const jidResposta = String(jidPrincipal || '').endsWith('@lid') ? jidPrincipal : (jidTelefone || jidPrincipal);
           const texto = textoMensagemBaileys(msg?.message || {});
           if (!numero || !texto) continue;
 
