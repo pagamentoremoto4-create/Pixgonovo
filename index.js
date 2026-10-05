@@ -3264,6 +3264,10 @@ async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
 }
 
 async function resolverJidWhatsAppEnvio(numero, socketPreferido=null) {
+  // V4.9.5.4 — preserva um JID completo já resolvido.
+  // Nunca reconstrói @lid como @s.whatsapp.net.
+  const entrada = String(numero || '').trim();
+  if (entrada.endsWith('@lid') || entrada.endsWith('@s.whatsapp.net')) return entrada;
   const number = normalizarNumeroWhatsApp(numero);
   const sessaoBot = socketPreferido ? null : await obterSessaoBotConectada();
   const sock = socketPreferido || sessaoBot?.socket || whatsappSocket;
@@ -3315,7 +3319,7 @@ async function enviarWhatsAppTexto(numero, text) {
       const destino = await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
       const envio = await sock.sendMessage(destino, { text: String(text || '') });
-      console.log(`✅ V4.9.5.3 WhatsApp enviado para ${number} (${destino}) id=${envio?.key?.id || 'sem-id'}`);
+      console.log(`✅ V4.9.5.4 WhatsApp enviado para ${number} (${destino}) id=${envio?.key?.id || 'sem-id'}`);
       return true;
     }
     if (WHATSAPP_PROVIDER === 'evolution') {
@@ -3352,7 +3356,8 @@ async function enviarTexto(to, text) {
 }
 async function enviarImagemWhatsApp(numero, filePath, caption='') {
   if (!WHATSAPP_ENABLED) return false;
-  const number = normalizarNumeroWhatsApp(numero);
+  const entrada = String(numero || '').trim();
+  const number = normalizarNumeroWhatsApp(entrada);
   if (!number || !filePath || !fs.existsSync(filePath)) return false;
   try {
     if (WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode') {
@@ -3361,10 +3366,17 @@ async function enviarImagemWhatsApp(numero, filePath, caption='') {
       const sessaoBot = (sessaoPreferida?.funcaoBot && sessaoPreferida?.conectado && sessaoPreferida?.socket) ? sessaoPreferida : await obterSessaoBotConectada();
       const sock = sessaoBot?.socket || (conectado ? whatsappSocket : null);
       if (!sock) return false;
-      await sock.sendMessage(numberToJid(number), {
+      // V4.9.5.4 — imagem/menu usa o mesmo destino LID mapeado do texto.
+      // Antes esta função sempre fazia numberToJid(number), desfazendo o LID.
+      const destino = (entrada.endsWith('@lid') || entrada.endsWith('@s.whatsapp.net'))
+        ? entrada
+        : await resolverJidWhatsAppEnvio(number, sock);
+      if (!destino) throw new Error('Não foi possível localizar o JID do destinatário da imagem');
+      const envio = await sock.sendMessage(destino, {
         image: fs.readFileSync(filePath),
         caption: String(caption || '')
       });
+      console.log(`✅ V4.9.5.4 WhatsApp imagem enviada para ${number} (${destino}) id=${envio?.key?.id || 'sem-id'}`);
       return true;
     }
     if (WHATSAPP_PROVIDER === 'evolution') {
@@ -5607,7 +5619,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'hub_menu' });
-    console.log(`🏠 V4.9.5.3 MENU GLOBAL: +${numeroNorm} — ${textoOriginal} | destino=${whatsappJidPorNumero.get(numeroNorm) || 'resolver'}`);
+    console.log(`🏠 V4.9.5.4 MENU GLOBAL: +${numeroNorm} — ${textoOriginal} | destino=${whatsappJidPorNumero.get(numeroNorm) || 'resolver'}`);
     await enviarMenuWhatsApp(from, cliente, false);
     return;
   }
