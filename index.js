@@ -5594,6 +5594,24 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     return;
   }
 
+  // V4.9.5.1 — MENU GLOBAL PRIORITÁRIO
+  // Sempre permite voltar ao início, mesmo quando o cliente ficou preso em hub_menu
+  // ou em qualquer outro fluxo estruturado. Também tolera o erro comum "menuu".
+  const comandoMenuGlobal = lower
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[!?.,;:]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const ehMenuGlobal = /^(?:\/?menu+|inicio|0)$/.test(comandoMenuGlobal);
+  if (ehMenuGlobal) {
+    encerrarSessaoIAWhatsApp(numeroNorm);
+    await apagarSessaoPedido(from);
+    await salvarSessaoPedido(from, { etapa: 'hub_menu' });
+    console.log(`🏠 V4.9.5.1 MENU GLOBAL: +${numeroNorm} — ${textoOriginal}`);
+    await enviarMenuWhatsApp(from, cliente, false);
+    return;
+  }
+
   // ConsultaVIP — /comandos é um comando global no privado.
   // Deve funcionar em qualquer etapa (inclusive com consulta pendente) sem apagar
   // ou substituir a sessão atual do cliente.
@@ -9324,6 +9342,20 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
+          // V4.9.5.2 — diagnóstico de entrada ANTES de qualquer filtro.
+          // Registra inclusive eventos append/LID e mensagens que não puderam ter o texto extraído.
+          const textoEntradaDiag = textoMensagemBaileys(msg?.message || {});
+          console.log('📥 V4.9.5.2 WA ENTRADA BRUTA:', {
+            sessao: sessao?.nome || sessao?.id || 'multi',
+            type: type || 'sem-type',
+            id: msg?.key?.id || '',
+            fromMe: !!msg?.key?.fromMe,
+            remoteJid: jidPrincipal,
+            remoteJidAlt: jidAlternativo,
+            pushName: msg?.pushName || '',
+            temMessage: !!msg?.message,
+            texto: String(textoEntradaDiag || '').slice(0, 120)
+          });
           if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
           if (jidPrincipal.endsWith('@g.us')) {
             const textoGrupo = textoMensagemBaileys(msg?.message || {});
@@ -9338,7 +9370,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
             if (await tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, sessao, msg, texto: textoEnviado })) continue;
             continue;
           }
-          if (type !== 'notify') continue;
+          if (type !== 'notify') { console.log(`🟠 V4.9.5.2 WA IGNORADO POR TYPE: ${type || 'sem-type'} — ${jidAlternativo || jidPrincipal}`); continue; }
           if (!sessao.funcaoBot) continue;
           const idMensagem = msg?.key?.id || '';
           if (mensagemWhatsAppJaProcessada(idMensagem)) continue;
@@ -9905,12 +9937,24 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     registrarSaudacaoEntradaGrupoConsultas(socketAtual, null);
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
       const funcoesAtivas = await funcoesSessaoServicos();
       for (const msg of messages || []) {
         try {
           const jidPrincipal = msg?.key?.remoteJid || '';
           const jidAlternativo = msg?.key?.remoteJidAlt || msg?.key?.participantAlt || msg?.senderPn || '';
+          // V4.9.5.2 — diagnóstico de entrada ANTES de qualquer filtro.
+          const textoEntradaDiag = textoMensagemBaileys(msg?.message || {});
+          console.log('📥 V4.9.5.2 WA ENTRADA BRUTA:', {
+            sessao: 'Bot de Serviços',
+            type: type || 'sem-type',
+            id: msg?.key?.id || '',
+            fromMe: !!msg?.key?.fromMe,
+            remoteJid: jidPrincipal,
+            remoteJidAlt: jidAlternativo,
+            pushName: msg?.pushName || '',
+            temMessage: !!msg?.message,
+            texto: String(textoEntradaDiag || '').slice(0, 120)
+          });
           if (!jidPrincipal || jidPrincipal === 'status@broadcast') continue;
           if (jidPrincipal.endsWith('@g.us')) {
             const textoGrupo = textoMensagemBaileys(msg?.message || {});
@@ -9924,6 +9968,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
             if (await tratarComandoAvisosEnviadoPeloAdmin({ socketAtual, msg, texto: textoEnviado })) continue;
             continue;
           }
+          if (type !== 'notify') { console.log(`🟠 V4.9.5.2 WA IGNORADO POR TYPE: ${type || 'sem-type'} — ${jidAlternativo || jidPrincipal}`); continue; }
           if (!funcoesAtivas.bot) continue; // sessão pode ficar conectada apenas para anúncios
 
           // O Baileys pode reenviar o mesmo evento durante sincronização/reconexão.
