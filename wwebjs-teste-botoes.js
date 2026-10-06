@@ -18,10 +18,18 @@ function pagina() {
 }
 
 async function iniciarTesteWwebjs(app) {
+  if (global.__WWEBJS_TESTE_INICIADO__) {
+    console.log('🧪 WWEBJS TESTE: inicialização duplicada ignorada');
+    return;
+  }
+  global.__WWEBJS_TESTE_INICIADO__ = true;
   app.get('/wwebjs-teste', (req,res) => res.type('html').send(pagina()));
   app.get('/wwebjs-teste/status', (req,res) => res.json({status, temQr:!!qrDataUrl, ultimoErro}));
 
-  const dataPath = process.env.DATA_DIR ? `${process.env.DATA_DIR}/wwebjs-test` : './.wwebjs-test';
+  // TESTE: usa perfil exclusivo por processo em /tmp. Isso evita o bloqueio Singleton do Chrome
+  // durante rolling deploy do Render, quando a instância antiga ainda pode estar viva.
+  const dataPath = path.join('/tmp', `wwebjs-test-${process.pid}`);
+  console.log('🧪 WWEBJS TESTE: perfil isolado em', dataPath);
   let chromePath = '';
   try {
     chromePath = puppeteer.executablePath();
