@@ -1,5 +1,6 @@
 const { Client, LocalAuth, Buttons, List } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
+const puppeteer = require('puppeteer');
 
 let status = 'INICIANDO';
 let qrDataUrl = '';
@@ -18,10 +19,19 @@ async function iniciarTesteWwebjs(app) {
   app.get('/wwebjs-teste/status', (req,res) => res.json({status, temQr:!!qrDataUrl, ultimoErro}));
 
   const dataPath = process.env.DATA_DIR ? `${process.env.DATA_DIR}/wwebjs-test` : './.wwebjs-test';
+  let chromePath = '';
+  try {
+    chromePath = puppeteer.executablePath();
+    console.log('🧪 WWEBJS TESTE: Chrome detectado em', chromePath);
+  } catch (e) {
+    console.warn('🧪 WWEBJS TESTE: não foi possível resolver Chrome:', e.message);
+  }
+
   client = new Client({
     authStrategy: new LocalAuth({ clientId:'teste-botoes', dataPath }),
     puppeteer: {
       headless: true,
+      ...(chromePath ? { executablePath: chromePath } : {}),
       args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']
     }
   });
