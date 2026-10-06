@@ -5072,7 +5072,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 
 1️⃣ 🔍 *REALIZAR CONSULTA*
 2️⃣ 🛠️ *SERVIÇOS & DESBLOQUEIOS*
-3️⃣ 📱 *COMPRAR eSIM*
+3️⃣ 📱 *COMPRAR ESIM*
 4️⃣ ⭐ *ASSINATURAS PREMIUM*
 5️⃣ 👤 *MINHA CONTA*
 6️⃣ ❌ *CANCELAMENTO*
