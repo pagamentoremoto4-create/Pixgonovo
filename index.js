@@ -5646,6 +5646,14 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await iniciarFluxoPagamento(from,{valor_pix:valor,tipo_pix:'SALDO'},cliente,async(m)=>enviarTexto(from,m),true);return;
   }
 
+  // TESTE ISOLADO DE BOTÕES — não toca em PIX, pedidos ou pagamentos.
+  // Envie "teste botoes" ou "/teste_botoes" no privado do WhatsApp.
+  if (/^(?:teste\s+botoes|teste\s+botões|\/teste_botoes)$/i.test(textoOriginal)) {
+    const ok = await enviarTesteBotoesWhatsApp(numeroNorm);
+    if (!ok) await enviarTexto(from, '❌ O teste interativo não pôde ser enviado. Veja o log do Render.');
+    return;
+  }
+
   // V4.9.5.1 — MENU GLOBAL PRIORITÁRIO
   // Sempre permite voltar ao início, mesmo quando o cliente ficou preso em hub_menu
   // ou em qualquer outro fluxo estruturado. Também tolera o erro comum "menuu".
@@ -8421,6 +8429,79 @@ async function gerarPix(valor, cliente, documento, gateway='pixgo') {
   }
 }
 
+
+async function enviarTesteBotoesWhatsApp(numero) {
+  const number = normalizarNumeroWhatsApp(numero);
+  if (!number) return false;
+  try {
+    const sessaoPreferidaId = whatsappSessaoPorNumeroCliente.get(number);
+    const sessaoPreferida = sessaoPreferidaId ? whatsappSessoes.get(Number(sessaoPreferidaId)) : null;
+    const sessaoBot = (sessaoPreferida?.funcaoBot && sessaoPreferida?.conectado && sessaoPreferida?.socket)
+      ? sessaoPreferida
+      : await obterSessaoBotConectada();
+    const sock = sessaoBot?.socket || (conectado ? whatsappSocket : null);
+    if (!sock) throw new Error('Nenhuma sessão WhatsApp/Baileys conectada');
+
+    const destino = await resolverJidWhatsAppEnvio(number, sock);
+    if (!destino) throw new Error('Não foi possível resolver o JID do WhatsApp');
+
+    const baileys = await import('@whiskeysockets/baileys');
+    const { proto, generateWAMessageFromContent } = baileys;
+    if (!proto || !generateWAMessageFromContent) throw new Error('Baileys sem suporte ao gerador interativo');
+
+    // Teste isolado: NÃO usa PIX, pagamentos ou pedidos. Apenas verifica se o
+    // cliente WhatsApp renderiza Native Flow enviado pela sessão atual do bot.
+    const interactiveMessage = proto.Message.InteractiveMessage.create({
+      header: proto.Message.InteractiveMessage.Header.create({
+        title: '🧪 TESTE DE BOTÕES',
+        hasMediaAttachment: false
+      }),
+      body: proto.Message.InteractiveMessage.Body.create({
+        text: 'Se os botões aparecerem abaixo, o envio interativo funciona nesta sessão.'
+      }),
+      footer: proto.Message.InteractiveMessage.Footer.create({
+        text: 'CentralUnlocker • teste isolado'
+      }),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+        buttons: [
+          {
+            name: 'quick_reply',
+            buttonParamsJson: JSON.stringify({
+              display_text: '✅ BOTÃO 1',
+              id: 'teste_botao_1'
+            })
+          },
+          {
+            name: 'quick_reply',
+            buttonParamsJson: JSON.stringify({
+              display_text: '📱 BOTÃO 2',
+              id: 'teste_botao_2'
+            })
+          }
+        ]
+      })
+    });
+
+    const mensagem = generateWAMessageFromContent(destino, {
+      viewOnceMessage: {
+        message: {
+          messageContextInfo: {
+            deviceListMetadata: {},
+            deviceListMetadataVersion: 2
+          },
+          interactiveMessage
+        }
+      }
+    }, { userJid: sock.user?.id });
+
+    await sock.relayMessage(destino, mensagem.message, { messageId: mensagem.key.id });
+    console.log(`🧪 TESTE BOTÕES WA enviado para ${number} — id=${mensagem.key.id}`);
+    return true;
+  } catch (e) {
+    console.log('❌ TESTE BOTÕES WA:', e.stack || e.message);
+    return false;
+  }
+}
 
 async function enviarWhatsAppBotaoCopiarPixDireto(sock, destino, codigoPix, valor, gateway='pixgo', textoExtra='') {
   const codigo = String(codigoPix || '').replace(/[\r\n\t]/g, '').trim();
