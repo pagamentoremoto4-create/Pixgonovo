@@ -3,7 +3,7 @@ services:
     name: centralunlocker-v14-ia
     runtime: node
     plan: free
-    buildCommand: npm install --no-audit --no-fund --verbose && npx puppeteer browsers install chrome
+    buildCommand: PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer npm install --no-audit --no-fund --verbose && PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer npx puppeteer browsers install chrome
     startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true

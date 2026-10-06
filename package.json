@@ -6,7 +6,7 @@
     "start": "node index.js",
     "test:ggsoma": "node test/ggsoma.test.js",
     "test:premium": "node test/premium.test.js",
-    "postinstall": "puppeteer browsers install chrome"
+    "postinstall": "PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer puppeteer browsers install chrome"
   },
   "dependencies": {
     "axios": "^1.7.9",

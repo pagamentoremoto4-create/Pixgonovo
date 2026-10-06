@@ -1,3 +1,6 @@
+const path = require('path');
+// No Render, mantém o Chrome dentro do próprio diretório do projeto, que segue para o runtime.
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || path.join(process.cwd(), '.cache', 'puppeteer');
 const { Client, LocalAuth, Buttons, List } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
 const puppeteer = require('puppeteer');
