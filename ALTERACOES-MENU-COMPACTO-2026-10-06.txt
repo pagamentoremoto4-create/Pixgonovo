@@ -1,0 +1,14 @@
+MENU COMPACTO - 2026-10-06
+
+- HOME: Realizar Consulta; Serviços & Desbloqueios; Comprar eSIM; Assinaturas Premium; Minha Conta; Cancelamento; Suporte.
+- Realizar Consulta: assinatura/dias no topo; Aparelho/IMEI; Dados Pessoais; Veículos; Outras Consultas; Minha Assinatura.
+- Telefone/E-mail agrupados em Dados Pessoais.
+- Serviços & Desbloqueios: Blacklist Brazil + serviços DHRU ativos diretamente.
+- Blacklist Brazil: submenu Bloqueio TIM / Desbloqueio TIM.
+- Minha Conta: Meu Saldo; Adicionar Saldo; Histórico; Meu PIX.
+- Histórico removido da HOME.
+- Guia de comandos movido para Suporte.
+- Cancelamento mantido na HOME.
+- Comando pagar/pagar VALOR priorizado antes da abertura automática do menu.
+- Retornos 0/Voltar ajustados para a nova hierarquia.
+- Nenhuma API/pedido/estoque foi removido.
