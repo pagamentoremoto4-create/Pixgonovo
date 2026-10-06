@@ -8377,6 +8377,93 @@ async function gerarPix(valor, cliente, documento, gateway='pixgo') {
 }
 
 
+async function enviarWhatsAppBotaoCopiarPixDireto(sock, destino, codigoPix, valor, gateway='pixgo', textoExtra='') {
+  const codigo = String(codigoPix || '').replace(/[\r\n\t]/g, '').trim();
+  if (!sock || !destino || !codigo || codigo === 'PIX indisponível') return false;
+  try {
+    const baileys = await import('@whiskeysockets/baileys');
+    const { proto, generateWAMessageFromContent } = baileys;
+    if (!proto || !generateWAMessageFromContent) return false;
+    const extra = String(textoExtra || '').trim();
+    const interactiveMessage = proto.Message.InteractiveMessage.create({
+      body: proto.Message.InteractiveMessage.Body.create({
+        text: `💳 *PAGAMENTO PIX*\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}${extra ? `\n${extra}` : ''}\n\nToque no botão abaixo para copiar o PIX.`
+      }),
+      footer: proto.Message.InteractiveMessage.Footer.create({ text: '⏳ Aguardando pagamento' }),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+        buttons: [{ name: 'cta_copy', buttonParamsJson: JSON.stringify({ display_text: '📋 COPIAR PIX', copy_code: codigo }) }]
+      })
+    });
+    const mensagem = generateWAMessageFromContent(destino, {
+      viewOnceMessage: { message: { messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 }, interactiveMessage } }
+    }, { userJid: sock.user?.id });
+    await sock.relayMessage(destino, mensagem.message, { messageId: mensagem.key.id });
+    return true;
+  } catch (e) {
+    console.log('⚠️ Botão COPIAR PIX WhatsApp direto indisponível:', e.message);
+    return false;
+  }
+}
+
+async function enviarWhatsAppBotaoCopiarPix(chave, codigoPix, valor, gateway='pixgo') {
+  const codigo = String(codigoPix || '').replace(/[\r\n\t]/g, '').trim();
+  if (!codigo || codigo === 'PIX indisponível') return false;
+  try {
+    const numero = String(chave).startsWith('wa:')
+      ? String(chave).slice(3)
+      : (String(chave).includes('@s.whatsapp.net') ? jidToNumber(chave) : String(chave));
+    const number = normalizarNumeroWhatsApp(numero);
+    if (!number) return false;
+
+    const sessaoPreferidaId = whatsappSessaoPorNumeroCliente.get(number);
+    const sessaoPreferida = sessaoPreferidaId ? whatsappSessoes.get(Number(sessaoPreferidaId)) : null;
+    const sessaoBot = (sessaoPreferida?.funcaoBot && sessaoPreferida?.conectado && sessaoPreferida?.socket)
+      ? sessaoPreferida
+      : await obterSessaoBotConectada();
+    const sock = sessaoBot?.socket || (conectado ? whatsappSocket : null);
+    if (!sock) return false;
+
+    const destino = await resolverJidWhatsAppEnvio(number, sock);
+    if (!destino) return false;
+
+    const baileys = await import('@whiskeysockets/baileys');
+    const { proto, generateWAMessageFromContent } = baileys;
+    if (!proto || !generateWAMessageFromContent) return false;
+
+    const interactiveMessage = proto.Message.InteractiveMessage.create({
+      body: proto.Message.InteractiveMessage.Body.create({
+        text: `💳 *PAGAMENTO PIX*\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}\n\nToque no botão abaixo para copiar o PIX.`
+      }),
+      footer: proto.Message.InteractiveMessage.Footer.create({ text: '⏳ Aguardando pagamento' }),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+        buttons: [{
+          name: 'cta_copy',
+          buttonParamsJson: JSON.stringify({
+            display_text: '📋 COPIAR PIX',
+            copy_code: codigo
+          })
+        }]
+      })
+    });
+
+    const mensagem = generateWAMessageFromContent(destino, {
+      viewOnceMessage: {
+        message: {
+          messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
+          interactiveMessage
+        }
+      }
+    }, { userJid: sock.user?.id });
+
+    await sock.relayMessage(destino, mensagem.message, { messageId: mensagem.key.id });
+    console.log(`✅ Botão COPIAR PIX enviado no WhatsApp para ${number}`);
+    return true;
+  } catch (e) {
+    console.log('⚠️ Botão COPIAR PIX WhatsApp indisponível; usando fallback:', e.message);
+    return false;
+  }
+}
+
 async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
   const gateway = sess.gateway || 'pixgo';
   const ehTelegram = String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:');
@@ -8454,9 +8541,17 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
     } catch (e) { console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message); }
   }
 
-  await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
-  await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
+  const codigoLimpo = qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo;
+
+  // WhatsApp/Baileys: botão nativo para copiar o PIX.
+  // Mantém o código em texto logo abaixo como fallback para clientes que não renderizam o botão.
+  if (!ehTelegram && qrCode && (WHATSAPP_PROVIDER === 'baileys' || WHATSAPP_PROVIDER === 'qrcode')) {
+    await enviarWhatsAppBotaoCopiarPix(chave, codigoLimpo, valor, gateway);
+  }
+
+  await enviarMensagem('📋 PIX Copia e Cola:');
+  await enviarMensagem(codigoLimpo);
   return true;
 }
 
@@ -11351,8 +11446,10 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
     }
     if (qrBuffer?.length) await sock.sendMessage(grupo,{image:qrBuffer,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
   } catch(e) { console.log('⚠️ QR ASSINATURA CONSULTAVIP:', e.message); }
-  // O código vai sozinho para o cliente copiar e colar no banco sem precisar apagar texto.
-  await sock.sendMessage(grupo,{text:String(pix.qrCode).replace(/[\r\n\t]/g,'').trim()});
+  // Botão nativo COPIAR PIX no WhatsApp; o código em texto permanece como fallback.
+  const codigoPixAssinatura = String(pix.qrCode).replace(/[\r\n\t]/g,'').trim();
+  await enviarWhatsAppBotaoCopiarPixDireto(sock, grupo, codigoPixAssinatura, preco.final, gateway, `💎 Plano: ${plano.nome}`);
+  await sock.sendMessage(grupo,{text:codigoPixAssinatura});
   verificarPagamento(String(pix.paymentId),cliente.revenda?.id||null,jid,preco.final,'ASSINATURA',JSON.stringify(contexto),gateway);
   return true;
 }
