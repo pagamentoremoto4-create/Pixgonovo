@@ -41,7 +41,7 @@ module.exports=function createPremium(d){
   let key='premium';for(const [term,k] of rules){if(name.includes(term)){key=k;break;}}
   const f=path.join(__dirname,'assets','premium',key+'.jpg');return fs.existsSync(f)?f:'';
  }
- function productImage(p){return String(p?.image_path||'').trim()||builtinImage(p);}
+ function productImage(p){const custom=String(p?.image_path||'').trim();return custom&&fs.existsSync(custom)?custom:builtinImage(p);}
  function stock(p){const m=meta(p);return Number(m.stock?.count||0)}
  function deliveryLabel(p){const t=String(meta(p).deliveryType||'').toUpperCase();return t==='LINK'?'Link automático':t==='COUPON'?'Código automático':t==='READY_ACCOUNT'?'Conta automática':'Entrega digital'}
  function durationLabel(p){
@@ -147,5 +147,5 @@ module.exports=function createPremium(d){
  function routes(app){
   app.get('/admin/premium',(req,res)=>res.redirect('/admin/ggsoma'));
  }
- return {init,routes,products,product,card,list,show,confirm,waMessage,clientCallback,adminCallback,adminMessage};
+ return {init,routes,products,product,productImage,customerTitle,stock,card,list,show,confirm,waMessage,clientCallback,adminCallback,adminMessage};
 };
