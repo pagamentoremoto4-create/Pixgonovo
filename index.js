@@ -3647,8 +3647,12 @@ async function entregarEsimPorDispositivo(destino, item, dispositivo, nomePlano)
   if (!item?.lpa_completo || !item?.smdp || !item?.codigo_ativacao) {
     throw new Error('Não foi possível extrair os dados de ativação deste QR Code.');
   }
+  if (String(destino).startsWith('wa:')) {
+    await enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
+    return;
+  }
   if (tipo === 'IPHONE') {
-    // Regra definida: iPhone recebe somente dados manuais, nunca a imagem do QR.
+    // Telegram e outros canais preservam o comportamento anterior.
     await enviarTexto(destino, textoIphoneEsim(item, nomePlano));
     return;
   }
@@ -3657,6 +3661,52 @@ async function entregarEsimPorDispositivo(destino, item, dispositivo, nomePlano)
   if (fs.existsSync(qrPath)) await enviarImagem(destino, qrPath, `🤖 eSIM ${nomePlano}
 ⚠️ QR Code de uso único.`);
   await enviarTexto(destino, textoAndroidEsim(item, nomePlano));
+}
+
+// V223: confirmação única para iPhone e Android no WhatsApp.
+function textoConfirmacaoEsimWhatsApp(plano, ddd) {
+  return `🛒 *CONFIRMAR eSIM*\n\n📱 ${plano.nome_plano}\n📍 DDD: ${ddd || '-'}\n💰 Valor: ${brl(plano.preco_revenda)}\n\n1️⃣ Confirmar compra/pagamento\n2️⃣ Trocar DDD\n3️⃣ Cancelar`;
+}
+
+// V223: os dados de ativação são recuperados apenas dos eSIMs vendidos ao próprio cliente.
+function menuEntregaEsimWhatsApp() {
+  return '1️⃣ Como instalar\n2️⃣ Meus pedidos\n0️⃣ Menu principal';
+}
+function tutorialInstalacaoEsimWhatsApp(item, nomePlano) {
+  const smdp = String(item.smdp || '').trim();
+  const ativacao = String(item.codigo_ativacao || '').trim();
+  const lpa = String(item.lpa_completo || '').trim();
+  return `📲 *COMO INSTALAR SEU eSIM*\n📱 ${nomePlano || item.nome_plano || 'eSIM'} | DDD ${item.ddd || '-'}\n\n🍎 *iPhone*\nAjustes → Celular → Adicionar eSIM → Usar QR Code → Inserir detalhes manualmente.\n\n🔐 SM-DP+:\n${smdp}\n🔑 Código de ativação:\n${ativacao}${item.codigo_confirmacao ? `\n🔒 Confirmação: ${item.codigo_confirmacao}` : ''}\n\n🤖 *Android*\nConfigurações → Conexões/Rede móvel → Gerenciador de SIM → Adicionar eSIM.\n\n🔑 Código LPA completo:\n${lpa || 'Não disponível'}\n\n⚠️ Conecte-se ao Wi-Fi. Não apague o eSIM após instalar. Grave um vídeo da primeira tentativa para eventual análise de garantia.\nOs nomes dos menus podem variar conforme o aparelho.`;
+}
+async function mostrarTutorialEsimWhatsApp(from, cliente, sess) {
+  const ids = [...new Set((Array.isArray(sess?.esim_ids) ? sess.esim_ids : [sess?.esim_id]).map(Number).filter(n => Number.isSafeInteger(n) && n > 0))];
+  if (!ids.length) { await enviarTexto(from, '⌛ Não encontrei a entrega. Consulte seus pedidos ou fale com o suporte.'); return; }
+  for (const id of ids) {
+    const item = await get(`SELECT * FROM esim_estoque WHERE id=? AND revenda_id=? AND status='VENDIDO'`, [id, cliente.id]);
+    if (!item) continue;
+    const pronto = await garantirDadosAtivacaoEsim(item);
+    if (pronto?.smdp && pronto?.codigo_ativacao && pronto?.lpa_completo) {
+      await enviarTexto(from, tutorialInstalacaoEsimWhatsApp(pronto, pronto.nome_plano));
+    }
+  }
+  await salvarSessaoPedido(from, { ...sess, etapa: 'esim_instalacao' });
+  await enviarTexto(from, '0️⃣ Voltar à entrega');
+}
+async function enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, pedidoId) {
+  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
+  if (!fs.existsSync(qrPath)) throw new Error('QR Code do eSIM não encontrado no estoque.');
+  const qrEnviado = await enviarImagem(destino, qrPath, `✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd || '-'}${pedidoId ? `\n📦 Pedido #${pedidoId}` : ''}\n⚠️ QR Code de uso único.`);
+  if (!qrEnviado) {
+    await avisarAdminTelegram(`⚠️ Falha ao enviar QR do eSIM #${item.id} para ${destino}. Pedido preservado; reenviar o mesmo QR, sem nova cobrança.`);
+    await enviarTexto(destino, `⚠️ O envio do QR Code falhou. Seu pedido foi salvo e não será cobrado novamente. Acione o suporte para reenviar o mesmo eSIM.`);
+    return false;
+  }
+  const textoEnviado = await enviarTexto(destino, `🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`);
+  if (!textoEnviado) await avisarAdminTelegram(`⚠️ QR do eSIM #${item.id} enviado, mas falhou a mensagem de instalação para ${destino}.`);
+  // Manter contexto de entregas múltiplas na mesma compra, inclusive após reinício.
+  const anterior = await carregarSessaoPedido(destino);
+  const ids = anterior?.etapa === 'esim_entregue' ? (anterior.esim_ids || []) : [];
+  await salvarSessaoPedido(destino, { etapa: 'esim_entregue', esim_ids: [...new Set([...ids, Number(item.id)])] });
 }
 
 function textoEscolhaDispositivoEsim() {
@@ -4976,39 +5026,25 @@ Digite *menu* para voltar.`);
     const ddds = await dddsEsimDisponiveis(sess.plano);
     const escolhido = ddds[Number(opcao)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*\n📍 DDD: *${escolhido.ddd}*\n\n📲 *Escolha o aparelho:*\n\n1️⃣ 🍎 iPhone\n2️⃣ 🤖 Android\n0️⃣ ⬅️ Voltar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
     return;
   }
 
+  // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
-    if(opcao==='0'||lower==='voltar'){
-      await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});
-      await enviarEscolhaDddEsim(from,sess.plano,cliente.saldo);
-      return;
-    }
-    const dispositivo = opcao === '1' ? 'IPHONE' : opcao === '2' ? 'ANDROID' : '';
-    if (!dispositivo) { await enviarTexto(from, '❌ Escolha 1 para iPhone ou 2 para Android.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, dispositivo, ddd: sess.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*
-
-${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
-📍 DDD: ${sess.ddd || '-'}
-💰 Valor: ${brl(sess.plano.preco_revenda)}
-
-1️⃣ ✅ Confirmar compra/pagamento
-2️⃣ 🔄 Trocar aparelho
-3️⃣ ❌ Cancelar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
     if (opcao === '3' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: sess.ddd }); await enviarTexto(from, textoEscolhaDispositivoEsim()); return; }
-    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o aparelho ou 3 para cancelar.'); return; }
+    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, cliente.saldo); return; }
+    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o DDD ou 3 para cancelar.'); return; }
     await apagarSessaoPedido(from);
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
-    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, sess.dispositivo, sess.ddd);
+    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, 'UNIVERSAL', sess.ddd);
     return;
   }
 
@@ -5813,6 +5849,29 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     }
   }
 
+  // V223: o tutorial do eSIM usa o QR/código da compra já entregue.
+  const sessEntregaEsim = await carregarSessaoPedido(from);
+  if (sessEntregaEsim?.etapa === 'esim_instalacao' && (opcao === '0' || lower === 'voltar')) {
+    await salvarSessaoPedido(from, { ...sessEntregaEsim, etapa: 'esim_entregue' });
+    await enviarTexto(from, menuEntregaEsimWhatsApp());
+    return;
+  }
+  if (sessEntregaEsim?.etapa === 'esim_entregue' || sessEntregaEsim?.etapa === 'esim_instalacao') {
+    if (opcao === '1') { await mostrarTutorialEsimWhatsApp(from, cliente, sessEntregaEsim); return; }
+    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'historico_menu' }); await enviarMenuHistoricoWhatsApp(from); return; }
+  }
+  // O zero do DDD volta aos planos, sem alterar a navegação dos outros serviços.
+  if (opcao === '0' && sessEntregaEsim?.etapa === 'esim_ddd') {
+    await salvarSessaoPedido(from, { etapa: 'esim_escolha' });
+    await enviarListaEsim(from);
+    return;
+  }
+  if (opcao === '0' && sessEntregaEsim?.etapa === 'esim_confirmar') {
+    await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sessEntregaEsim.plano });
+    await enviarEscolhaDddEsim(from, sessEntregaEsim.plano, cliente.saldo);
+    return;
+  }
+
   // V4.9.5.1 — MENU GLOBAL PRIORITÁRIO
   // Sempre permite voltar ao início, mesmo quando o cliente ficou preso em hub_menu
   // ou em qualquer outro fluxo estruturado. Também tolera o erro comum "menuu".
@@ -6530,34 +6589,25 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     const ddds = await dddsEsimDisponiveis(sess.plano);
     const escolhido = ddds[Number(opcao)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*\n📍 DDD: *${escolhido.ddd}*\n\n📲 *Escolha o aparelho:*\n\n1️⃣ 🍎 iPhone\n2️⃣ 🤖 Android\n0️⃣ ⬅️ Voltar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
     return;
   }
 
+  // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
-    const dispositivo = opcao === '1' ? 'IPHONE' : opcao === '2' ? 'ANDROID' : '';
-    if (!dispositivo) { await apagarSessaoPedido(from); console.log('🔇 V160 DISPOSITIVO ESIM INVÁLIDO:', numeroNorm, textoOriginal); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, dispositivo, ddd: sess.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*
-
-${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
-📍 DDD: ${sess.ddd || '-'}
-💰 Valor: ${brl(sess.plano.preco_revenda)}
-
-1️⃣ ✅ Confirmar compra/pagamento
-2️⃣ 🔄 Trocar aparelho
-3️⃣ ❌ Cancelar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
     if (opcao === '3' || lower === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: sess.ddd }); await enviarTexto(from, textoEscolhaDispositivoEsim()); return; }
+    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, cliente.saldo); return; }
     if (opcao !== '1') { await apagarSessaoPedido(from); console.log('🔇 V160 CONFIRMAÇÃO ESIM INVÁLIDA:', numeroNorm, textoOriginal); return; }
     await apagarSessaoPedido(from);
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
-    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, sess.dispositivo, sess.ddd);
+    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, 'UNIVERSAL', sess.ddd);
     return;
   }
 
@@ -7570,34 +7620,25 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const ddds = await dddsEsimDisponiveis(sess.plano);
     const escolhido = ddds[Number(texto)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*\n📍 DDD: *${escolhido.ddd}*\n\n📲 *Escolha o aparelho:*\n\n1️⃣ 🍎 iPhone\n2️⃣ 🤖 Android\n0️⃣ ⬅️ Voltar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
     return;
   }
 
+  // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
-    const dispositivo = texto === '1' ? 'IPHONE' : texto === '2' ? 'ANDROID' : '';
-    if (!dispositivo) { await enviarTexto(from, '❌ Escolha 1 para iPhone ou 2 para Android.'); return; }
-    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, dispositivo, ddd: sess.ddd });
-    await enviarTexto(from, `📱 *${sess.plano.nome_plano}*
-
-${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
-📍 DDD: ${sess.ddd || '-'}
-💰 Valor: ${brl(sess.plano.preco_revenda)}
-
-1️⃣ ✅ Confirmar compra/pagamento
-2️⃣ 🔄 Trocar aparelho
-3️⃣ ❌ Cancelar`);
+    await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
+    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
     if (texto === '3' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (texto === '2') { await salvarSessaoPedido(from, { etapa: 'esim_dispositivo', plano: sess.plano, ddd: sess.ddd }); await enviarTexto(from, textoEscolhaDispositivoEsim()); return; }
-    if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o aparelho ou 3 para cancelar.'); return; }
+    if (texto === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, revenda.saldo); return; }
+    if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o DDD ou 3 para cancelar.'); return; }
     const plano = sess.plano;
     await apagarSessaoPedido(from);
-    await entregarEsimRevenda(from, revenda, plano, sess.dispositivo, sess.ddd);
+    await entregarEsimRevenda(from, revenda, plano, 'UNIVERSAL', sess.ddd);
     return;
   }
 
@@ -7917,18 +7958,25 @@ async function entregarEsimRevenda(from, revenda, plano, dispositivo, ddd='') {
     return;
   }
 
+  if (String(from).startsWith('wa:') && !fs.existsSync(caminhoArquivoEsim(itemPreparado.arquivo_qr))) {
+    await enviarTexto(from, '❌ QR Code indisponível para entrega. Nenhuma cobrança foi realizada. O administrador foi avisado.');
+    await avisarAdminTelegram(`⚠️ Arquivo QR eSIM não encontrado no estoque #${item.id}`);
+    return;
+  }
+
   const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_nome, entrada_valor, tipo_entrada, entrada_label, valor, status, cobrado, finalizado_em)
     VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, 'OUTRO', 'eSIM', ?, 'FINALIZADO', ?, CURRENT_TIMESTAMP)`,
     [revenda.id, revenda.nome, from, revenda.whatsapp || jidToNumber(from), `eSIM ${item.nome_plano}`, item.nome_plano, valor, 1]);
   await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor, revenda.id]);
-  const tipo = String(dispositivo || 'ANDROID').toUpperCase();
+  const tipo = String(from).startsWith('wa:') ? 'UNIVERSAL' : String(dispositivo || 'ANDROID').toUpperCase();
   await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, dispositivo_entrega=?, vendido_em=CURRENT_TIMESTAMP WHERE id=?`,
     [revenda.id, revenda.nome, ins.lastID, tipo, item.id]);
   const revAtual = await get('SELECT * FROM revendas WHERE id=?', [revenda.id]);
   notificarPainel('esim', '📱 eSIM vendido', `${revenda.nome} - ${item.nome_plano}`);
   const pedidoAuto = await get('SELECT * FROM pedidos WHERE id=?', [ins.lastID]);
   await avisarEsimAutomaticoAdminTelegram(pedidoAuto, itemPreparado);
-  await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n📍 DDD: ${item.ddd || 'Não informado'}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}\n\n${tipo === 'IPHONE' ? '🍎 Dados para instalação manual enviados abaixo.' : '🤖 QR Code + código manual serão enviados abaixo.'}`);
+  if (!String(from).startsWith('wa:')) await enviarTexto(from, `✅ Compra aprovada\n\n📱 ${item.nome_plano}\n📍 DDD: ${item.ddd || 'Não informado'}\n💰 Valor: ${brl(valor)}\n\n💳 Situação da conta:\n${textoSituacaoSaldo(revAtual?.saldo || 0)}`);
+  itemPreparado.pedido_id = ins.lastID;
   await entregarEsimPorDispositivo(from, itemPreparado, tipo, item.nome_plano);
 }
 
@@ -8785,8 +8833,7 @@ async function entregarQrComInstrucoesEBotao(destino,item,nomePlano,indice,total
     ]}});
     return;
   }
-  if(fs.existsSync(qrPath)) await enviarImagem(destino,qrPath,`${titulo}\n📍 DDD: ${item.ddd||'-'}\n⚠️ QR Code de uso único.`);
-  await enviarTexto(destino,`${textoInstrucaoCompactaEsim()}\n\n⌨️ Instalação manual:\n${textoInstalacaoManualEsim(item)}`);
+  await enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
 }
 async function entregarEsimsQuantidade(revendaId,jid,ctx){
   const cliente=await get('SELECT * FROM revendas WHERE id=?',[revendaId]);
@@ -8810,6 +8857,11 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
       await avisarAdminTelegram(`⚠️ Falha ao ler QR eSIM do estoque #${item.id}\nPlano: ${nomePlano}\nDDD: ${ddd}`);
       return false;
     }
+    if (String(jid).startsWith('wa:') && !fs.existsSync(caminhoArquivoEsim(pronto.arquivo_qr))) {
+      await enviarTexto(jid, '❌ Um arquivo QR Code não está disponível. Nenhum eSIM foi consumido. O administrador foi avisado.');
+      await avisarAdminTelegram(`⚠️ QR do estoque eSIM #${item.id} não encontrado antes da compra em lote.`);
+      return false;
+    }
     preparados.push(pronto);
   }
   const saldoAtual=Number(cliente.saldo||0);
@@ -8817,6 +8869,7 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
     await enviarTexto(jid,`❌ Saldo insuficiente para concluir.\n\n💰 Total: ${brl(total)}\n💳 Saldo: ${brl(saldoAtual)}`);
     return false;
   }
+  if (String(jid).startsWith('wa:')) await apagarSessaoPedido(jid);
   await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[total,cliente.id]);
   for(let i=0;i<preparados.length;i++){
     const item=preparados[i];
@@ -8826,6 +8879,7 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
     await run(`UPDATE esim_estoque SET status='VENDIDO', revenda_id=?, revenda_nome=?, pedido_id=?, dispositivo_entrega='QR_MANUAL', vendido_em=CURRENT_TIMESTAMP WHERE id=? AND status='DISPONIVEL'`,[cliente.id,cliente.nome,ins.lastID,item.id]);
     const pedido=await get('SELECT * FROM pedidos WHERE id=?',[ins.lastID]);
     await avisarEsimAutomaticoAdminTelegram(pedido,item);
+    item.pedido_id = ins.lastID;
     await entregarQrComInstrucoesEBotao(jid,item,nomePlano,i+1,preparados.length);
   }
   const revAtual=await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]);
