@@ -1,5 +1,7 @@
 'use strict';
 const crypto=require('crypto');
+const fs=require('fs');
+const path=require('path');
 
 // Assinaturas Premium is now only a storefront for products enabled from GGSOMA.
 // There is no local/manual stock and no customer broadcast when a product is enabled.
@@ -82,6 +84,21 @@ module.exports=function createPremium(d){
   const m=meta(p);
   return translateToPortuguese(apiText(m));
  }
+ function fallbackImage(p){
+  if(p?.image_path && fs.existsSync(p.image_path)) return p.image_path;
+  const title=customerTitle(p).toLowerCase();
+  const map=[
+   ['gemini','gemini.jpg'],['chatgpt','chatgpt.jpg'],['openai','chatgpt.jpg'],['claude','claude.jpg'],
+   ['spotify','spotify.jpg'],['youtube','youtube.jpg'],['netflix','netflix.jpg'],['disney','disney.jpg'],
+   ['max','max.jpg'],['hbo','max.jpg'],['capcut','capcut.jpg'],['canva','canva.jpg'],
+   ['microsoft','microsoft365.jpg'],['office','microsoft365.jpg'],['adobe','adobe.jpg'],
+   ['prime video','primevideo.jpg'],['amazon prime','primevideo.jpg'],['crunchyroll','crunchyroll.jpg'],['deezer','deezer.jpg']
+  ];
+  const found=map.find(([k])=>title.includes(k));
+  const base=path.join(__dirname,'assets','premium');
+  const chosen=path.join(base,found?found[1]:'default.png');
+  return fs.existsSync(chosen)?chosen:null;
+ }
  async function card(p,client){
   const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),description=await customerDescription(p);
   const title=customerTitle(p);
@@ -99,8 +116,9 @@ module.exports=function createPremium(d){
  async function show(from,client,id,telegram=false){
   const p=await product(id);if(!p?.ativo||!p.present){await d.enviarTexto(from,'Produto indisponível.');return;}
   const token=crypto.randomUUID();await d.salvarSessaoPedido(from,{etapa:'premium_product',productId:p.id,token});const text=await card(p,client),available=stock(p)>0;
-  if(telegram){if(p.image_path)await d.enviarImagem(from,p.image_path,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
-  if(p.image_path)await d.enviarImagem(from,p.image_path,'');
+  if(telegram){const img=fallbackImage(p);if(img)await d.enviarImagem(from,img,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
+  const img=fallbackImage(p);
+  if(img)await d.enviarImagem(from,img,'');
   await d.enviarTexto(from,text+(available?'\n\n1️⃣ Comprar\n0️⃣ Voltar':'\n\n⛔ Esgotado\n0️⃣ Voltar'));
  }
  async function confirm(from,client,id,token){
