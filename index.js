@@ -1732,6 +1732,14 @@ async function initDB() {
   await addColumnIfMissing('revendas', 'bot_ativo', 'INTEGER DEFAULT 0');
   await addColumnIfMissing('revendas', 'perfil_bot', "TEXT DEFAULT 'NORMAL'");
   await addColumnIfMissing('revendas', 'senha_hash_web', 'TEXT');
+  // V222 — recuperação segura de clientes removidos mantendo histórico.
+  await addColumnIfMissing('revendas', 'whatsapp_removido', 'TEXT');
+  await addColumnIfMissing('revendas', 'jid_removido', 'TEXT');
+  await addColumnIfMissing('revendas', 'telegram_id_removido', 'TEXT');
+  await addColumnIfMissing('revendas', 'login_removido', 'TEXT');
+  await addColumnIfMissing('revendas', 'removido_em', 'TEXT');
+  await addColumnIfMissing('revendas', 'recuperado_para_id', 'INTEGER');
+  await addColumnIfMissing('revendas', 'recuperado_em', 'TEXT');
   await run("UPDATE revendas SET perfil_bot='NORMAL' WHERE perfil_bot IS NULL OR TRIM(perfil_bot)='' OR UPPER(TRIM(perfil_bot))='VIP'");
 
   // V170 — acesso do cliente pelo site usando a mesma conta cadastrada no bot.
@@ -13217,6 +13225,14 @@ app.get('/admin/revendas', async (req, res) => {
   const rows = await all('SELECT * FROM revendas WHERE status != "REMOVIDA" ORDER BY nome COLLATE NOCASE ASC, id DESC');
   const ativos = rows.filter(r => r.status === 'ATIVA').length;
   const bloqueados = rows.filter(r => r.status === 'BLOQUEADA').length;
+  const removidos = await all(`SELECT r.*,
+      (SELECT COUNT(*) FROM pedidos p WHERE p.revenda_id=r.id) total_pedidos,
+      (SELECT COUNT(*) FROM pedidos p WHERE p.revenda_id=r.id AND UPPER(p.status)='PENDENTE') pendentes,
+      (SELECT COUNT(*) FROM pedidos p WHERE p.revenda_id=r.id AND UPPER(p.status)='EM PROCESSO') em_processo,
+      COALESCE(NULLIF(r.whatsapp_removido,''),
+        (SELECT NULLIF(p.revenda_numero,'') FROM pedidos p WHERE p.revenda_id=r.id AND NULLIF(p.revenda_numero,'') IS NOT NULL ORDER BY p.id DESC LIMIT 1),
+        (SELECT NULLIF(pg.cliente_numero,'') FROM pagamentos pg WHERE pg.revenda_id=r.id AND NULLIF(pg.cliente_numero,'') IS NOT NULL ORDER BY pg.id DESC LIMIT 1)) contato_recuperado
+    FROM revendas r WHERE r.status='REMOVIDA' AND r.recuperado_para_id IS NULL ORDER BY COALESCE(r.removido_em,r.atualizado_em) DESC, r.id DESC`);
   // V157: carrega de uma vez os serviços relevantes para exibir dentro do cadastro.
   const pedidosClientes = await all(`SELECT id, revenda_id, servico_nome, imei, entrada_valor, status, criado_em
     FROM pedidos WHERE status IN ('PENDENTE','EM PROCESSO','CANCELADO') ORDER BY id DESC`);
@@ -13269,8 +13285,27 @@ app.get('/admin/revendas', async (req, res) => {
 
   if (!lista) lista = '<div class="card"><p class="muted">Nenhum cliente cadastrado.</p></div>';
 
+  let listaRemovidos = '';
+  for (const r of removidos) {
+    const contato = normalizarNumeroWhatsApp(r.contato_recuperado || r.whatsapp_removido || '');
+    const buscaRem = `${String(r.nome||'').toLowerCase()} ${contato} ${r.id}`;
+    listaRemovidos += `<div class="cli-item" data-search="${safeHtml(buscaRem)}">
+      <div class="cli-head" style="cursor:default">
+        <span class="cli-avatar">🗑️</span>
+        <span class="cli-main"><b>${safeHtml(r.nome || 'Cliente removido')}</b><small>#${r.id}${contato ? ' · 📱 +' + safeHtml(contato) : ''} · removido em ${dateBR(r.removido_em || r.atualizado_em)}</small></span>
+        <span class="cli-badges"><em class="off">REMOVIDO</em><strong>${brl(r.saldo || 0)}</strong></span><span></span>
+      </div>
+      <div style="padding:0 14px 14px">
+        <div class="cli-summary" style="margin:0 0 10px"><span>📦 Pedidos: <b>${Number(r.total_pedidos||0)}</b></span><span>⏳ Pendentes: <b>${Number(r.pendentes||0)}</b></span><span>🔄 Em processo: <b>${Number(r.em_processo||0)}</b></span></div>
+        <a class="btn green" href="/admin/revenda/${r.id}/recuperar">♻️ Recuperar / Vincular histórico</a>
+        <a class="btn gray" href="/admin/revenda/${r.id}/historico">📋 Ver histórico antigo</a>
+      </div>
+    </div>`;
+  }
+  if (!listaRemovidos) listaRemovidos = '<div class="card"><p class="muted">Nenhum cliente removido encontrado.</p></div>';
+
   const html = `<style>
-    .cli-top{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}.cli-top button{width:100%;font-size:16px;padding:15px;border-radius:14px}
+    .cli-top{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}.cli-top button{width:100%;font-size:16px;padding:15px;border-radius:14px}
     .cli-panel{display:none}.cli-panel.active{display:block}.cli-summary{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px}.cli-summary span{padding:7px 11px;border:1px solid rgba(148,163,184,.2);border-radius:999px;font-size:13px}
     .cli-search{position:relative;margin-bottom:14px}.cli-search input{width:100%;padding:15px 16px 15px 45px;border-radius:14px}.cli-search:before{content:'🔎';position:absolute;left:15px;top:13px;font-size:18px}
     .cli-list{display:grid;gap:9px}.cli-item{border:1px solid rgba(148,163,184,.17);border-radius:14px;background:rgba(15,23,42,.48);overflow:hidden}.cli-head{width:100%;display:grid;grid-template-columns:42px minmax(0,1fr) auto 28px;align-items:center;gap:10px;padding:13px 14px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}.cli-head:hover{background:rgba(59,130,246,.06)}
@@ -13285,6 +13320,7 @@ app.get('/admin/revendas', async (req, res) => {
   <div class="cli-top">
     <button type="button" class="btn" id="tabCadastro" onclick="showClienteTab('cadastro')">➕ Cadastrar Cliente</button>
     <button type="button" class="btn green" id="tabLocalizar" onclick="showClienteTab('localizar')">🔎 Localizar Cliente</button>
+    <button type="button" class="btn" id="tabRemovidos" onclick="showClienteTab('removidos')">🗑️ Removidos (${removidos.length})</button>
   </div>
 
   <div id="painelCadastro" class="cli-panel">
@@ -13311,13 +13347,19 @@ app.get('/admin/revendas', async (req, res) => {
     <div class="cli-empty" id="clienteVazio">Nenhum cliente encontrado.</div>
   </div>
 
+  <div id="painelRemovidos" class="cli-panel">
+    <div class="card"><b>🗑️ Clientes removidos mantendo histórico</b><p class="muted">Aqui aparecem cadastros removidos sem apagar pedidos. Você pode abrir o histórico antigo e vinculá-lo ao cadastro atual do mesmo cliente.</p></div>
+    <div class="cli-search"><input id="removidoBusca" type="search" placeholder="Buscar removido por nome, número ou ID..." oninput="filtrarRemovidos()"></div>
+    <div class="cli-list" id="removidoLista">${listaRemovidos}</div>
+    <div class="cli-empty" id="removidoVazio">Nenhum cliente removido encontrado.</div>
+  </div>
+
   <script>
     function showClienteTab(tab){
-      const cad=document.getElementById('painelCadastro'), loc=document.getElementById('painelLocalizar');
-      const bc=document.getElementById('tabCadastro'), bl=document.getElementById('tabLocalizar');
-      const isCad=tab==='cadastro';
-      cad.classList.toggle('active',isCad); loc.classList.toggle('active',!isCad);
-      bc.classList.toggle('green',isCad); bl.classList.toggle('green',!isCad);
+      const cad=document.getElementById('painelCadastro'), loc=document.getElementById('painelLocalizar'), rem=document.getElementById('painelRemovidos');
+      const bc=document.getElementById('tabCadastro'), bl=document.getElementById('tabLocalizar'), br=document.getElementById('tabRemovidos');
+      cad.classList.toggle('active',tab==='cadastro'); loc.classList.toggle('active',tab==='localizar'); rem.classList.toggle('active',tab==='removidos');
+      bc.classList.toggle('green',tab==='cadastro'); bl.classList.toggle('green',tab==='localizar'); br.classList.toggle('green',tab==='removidos');
     }
     function toggleCliente(id){
       const box=document.getElementById('cli-'+id); if(!box)return;
@@ -13330,6 +13372,11 @@ app.get('/admin/revendas', async (req, res) => {
       const q=(document.getElementById('clienteBusca').value||'').toLowerCase().trim(); let vis=0;
       document.querySelectorAll('#clienteLista .cli-item').forEach(el=>{const ok=!q||(el.dataset.search||'').includes(q);el.style.display=ok?'':'none';if(ok)vis++});
       document.getElementById('clienteVazio').style.display=vis?'none':'block';
+    }
+    function filtrarRemovidos(){
+      const q=(document.getElementById('removidoBusca').value||'').toLowerCase().trim(); let vis=0;
+      document.querySelectorAll('#removidoLista .cli-item').forEach(el=>{const ok=!q||(el.dataset.search||'').includes(q);el.style.display=ok?'':'none';if(ok)vis++});
+      document.getElementById('removidoVazio').style.display=vis?'none':'block';
     }
   </script>`;
   res.send(page('Clientes', html));
@@ -13442,6 +13489,13 @@ app.post('/admin/revenda/:id/remover', async (req, res) => {
   const sufixo = `removido_${r.id}_${Date.now()}`;
   await run(`UPDATE revendas SET
     status='REMOVIDA',
+    whatsapp_removido=COALESCE(NULLIF(whatsapp_removido,''),whatsapp),
+    jid_removido=COALESCE(NULLIF(jid_removido,''),jid),
+    telegram_id_removido=COALESCE(NULLIF(telegram_id_removido,''),telegram_id),
+    login_removido=COALESCE(NULLIF(login_removido,''),login),
+    removido_em=CURRENT_TIMESTAMP,
+    recuperado_para_id=NULL,
+    recuperado_em=NULL,
     telegram_id=NULL,
     jid=NULL,
     whatsapp=NULL,
@@ -13453,6 +13507,136 @@ app.post('/admin/revenda/:id/remover', async (req, res) => {
   pedidoSessao.delete(tgJid(r.telegram_id || ''));
   pedidoSessao.delete(String(r.telegram_id || ''));
   res.redirect('/admin/revendas');
+});
+
+// V222 — recuperação de cadastro removido sem perder serviços/pedidos.
+async function v222ContatoRemovido(r) {
+  const p = await get(`SELECT revenda_numero,revenda_jid FROM pedidos WHERE revenda_id=? AND (NULLIF(revenda_numero,'') IS NOT NULL OR NULLIF(revenda_jid,'') IS NOT NULL) ORDER BY id DESC LIMIT 1`, [r.id]);
+  const pg = await get(`SELECT cliente_numero,cliente_jid FROM pagamentos WHERE revenda_id=? AND (NULLIF(cliente_numero,'') IS NOT NULL OR NULLIF(cliente_jid,'') IS NOT NULL) ORDER BY id DESC LIMIT 1`, [r.id]);
+  const whatsapp = normalizarNumeroWhatsApp(r.whatsapp_removido || p?.revenda_numero || pg?.cliente_numero || '');
+  const jidAntigo = String(r.jid_removido || p?.revenda_jid || pg?.cliente_jid || '');
+  let telegram = onlyDigits(r.telegram_id_removido || '');
+  if (!telegram && /^tg:/i.test(jidAntigo)) telegram = onlyDigits(jidAntigo);
+  return { whatsapp, telegram, jidAntigo };
+}
+
+async function v222TabelaTemColuna(tabela, coluna) {
+  try { return (await all(`PRAGMA table_info(${tabela})`)).some(c => c.name === coluna); } catch (_) { return false; }
+}
+
+async function v222MoverHistoricoRevenda(origemId, destinoId, transferirSaldo) {
+  const origem = await get('SELECT * FROM revendas WHERE id=? AND status="REMOVIDA"', [origemId]);
+  const destino = await get('SELECT * FROM revendas WHERE id=? AND status!="REMOVIDA"', [destinoId]);
+  if (!origem) throw new Error('Cadastro removido não encontrado.');
+  if (!destino) throw new Error('Cadastro atual não encontrado.');
+  if (Number(origemId) === Number(destinoId)) throw new Error('Origem e destino não podem ser iguais.');
+
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    // Tabelas históricas/operacionais: pedidos pendentes continuam processando no cadastro atual.
+    for (const tabela of ['pedidos','pagamentos','pix_pedidos','dhru_orders','solicitacoes_cancelamento','esim_estoque','mensagens_envio']) {
+      if (await v222TabelaTemColuna(tabela,'revenda_id')) await run(`UPDATE ${tabela} SET revenda_id=? WHERE revenda_id=?`, [destinoId, origemId]);
+    }
+    // Pedidos ainda abertos passam também a responder pelos canais do cadastro atual.
+    await run(`UPDATE pedidos SET revenda_nome=?, revenda_jid=COALESCE(NULLIF(?,''),revenda_jid), revenda_numero=COALESCE(NULLIF(?,''),revenda_numero)
+      WHERE revenda_id=? AND UPPER(status) IN ('PENDENTE','EM PROCESSO')`, [destino.nome||origem.nome||'', destino.jid||'', destino.whatsapp||'', destinoId]);
+    if (destino.jid) await run(`UPDATE pix_pedidos SET revenda_jid=? WHERE revenda_id=? AND LOWER(COALESCE(status,'')) IN ('pending','pendente')`, [destino.jid, destinoId]);
+
+    // Configurações por cliente: preserva o que já existe no cadastro atual e importa apenas o que faltar.
+    await run(`INSERT OR IGNORE INTO precos_revenda(revenda_id,servico_id,preco) SELECT ?,servico_id,preco FROM precos_revenda WHERE revenda_id=?`, [destinoId, origemId]);
+    await run(`DELETE FROM precos_revenda WHERE revenda_id=?`, [origemId]);
+    await run(`INSERT OR IGNORE INTO modalidades_servico_revenda(revenda_id,servico_id,modalidade) SELECT ?,servico_id,modalidade FROM modalidades_servico_revenda WHERE revenda_id=?`, [destinoId, origemId]);
+    await run(`DELETE FROM modalidades_servico_revenda WHERE revenda_id=?`, [origemId]);
+    await run(`INSERT OR IGNORE INTO precos_esim_revenda(revenda_id,plano_id,preco) SELECT ?,plano_id,preco FROM precos_esim_revenda WHERE revenda_id=?`, [destinoId, origemId]);
+    await run(`DELETE FROM precos_esim_revenda WHERE revenda_id=?`, [origemId]);
+
+    // Sessões/códigos antigos não devem sobreviver à recuperação.
+    if (await v222TabelaTemColuna('cliente_codigos_acesso','revenda_id')) await run('DELETE FROM cliente_codigos_acesso WHERE revenda_id=?', [origemId]);
+    if (await v222TabelaTemColuna('cliente_sessoes_web','revenda_id')) await run('DELETE FROM cliente_sessoes_web WHERE revenda_id=?', [origemId]);
+    if (await v222TabelaTemColuna('whatsapp_vinculos','revenda_id')) await run('DELETE FROM whatsapp_vinculos WHERE revenda_id=?', [origemId]);
+
+    if (transferirSaldo) await run('UPDATE revendas SET saldo=COALESCE(saldo,0)+?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [Number(origem.saldo||0), destinoId]);
+    await run(`UPDATE revendas SET status='REMOVIDA', recuperado_para_id=?, recuperado_em=CURRENT_TIMESTAMP, saldo=CASE WHEN ? THEN 0 ELSE saldo END, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [destinoId, transferirSaldo ? 1 : 0, origemId]);
+    await run('COMMIT');
+    return await get('SELECT * FROM revendas WHERE id=?', [destinoId]);
+  } catch (e) {
+    try { await run('ROLLBACK'); } catch (_) {}
+    throw e;
+  }
+}
+
+app.get('/admin/revenda/:id/recuperar', async (req, res) => {
+  const r = await get('SELECT * FROM revendas WHERE id=? AND status="REMOVIDA"', [req.params.id]);
+  if (!r) return res.redirect('/admin/revendas');
+  const contato = await v222ContatoRemovido(r);
+  const cont = await get(`SELECT COUNT(*) total,
+      SUM(CASE WHEN UPPER(status)='PENDENTE' THEN 1 ELSE 0 END) pendentes,
+      SUM(CASE WHEN UPPER(status)='EM PROCESSO' THEN 1 ELSE 0 END) processo
+    FROM pedidos WHERE revenda_id=?`, [r.id]);
+  const ativos = await all(`SELECT id,nome,whatsapp,telegram_id,saldo FROM revendas WHERE status!='REMOVIDA' AND status!='RECUPERADA' ORDER BY nome COLLATE NOCASE,id DESC`);
+  let sugerido = null;
+  if (contato.whatsapp) sugerido = ativos.find(x => normalizarNumeroWhatsApp(x.whatsapp||'') === contato.whatsapp);
+  if (!sugerido && contato.telegram) sugerido = ativos.find(x => onlyDigits(x.telegram_id||'') === contato.telegram);
+  if (!sugerido) sugerido = ativos.find(x => String(x.nome||'').trim().toLowerCase() === String(r.nome||'').trim().toLowerCase());
+  const opcoes = ativos.map(x => `<option value="${x.id}" ${sugerido&&Number(sugerido.id)===Number(x.id)?'selected':''}>#${x.id} — ${safeHtml(x.nome||'Cliente')}${x.whatsapp?' — +'+safeHtml(x.whatsapp):''}${x.telegram_id?' — TG '+safeHtml(x.telegram_id):''} — ${brl(x.saldo||0)}</option>`).join('');
+  const loginAntigo = String(r.login_removido || '').trim();
+  const html = `<h1>♻️ Recuperar cliente removido</h1>
+    <div class="card"><h2>${safeHtml(r.nome||'Cliente')} <span class="muted">#${r.id}</span></h2>
+      <p>📱 WhatsApp recuperado: <b>${contato.whatsapp ? '+'+safeHtml(contato.whatsapp) : 'não encontrado'}</b></p>
+      <p>✈️ Telegram recuperado: <b>${contato.telegram ? safeHtml(contato.telegram) : 'não encontrado'}</b></p>
+      <p>💰 Saldo antigo: <b>${brl(r.saldo||0)}</b></p>
+      <p>📦 Pedidos antigos: <b>${Number(cont?.total||0)}</b> · ⏳ Pendentes: <b>${Number(cont?.pendentes||0)}</b> · 🔄 Em processo: <b>${Number(cont?.processo||0)}</b></p>
+      <a class="btn gray" href="/admin/revenda/${r.id}/historico">📋 Abrir histórico antigo</a>
+    </div>
+    <div class="card"><h2>🔗 Opção recomendada — ligar histórico ao cadastro atual</h2>
+      <p class="muted">Use esta opção se o cliente já apareceu novamente na lista de clientes. Os pedidos antigos, inclusive pendentes/em processo, passam para o cadastro atual.</p>
+      <form method="post" action="/admin/revenda/${r.id}/recuperar-historico">
+        <label>Cadastro atual do cliente</label><select name="destino_id" required><option value="">Selecione...</option>${opcoes}</select><br><br>
+        <label><input type="checkbox" name="transferir_saldo" value="1" checked> Somar o saldo antigo (${brl(r.saldo||0)}) ao saldo do cadastro atual</label><br><br>
+        <button class="btn green" onclick="return confirm('Confirma? Os pedidos e históricos antigos serão vinculados ao cadastro atual selecionado.')">🔗 Recuperar histórico neste cadastro</button>
+      </form>
+    </div>
+    <div class="card"><h2>♻️ Restaurar o cadastro antigo</h2>
+      <p class="muted">Use somente se NÃO existir outro cadastro atual deste cliente.</p>
+      <form method="post" action="/admin/revenda/${r.id}/restaurar-original">
+        <label>WhatsApp</label><input name="whatsapp" value="${safeHtml(contato.whatsapp)}" placeholder="55DDDNUMERO"><br><br>
+        <label>ID Telegram</label><input name="telegram_id" value="${safeHtml(contato.telegram)}" placeholder="Opcional"><br><br>
+        <label>Login</label><input name="login" value="${safeHtml(loginAntigo)}" placeholder="Opcional"><br><br>
+        <button class="btn" onclick="return confirm('Restaurar este cadastro antigo como ATIVO?')">♻️ Restaurar cadastro original</button>
+      </form>
+    </div><a class="btn gray" href="/admin/revendas">← Voltar</a>`;
+  res.send(page('Recuperar cliente', html));
+});
+
+app.post('/admin/revenda/:id/recuperar-historico', async (req, res) => {
+  try {
+    const origemId=Number(req.params.id), destinoId=Number(req.body.destino_id||0);
+    if (!destinoId) throw new Error('Selecione o cadastro atual do cliente.');
+    const cliente=await v222MoverHistoricoRevenda(origemId,destinoId,String(req.body.transferir_saldo||'')==='1');
+    return res.send(page('Cliente recuperado', `<h1>✅ Histórico recuperado</h1><div class="card"><p>Os serviços e históricos do cadastro removido foram vinculados a <b>${safeHtml(cliente.nome||'Cliente')}</b> (#${cliente.id}).</p><p>Pedidos pendentes e em processo agora aparecem no cadastro atual.</p><a class="btn green" href="/admin/revenda/${cliente.id}/historico">📋 Ver serviços recuperados</a> <a class="btn" href="/admin/revendas">👥 Clientes</a></div>`));
+  } catch(e) {
+    console.log('❌ V222 RECUPERAR HISTÓRICO:',e);
+    return res.status(400).send(page('Erro na recuperação', `<h1>❌ Não foi possível recuperar</h1><div class="card"><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/revenda/${req.params.id}/recuperar">Voltar</a></div>`));
+  }
+});
+
+app.post('/admin/revenda/:id/restaurar-original', async (req, res) => {
+  try {
+    const id=Number(req.params.id); const r=await get('SELECT * FROM revendas WHERE id=? AND status="REMOVIDA"',[id]);
+    if(!r) throw new Error('Cadastro removido não encontrado.');
+    const whatsapp=normalizarNumeroWhatsApp(req.body.whatsapp||''); const telegram=onlyDigits(req.body.telegram_id||'');
+    if(!whatsapp && !telegram) throw new Error('Informe pelo menos WhatsApp ou Telegram para restaurar.');
+    const conflito=await get(`SELECT id,nome FROM revendas WHERE id<>? AND status!='REMOVIDA' AND status!='RECUPERADA' AND ((?<>'' AND whatsapp=?) OR (?<>'' AND telegram_id=?)) LIMIT 1`,[id,whatsapp,whatsapp,telegram,telegram]);
+    if(conflito) throw new Error(`Já existe um cadastro atual (#${conflito.id} - ${conflito.nome}). Volte e use “Recuperar histórico neste cadastro”.`);
+    let login=String(req.body.login||r.login_removido||'').trim(); if(!login) login=`cliente${id}`;
+    const loginConflito=await get('SELECT id FROM revendas WHERE login=? AND id<>?',[login,id]); if(loginConflito) login=`${login}_${id}`;
+    const jid=telegram?tgJid(telegram):(whatsapp?`wa:${whatsapp}`:null);
+    await run(`UPDATE revendas SET status='ATIVA',whatsapp=?,telegram_id=?,jid=?,login=?,bot_ativo=0,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[whatsapp||null,telegram||null,jid,login,id]);
+    return res.send(page('Cliente restaurado', `<h1>✅ Cadastro restaurado</h1><div class="card"><p><b>${safeHtml(r.nome)}</b> voltou para a lista de clientes com o mesmo ID #${id}. O histórico antigo permaneceu ligado ao cadastro.</p><a class="btn green" href="/admin/revenda/${id}/historico">📋 Ver histórico</a> <a class="btn" href="/admin/revendas">👥 Clientes</a></div>`));
+  } catch(e) {
+    console.log('❌ V222 RESTAURAR ORIGINAL:',e);
+    return res.status(400).send(page('Erro na restauração', `<h1>❌ Não foi possível restaurar</h1><div class="card"><p>${safeHtml(e.message)}</p><a class="btn" href="/admin/revenda/${req.params.id}/recuperar">Voltar</a></div>`));
+  }
 });
 
 app.post('/admin/revenda/:id/excluir-permanente', async (req, res) => {
