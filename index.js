@@ -34,6 +34,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const PORT = process.env.PORT || 10000;
 const PIXGO_API = 'https://pixgo.org/api/v1';
 const MERCADO_PAGO_API = 'https://api.mercadopago.com';
+const MISTICPAY_API = 'https://api.misticpay.com/api';
 
 // Tudo que precisa sobreviver a restart/deploy do Render fica no Persistent Disk.
 // Configure DATA_DIR=/data no Render e crie o Disk com mount path /data.
@@ -4838,8 +4839,8 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
-    if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo, 2 para Mercado Pago ou 3 para MisticPay.'); return; }
+    if (gateway !== 'pixgo') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
     const documentoVinculado = await documentoPixCliente(cliente);
     if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
     await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
@@ -5072,7 +5073,7 @@ function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudac
 
 1️⃣ 🔍 *REALIZAR CONSULTA*
 2️⃣ 🛠️ *SERVIÇOS & DESBLOQUEIOS*
-3️⃣ 📱 *COMPRAR ESIM*
+3️⃣ 📱 *COMPRAR eSIM*
 4️⃣ ⭐ *ASSINATURAS PREMIUM*
 5️⃣ 👤 *MINHA CONTA*
 6️⃣ ❌ *CANCELAMENTO*
@@ -6012,8 +6013,8 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo ou 2 para Mercado Pago.'); return; }
-    if (gateway === 'mercadopago') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo, 2 para Mercado Pago ou 3 para MisticPay.'); return; }
+    if (gateway !== 'pixgo') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
     const documentoVinculado = await documentoPixCliente(cliente);
     if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
     await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
@@ -7077,13 +7078,13 @@ Envie este código para o WhatsApp da CentralUnlocker:
 
 O número que enviar o código será vinculado automaticamente à sua conta do Telegram.`, { parse_mode: 'Markdown' });
         }
-        if (data === 'gateway_pixgo' || data === 'gateway_mercadopago') {
+        if (data === 'gateway_pixgo' || data === 'gateway_mercadopago' || data === 'gateway_misticpay') {
           const sess = await carregarSessaoPedido(from);
           if (!sess || sess.etapa !== 'aguardando_gateway_pix') return tgBot.sendMessage(chatId, '⌛ Esta cobrança expirou. Gere um novo PIX.');
-          const gateway = data === 'gateway_pixgo' ? 'pixgo' : 'mercadopago';
+          const gateway = data === 'gateway_pixgo' ? 'pixgo' : (data === 'gateway_misticpay' ? 'misticpay' : 'mercadopago');
           const cfgGate = await gatewaysPagamentoAtivos();
           if (!cfgGate.lista.includes(gateway)) return tgBot.sendMessage(chatId, '⚠️ Esta forma de pagamento está desativada.');
-          if (gateway === 'mercadopago') return finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => tgBot.sendMessage(chatId, m));
+          if (gateway !== 'pixgo') return finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => tgBot.sendMessage(chatId, m));
           const doc = await documentoPixCliente(cliente);
           if (doc) return finalizarGeracaoPix(from, { ...sess, gateway:'pixgo', documento_pix:doc }, cliente, async (m) => tgBot.sendMessage(chatId, m));
           await salvarSessaoPedido(from, { ...sess, etapa:'aguardando_cpf_pix', gateway:'pixgo' });
@@ -8272,9 +8273,10 @@ async function textoBackups() {
 async function getPagamentoConfig() {
   const pixgoAtivo = (await getConfig('pagamento_pixgo_ativo', '1')) === '1';
   const mercadoPagoAtivo = (await getConfig('pagamento_mercadopago_ativo', '0')) === '1';
+  const misticpayAtivo = (await getConfig('pagamento_misticpay_ativo', '0')) === '1';
   let padrao = String(await getConfig('pagamento_gateway_padrao', 'pixgo')).toLowerCase();
-  if (!['pixgo', 'mercadopago'].includes(padrao)) padrao = 'pixgo';
-  return { pixgoAtivo, mercadoPagoAtivo, padrao };
+  if (!['pixgo', 'mercadopago', 'misticpay'].includes(padrao)) padrao = 'pixgo';
+  return { pixgoAtivo, mercadoPagoAtivo, misticpayAtivo, padrao };
 }
 
 async function gatewaysPagamentoAtivos() {
@@ -8282,11 +8284,50 @@ async function gatewaysPagamentoAtivos() {
   const lista = [];
   if (c.pixgoAtivo) lista.push('pixgo');
   if (c.mercadoPagoAtivo) lista.push('mercadopago');
+  if (c.misticpayAtivo) lista.push('misticpay');
   return { ...c, lista };
 }
 
 function nomeGateway(gateway) {
-  return gateway === 'mercadopago' ? 'Mercado Pago' : 'PixGo';
+  if (gateway === 'mercadopago') return 'Mercado Pago';
+  if (gateway === 'misticpay') return 'MisticPay';
+  return 'PixGo';
+}
+
+async function getMisticPayConfig() {
+  return {
+    clientId: String(await getConfig('misticpay_client_id', '') || '').trim(),
+    clientSecret: String(await getConfig('misticpay_client_secret', '') || '').trim(),
+    cpfPadrao: String(await getConfig('misticpay_cpf_padrao', '') || '').replace(/\D/g, '')
+  };
+}
+
+async function clienteMisticPay() {
+  const cfg = await getMisticPayConfig();
+  if (!cfg.clientId || !cfg.clientSecret) throw new Error('Client ID/Client Secret da MisticPay não configurados no painel');
+  return { cfg, api: axios.create({ baseURL: MISTICPAY_API, timeout: 30000, auth: { username: cfg.clientId, password: cfg.clientSecret }, headers: { 'Content-Type':'application/json', Accept:'application/json' } }) };
+}
+
+async function gerarPixMisticPay(valor, cliente) {
+  const { cfg, api } = await clienteMisticPay();
+  const payload = {
+    amount: Number(valor),
+    payerName: 'Cliente',
+    description: `Pagamento CentralUnlocker ${cliente}`.slice(0,255),
+    projectWebhook: BASE_URL ? `${BASE_URL}/webhook/misticpay` : undefined
+  };
+  // Modo solicitado: tenta sem CPF quando o campo está vazio. Se a API exigir,
+  // basta cadastrar o CPF padrão no painel; o cliente nunca é perguntado.
+  if (cfg.cpfPadrao) payload.payerDocument = cfg.cpfPadrao;
+  const response = await api.post('/transactions/create', payload);
+  const d = response.data;
+  return {
+    gateway: 'misticpay', raw: d,
+    paymentId: String(d?.data?.transactionId || ''),
+    qrCode: d?.data?.copyPaste || '',
+    qrCodeBase64: d?.data?.qrCodeBase64 || '',
+    qrcodeUrl: d?.data?.qrcodeUrl || ''
+  };
 }
 
 async function gerarPixPixGo(valor, cliente, documento) {
@@ -8367,9 +8408,9 @@ async function gerarPixMercadoPago(valor, cliente) {
 
 async function gerarPix(valor, cliente, documento, gateway='pixgo') {
   try {
-    return gateway === 'mercadopago'
-      ? await gerarPixMercadoPago(valor, cliente)
-      : await gerarPixPixGo(valor, cliente, documento);
+    if (gateway === 'mercadopago') return await gerarPixMercadoPago(valor, cliente);
+    if (gateway === 'misticpay') return await gerarPixMisticPay(valor, cliente);
+    return await gerarPixPixGo(valor, cliente, documento);
   } catch (e) {
     console.log(`ERRO ${nomeGateway(gateway).toUpperCase()}:`, e.response?.data || e.message);
     return null;
@@ -8410,7 +8451,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       const idDestino = String(chave).replace(/^(?:cvtg:|tg:)/, '');
       const codigoPix = String(qrCode).replace(/[\r\n\t]/g, '').trim();
       let qrBuffer = null;
-      if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
+      if (['mercadopago','misticpay'].includes(gateway) && pix?.qrCodeBase64) {
         const base64Limpo = String(pix.qrCodeBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').replace(/\s+/g, '');
         qrBuffer = Buffer.from(base64Limpo, 'base64');
       }
@@ -8436,7 +8477,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
 
   await enviarMensagem(`✅ PIX GERADO\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}`);
 
-  if (gateway === 'mercadopago' && pix?.qrCodeBase64) {
+  if (['mercadopago','misticpay'].includes(gateway) && pix?.qrCodeBase64) {
     try {
       const base64Limpo = String(pix.qrCodeBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').replace(/\s+/g, '');
       const bufferQr = Buffer.from(base64Limpo, 'base64');
@@ -8474,10 +8515,11 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
       await tgBot.sendMessage(chatId, '💳 *Escolha a forma de pagamento:*', { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[
         [tgBtn('PixGo', 'gateway_pixgo', 'primary', 'TG_ICON_PIX')],
         [tgBtn('Mercado Pago', 'gateway_mercadopago', 'success', 'TG_ICON_PAGAR')],
+        [tgBtn('MisticPay', 'gateway_misticpay', 'success', 'TG_ICON_PIX')],
         [tgBtn('Cancelar', 'saldo_cancelar', 'danger', 'TG_ICON_VOLTAR')]
       ]}});
     } else {
-      await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+      await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago\n3️⃣ MisticPay');
     }
     return false;
   }
@@ -8491,11 +8533,18 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
     await enviarMensagem(`📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(sess.valor_pix)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
     return false;
   }
-  return finalizarGeracaoPix(chave, { ...sess, gateway: 'mercadopago' }, cliente, enviarMensagem, codigoMonoespacado);
+  return finalizarGeracaoPix(chave, { ...sess, gateway }, cliente, enviarMensagem, codigoMonoespacado);
 }
 
 async function consultarStatus(paymentId, gateway='pixgo') {
   try {
+    if (gateway === 'misticpay') {
+      const { api } = await clienteMisticPay();
+      const d = (await api.post('/transactions/check', { transactionId: paymentId }, { timeout: 15000 })).data;
+      const raw = String(d?.transaction?.transactionState || '').toUpperCase();
+      const status = raw === 'COMPLETO' ? 'completed' : (['FALHA','CANCELADO'].includes(raw) ? 'expired' : 'pending');
+      return { success: true, data: { status, raw_status: raw } };
+    }
     if (gateway === 'mercadopago') {
       const mp = clienteMercadoPago();
       const d = (await mp.get(`/v1/payments/${encodeURIComponent(paymentId)}`, {
@@ -8520,7 +8569,7 @@ async function escolherGatewayParaSessao(chave, sessao, enviarMensagem) {
   }
   if (cfg.lista.length === 1) return cfg.lista[0];
   await salvarSessaoPedido(chave, { ...sessao, etapa: 'aguardando_gateway_pix' });
-  await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago');
+  await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago\n3️⃣ MisticPay');
   return null;
 }
 
@@ -8528,6 +8577,7 @@ function gatewayDaOpcao(texto) {
   const t = String(texto || '').toLowerCase().trim();
   if (['1','pixgo','pix go'].includes(t)) return 'pixgo';
   if (['2','mercado pago','mercadopago','mp'].includes(t)) return 'mercadopago';
+  if (['3','misticpay','mistic pay','misty','mistypay'].includes(t)) return 'misticpay';
   return '';
 }
 
@@ -12067,6 +12117,16 @@ app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.${val.invalidos?.length?' '+avisoImeisInvalidos(val.invalidos):''}`);
 });
 
+app.post('/webhook/misticpay', async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const paymentId = String(req.body?.transactionId || '');
+    if (!paymentId) return;
+    const p = await get('SELECT * FROM pix_pedidos WHERE payment_id=? AND gateway="misticpay"', [paymentId]);
+    if (p && p.status !== 'completed') verificarPagamento(paymentId, p.revenda_id, p.cliente_jid || p.revenda_jid, p.valor, p.tipo_pagamento || 'SALDO', p.contexto_json, 'misticpay');
+  } catch (e) { console.log('⚠️ WEBHOOK MISTICPAY:', e.message); }
+});
+
 app.post('/webhook/mercadopago', async (req, res) => {
   res.sendStatus(200);
   try {
@@ -14050,24 +14110,40 @@ app.get('/admin/pagamentos-config', async (req, res) => {
   const cfg = await getPagamentoConfig();
   const pixgoCred = !!process.env.PIXGO_API_KEY;
   const mpCred = !!process.env.MERCADO_PAGO_ACCESS_TOKEN;
+  const mist = await getMisticPayConfig();
+  const mistCred = !!(mist.clientId && mist.clientSecret);
+  const cpfMask = mist.cpfPadrao ? `${mist.cpfPadrao.slice(0,3)}***${mist.cpfPadrao.slice(-2)}` : 'Não informado — teste sem CPF';
   res.send(page('Formas de pagamento', `<h1>💳 Formas de pagamento</h1>
   <div class="grid">
     <div class="card"><h2>PixGo</h2><p>Status: <b>${cfg.pixgoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${pixgoCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="pixgo"><input type="hidden" name="ativo" value="${cfg.pixgoAtivo ? '0' : '1'}"><button class="btn ${cfg.pixgoAtivo ? 'red' : 'green'}">${cfg.pixgoAtivo ? 'Desativar' : 'Ativar'} PixGo</button></form></div>
     <div class="card"><h2>Mercado Pago</h2><p>Status: <b>${cfg.mercadoPagoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mpCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="mercadopago"><input type="hidden" name="ativo" value="${cfg.mercadoPagoAtivo ? '0' : '1'}"><button class="btn ${cfg.mercadoPagoAtivo ? 'red' : 'green'}">${cfg.mercadoPagoAtivo ? 'Desativar' : 'Ativar'} Mercado Pago</button></form></div>
+    <div class="card"><h2>MisticPay</h2><p>Status: <b>${cfg.misticpayAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mistCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><p>CPF padrão: <b>${safeHtml(cpfMask)}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="misticpay"><input type="hidden" name="ativo" value="${cfg.misticpayAtivo ? '0' : '1'}"><button class="btn ${cfg.misticpayAtivo ? 'red' : 'green'}">${cfg.misticpayAtivo ? 'Desativar' : 'Ativar'} MisticPay</button></form></div>
   </div>
-  <div class="card"><h2>Gateway padrão</h2><p class="muted">Usado quando somente um gateway estiver disponível. Com os dois ativos, o cliente escolhe.</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway"><option value="pixgo" ${cfg.padrao==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${cfg.padrao==='mercadopago'?'selected':''}>Mercado Pago</option></select><br><br><button class="btn green">Salvar padrão</button></form></div>
-  <div class="card"><h2>Variáveis no Render</h2><p><code>PIXGO_API_KEY</code></p><p><code>MERCADO_PAGO_ACCESS_TOKEN</code></p><p class="muted">As chaves não aparecem no painel por segurança.</p></div>`));
+  <div class="card"><h2>⚙️ Configurar MisticPay</h2><p class="muted">O cliente informa somente o valor. Deixe CPF vazio para testar sem documento; se a API recusar, cadastre um CPF padrão aqui.</p><form method="post" action="/admin/pagamentos-config/misticpay"><label>Client ID (pk_...)</label><input name="client_id" value="${safeHtml(mist.clientId)}" placeholder="pk_..." autocomplete="off"><label>Client Secret (sk_...)</label><input type="password" name="client_secret" placeholder="${mist.clientSecret ? '•••••••• (deixe vazio para manter)' : 'sk_...'}" autocomplete="new-password"><label>CPF padrão (opcional)</label><input name="cpf_padrao" value="${safeHtml(mist.cpfPadrao)}" placeholder="Somente números — deixe vazio para testar sem CPF"><br><br><button class="btn green">💾 Salvar MisticPay</button></form></div>
+  <div class="card"><h2>Gateway padrão</h2><p class="muted">Usado quando somente um gateway estiver disponível. Com mais de um ativo, o cliente escolhe.</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway"><option value="pixgo" ${cfg.padrao==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${cfg.padrao==='mercadopago'?'selected':''}>Mercado Pago</option><option value="misticpay" ${cfg.padrao==='misticpay'?'selected':''}>MisticPay</option></select><br><br><button class="btn green">Salvar padrão</button></form></div>
+  <div class="card"><h2>Variáveis no Render</h2><p><code>PIXGO_API_KEY</code></p><p><code>MERCADO_PAGO_ACCESS_TOKEN</code></p><p class="muted">MisticPay é configurada diretamente neste painel.</p></div>`));
 });
 app.post('/admin/pagamentos-config/toggle', async (req, res) => {
   const gateway = String(req.body.gateway || '');
   const ativo = req.body.ativo === '1' ? '1' : '0';
   if (gateway === 'pixgo') await setConfig('pagamento_pixgo_ativo', ativo);
   if (gateway === 'mercadopago') await setConfig('pagamento_mercadopago_ativo', ativo);
+  if (gateway === 'misticpay') await setConfig('pagamento_misticpay_ativo', ativo);
   notificarPainel('config', '💳 Forma de pagamento atualizada', `${nomeGateway(gateway)}: ${ativo==='1'?'ATIVO':'DESATIVADO'}`);
   res.redirect('/admin/pagamentos-config');
 });
+app.post('/admin/pagamentos-config/misticpay', async (req, res) => {
+  const clientId = String(req.body.client_id || '').trim();
+  const secretNovo = String(req.body.client_secret || '').trim();
+  const cpf = String(req.body.cpf_padrao || '').replace(/\D/g, '');
+  await setConfig('misticpay_client_id', clientId);
+  if (secretNovo) await setConfig('misticpay_client_secret', secretNovo);
+  await setConfig('misticpay_cpf_padrao', cpf);
+  notificarPainel('config', '💠 MisticPay atualizada', `Credenciais ${clientId ? 'salvas' : 'incompletas'} • CPF ${cpf ? 'configurado' : 'vazio (teste sem CPF)'}`);
+  res.redirect('/admin/pagamentos-config');
+});
 app.post('/admin/pagamentos-config/padrao', async (req, res) => {
-  const gateway = ['pixgo','mercadopago'].includes(req.body.gateway) ? req.body.gateway : 'pixgo';
+  const gateway = ['pixgo','mercadopago','misticpay'].includes(req.body.gateway) ? req.body.gateway : 'pixgo';
   await setConfig('pagamento_gateway_padrao', gateway);
   res.redirect('/admin/pagamentos-config');
 });
