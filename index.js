@@ -5681,6 +5681,21 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await iniciarFluxoPagamento(from,{valor_pix:valor,tipo_pix:'SALDO'},cliente,async(m)=>enviarTexto(from,m),true);return;
   }
 
+  // V5.0 GGSOMA — link individual de anúncio no WhatsApp.
+  // O cliente recebe apenas "Comprar P<ID>"; o nome do fornecedor não aparece.
+  const compraDiretaPremium = textoOriginal.match(/^comprar\s+p(\d+)$/i);
+  if (compraDiretaPremium) {
+    const servicoId = Number(compraDiretaPremium[1]);
+    const servico = await get(`SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1 AND api_provider='GGSOMA'`, [servicoId]);
+    if (!servico) {
+      await enviarTexto(from, '⚠️ Esta oferta não está disponível no momento.');
+      return;
+    }
+    await apagarSessaoPedido(from);
+    await iniciarServicoWhatsApp(from, cliente, servico);
+    return;
+  }
+
   // V4.9.5.1 — MENU GLOBAL PRIORITÁRIO
   // Sempre permite voltar ao início, mesmo quando o cliente ficou preso em hub_menu
   // ou em qualquer outro fluxo estruturado. Também tolera o erro comum "menuu".
@@ -11667,7 +11682,7 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
-const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
+const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
 // GGSOMA compartilhada: a credencial fica somente no Pixgonovo central.
