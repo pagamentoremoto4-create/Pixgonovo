@@ -1,7 +1,7 @@
 'use strict';
 const crypto=require('crypto');
-const fs=require('fs');
 const path=require('path');
+const fs=require('fs');
 
 // Assinaturas Premium is now only a storefront for products enabled from GGSOMA.
 // There is no local/manual stock and no customer broadcast when a product is enabled.
@@ -24,6 +24,24 @@ module.exports=function createPremium(d){
               WHERE s.api_provider='GGSOMA' AND s.id=?`,[id]);
  }
  function meta(p){try{return JSON.parse(p.json||'{}')}catch(_){return {}}}
+ function builtinImage(p){
+  const name=String(p?.custom_title||meta(p)?.name||p?.nome||p?.slug||'').toLowerCase();
+  const rules=[
+   ['adobe','adobe'],['airtable','airtable'],['prime video','prime'],['amazon prime','prime'],['arize','arize'],
+   ['canva','canva'],['capcut','capcut'],['chatprd','chatprd'],['chatgpt','chatgpt'],['coursera','coursera'],
+   ['crunchyroll','crunchyroll'],['cursor','cursor'],['descript','descript'],['duolingo','duolingo'],
+   ['elevenlabs','elevenlabs'],['figma','figma'],['framer','framer'],['gemini','gemini'],['google ai','gemini'],
+   ['granola','granola'],['gumloop','gumloop'],['higgsfield','higgsfield'],['ilovepdf','ilovepdf'],
+   ['intercom','intercom'],['jam ','jam'],['linear','linear'],['lovable','lovable'],['magic patterns','magicpatterns'],
+   ['manus','manus'],['microsoft 365','microsoft365'],['mobbin','mobbin'],['n8n','n8n'],['nord vpn','nordvpn'],
+   ['nordvpn','nordvpn'],['notion','notion'],['pangram','pangram'],['posthog','posthog'],['proton','proton'],
+   ['railway','railway'],['replit','replit'],['runway','runway'],['supergrok','supergrok'],['grok','supergrok'],
+   ['telegram','telegram'],['wispr','wispr'],['youtube','youtube']
+  ];
+  let key='premium';for(const [term,k] of rules){if(name.includes(term)){key=k;break;}}
+  const f=path.join(__dirname,'assets','premium',key+'.jpg');return fs.existsSync(f)?f:'';
+ }
+ function productImage(p){return String(p?.image_path||'').trim()||builtinImage(p);}
  function stock(p){const m=meta(p);return Number(m.stock?.count||0)}
  function deliveryLabel(p){const t=String(meta(p).deliveryType||'').toUpperCase();return t==='LINK'?'Link automático':t==='COUPON'?'Código automático':t==='READY_ACCOUNT'?'Conta automática':'Entrega digital'}
  function durationLabel(p){
@@ -84,21 +102,6 @@ module.exports=function createPremium(d){
   const m=meta(p);
   return translateToPortuguese(apiText(m));
  }
- function fallbackImage(p){
-  if(p?.image_path && fs.existsSync(p.image_path)) return p.image_path;
-  const title=customerTitle(p).toLowerCase();
-  const map=[
-   ['gemini','gemini.jpg'],['chatgpt','chatgpt.jpg'],['openai','chatgpt.jpg'],['claude','claude.jpg'],
-   ['spotify','spotify.jpg'],['youtube','youtube.jpg'],['netflix','netflix.jpg'],['disney','disney.jpg'],
-   ['max','max.jpg'],['hbo','max.jpg'],['capcut','capcut.jpg'],['canva','canva.jpg'],
-   ['microsoft','microsoft365.jpg'],['office','microsoft365.jpg'],['adobe','adobe.jpg'],
-   ['prime video','primevideo.jpg'],['amazon prime','primevideo.jpg'],['crunchyroll','crunchyroll.jpg'],['deezer','deezer.jpg']
-  ];
-  const found=map.find(([k])=>title.includes(k));
-  const base=path.join(__dirname,'assets','premium');
-  const chosen=path.join(base,found?found[1]:'default.png');
-  return fs.existsSync(chosen)?chosen:null;
- }
  async function card(p,client){
   const price=await d.precoDaRevenda(client.id,p.id),qty=stock(p),description=await customerDescription(p);
   const title=customerTitle(p);
@@ -116,9 +119,8 @@ module.exports=function createPremium(d){
  async function show(from,client,id,telegram=false){
   const p=await product(id);if(!p?.ativo||!p.present){await d.enviarTexto(from,'Produto indisponível.');return;}
   const token=crypto.randomUUID();await d.salvarSessaoPedido(from,{etapa:'premium_product',productId:p.id,token});const text=await card(p,client),available=stock(p)>0;
-  if(telegram){const img=fallbackImage(p);if(img)await d.enviarImagem(from,img,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
-  const img=fallbackImage(p);
-  if(img)await d.enviarImagem(from,img,'');
+  if(telegram){const image=productImage(p);if(image)await d.enviarImagem(from,image,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
+  const image=productImage(p);if(image)await d.enviarImagem(from,image,'');
   await d.enviarTexto(from,text+(available?'\n\n1️⃣ Comprar\n0️⃣ Voltar':'\n\n⛔ Esgotado\n0️⃣ Voltar'));
  }
  async function confirm(from,client,id,token){

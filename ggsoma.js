@@ -146,6 +146,13 @@ module.exports = function createGgsoma(d) {
     for(const row of rows){let p={};try{p=JSON.parse(row.json||'{}')}catch(_){};if(purchasePhrase(row,p).toLowerCase()===wanted)matches.push(row);}
     return matches.length===1?matches[0]:null;
   }
+  function builtinAdImage(row,p){
+    if(String(row?.image_path||'').trim())return row.image_path;
+    const name=String(row?.custom_title||p?.name||row?.slug||'').toLowerCase();
+    const rules=[['adobe','adobe'],['airtable','airtable'],['prime video','prime'],['amazon prime','prime'],['arize','arize'],['canva','canva'],['capcut','capcut'],['chatprd','chatprd'],['chatgpt','chatgpt'],['coursera','coursera'],['crunchyroll','crunchyroll'],['cursor','cursor'],['descript','descript'],['duolingo','duolingo'],['elevenlabs','elevenlabs'],['figma','figma'],['framer','framer'],['gemini','gemini'],['google ai','gemini'],['granola','granola'],['gumloop','gumloop'],['higgsfield','higgsfield'],['ilovepdf','ilovepdf'],['intercom','intercom'],['jam ','jam'],['linear','linear'],['lovable','lovable'],['magic patterns','magicpatterns'],['manus','manus'],['microsoft 365','microsoft365'],['mobbin','mobbin'],['n8n','n8n'],['nord vpn','nordvpn'],['nordvpn','nordvpn'],['notion','notion'],['pangram','pangram'],['posthog','posthog'],['proton','proton'],['railway','railway'],['replit','replit'],['runway','runway'],['supergrok','supergrok'],['grok','supergrok'],['telegram','telegram'],['wispr','wispr'],['youtube','youtube']];
+    let key='premium';for(const [term,k] of rules){if(name.includes(term)){key=k;break;}}
+    const f=path.join(__dirname,'assets','premium',key+'.jpg');return fs.existsSync(f)?f:'';
+  }
   async function sendNextAd(){
     if(await getConfig('ggsoma_ads_enabled','1')!=='1'||!d.sendWhatsAppGroup)return;
     const group=String(await getConfig('ggsoma_ads_wa_group','')).trim(); if(!group)return;
@@ -161,7 +168,7 @@ module.exports = function createGgsoma(d) {
     let text=`${title}\n\n⭐ *${name}*\n⚡ Entrega automática\n📦 Estoque: *${Number(q.stock_after||0)}*\n💰 *${price}*`;
     if(q.event_type==='RESTOCK')text+=`\n📈 Reposição: *+${Math.max(0,Number(q.stock_after)-Number(q.stock_before))} unidades*`;
     if(buyUrl)text+=`\n\n🛒 *COMPRAR AGORA:*\n${buyUrl}`;
-    try{await run(`UPDATE ggsoma_announcement_queue SET status='SENDING' WHERE id=?`,[q.id]);await d.sendWhatsAppGroup(group,text,row.image_path||'');await run(`UPDATE ggsoma_announcement_queue SET status='SENT',sent_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?`,[q.id]);await run(`UPDATE ggsoma_products SET last_announcement_at=CURRENT_TIMESTAMP WHERE slug=?`,[q.slug]);await setConfig('ggsoma_ads_last_sent',new Date().toISOString());}catch(e){await run(`UPDATE ggsoma_announcement_queue SET status='PENDING',error=? WHERE id=?`,[String(e.message||e).slice(0,300),q.id]);}
+    try{await run(`UPDATE ggsoma_announcement_queue SET status='SENDING' WHERE id=?`,[q.id]);await d.sendWhatsAppGroup(group,text,builtinAdImage(row,p));await run(`UPDATE ggsoma_announcement_queue SET status='SENT',sent_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?`,[q.id]);await run(`UPDATE ggsoma_products SET last_announcement_at=CURRENT_TIMESTAMP WHERE slug=?`,[q.slug]);await setConfig('ggsoma_ads_last_sent',new Date().toISOString());}catch(e){await run(`UPDATE ggsoma_announcement_queue SET status='PENDING',error=? WHERE id=?`,[String(e.message||e).slice(0,300),q.id]);}
   }
   async function saveProduct(slug,price,enabled){
     price=Number(String(price).replace(',','.'));if(!Number.isFinite(price)||price<=0)throw new Error('Informe um preço de venda maior que zero.');

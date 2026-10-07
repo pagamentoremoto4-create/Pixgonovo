@@ -5692,9 +5692,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
         return;
       }
       await apagarSessaoPedido(from);
-      // Oferta Premium direta: usa o fluxo Premium para preservar produto na sessão,
-      // exibir a imagem e fazer 1=Comprar / 0=Voltar corretamente.
-      await premium.show(from, cliente, servico.id, false);
+      await iniciarServicoWhatsApp(from, cliente, servico);
       return;
     }
   }
