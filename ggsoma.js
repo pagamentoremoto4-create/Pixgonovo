@@ -78,7 +78,7 @@ module.exports = function createGgsoma(d) {
   async function salePrice(product,row){
     const usd=await effectiveUsdBrl(); if(usd<=0)return 0;
     const profit=Number(row?.custom_profit ?? await getConfig('ggsoma_profit_default','25'))||25;
-    return Math.ceil((Number(product.yourPrice||0)*usd+profit)*100)/100;
+    return Math.ceil(Number(product.yourPrice||0)*usd+profit);
   }
   async function ensureCatalogProduct(row,p,enabled,price){
     let catalog=null;
@@ -115,6 +115,37 @@ module.exports = function createGgsoma(d) {
     for(const p of await all('SELECT slug,catalogo_id FROM ggsoma_products'))if(!slugs.has(p.slug)){await run('UPDATE ggsoma_products SET present=0,stock_count=0 WHERE slug=?',[p.slug]);if(p.catalogo_id)await run('UPDATE servicos_catalogo SET ativo=0 WHERE id=?',[p.catalogo_id]);}
     await setConfig('ggsoma_sync',new Date().toISOString());return payload.data.length;
   }
+  function shortAppName(value){
+    let raw=String(value||'').replace(/GGSOMA/ig,' ').replace(/[—–|]/g,' ').trim();
+    const known=['Gemini','Spotify','CapCut','YouTube','Canva','ChatGPT','Claude','Netflix','Disney','Deezer','Duolingo','Microsoft','Office','Copilot','Perplexity','Crunchyroll','Paramount','Prime Video','Apple Music','Apple TV','Google One'];
+    const hit=known.find(x=>new RegExp('\\b'+x.replace(/ /g,'\\s+')+'\\b','i').test(raw));
+    if(hit)return hit;
+    raw=raw.replace(/\b\d+\s*(?:months?|meses?|month|mês|dias?|days?|anos?|years?)\b/ig,' ')
+      .replace(/\b(?:premium|pro|plus|subscription|assinatura|account|conta|link|family|familia|família|private|privado|digital)\b/ig,' ')
+      .replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();
+    return raw.split(' ').slice(0,2).join(' ')||'Produto';
+  }
+  function shortDuration(p,name){
+    const days=Number(p?.durationDays||0);
+    if(days>0){if(days%365===0)return `${days/365}A`;if(days%30===0)return `${days/30}M`;return `${days}D`;}
+    const m=String(name||'').match(/\b(\d+)\s*(mes(?:es)?|m[eê]s|months?|dias?|days?|anos?|years?)\b/i);
+    if(!m)return '';
+    const n=Number(m[1]),u=m[2].toLowerCase();
+    return /ano|year/.test(u)?`${n}A`:/mes|m[eê]s|month/.test(u)?`${n}M`:`${n}D`;
+  }
+  function purchasePhrase(row,p){
+    const name=String(row?.custom_title||p?.name||row?.slug||'Produto');
+    const app=shortAppName(name),dur=shortDuration(p,name);
+    return `Comprar ${app}${dur?' '+dur:''}`.replace(/\s+/g,' ').trim();
+  }
+  async function resolvePurchasePhrase(text){
+    const wanted=String(text||'').trim().replace(/\s+/g,' ').toLowerCase();
+    if(!wanted.startsWith('comprar '))return null;
+    const rows=await all(`SELECT g.*,s.id,s.ativo FROM ggsoma_products g JOIN servicos_catalogo s ON s.id=g.catalogo_id WHERE s.api_provider='GGSOMA' AND s.ativo=1 AND g.present=1`);
+    const matches=[];
+    for(const row of rows){let p={};try{p=JSON.parse(row.json||'{}')}catch(_){};if(purchasePhrase(row,p).toLowerCase()===wanted)matches.push(row);}
+    return matches.length===1?matches[0]:null;
+  }
   async function sendNextAd(){
     if(await getConfig('ggsoma_ads_enabled','1')!=='1'||!d.sendWhatsAppGroup)return;
     const group=String(await getConfig('ggsoma_ads_wa_group','')).trim(); if(!group)return;
@@ -125,7 +156,7 @@ module.exports = function createGgsoma(d) {
     const p=JSON.parse(row.json||'{}'), title=q.event_type==='NEW'?'🆕 *NOVO PRODUTO DISPONÍVEL*':q.event_type==='RETURN'?'🔥 *VOLTOU AO ESTOQUE!*':'📦 *ESTOQUE REFORÇADO*';
     const name=row.custom_title||p.name||q.slug, price=Number(row.preco_padrao||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
     const salesNumber=d.getWhatsAppSalesNumber?String(await d.getWhatsAppSalesNumber()||'').replace(/\D/g,''):'';
-    const buyText=`Comprar P${Number(row.catalogo_id||0)}`;
+    const buyText=purchasePhrase(row,p);
     const buyUrl=salesNumber&&Number(row.catalogo_id)>0?`https://wa.me/${salesNumber}?text=${encodeURIComponent(buyText)}`:'';
     let text=`${title}\n\n⭐ *${name}*\n⚡ Entrega automática\n📦 Estoque: *${Number(q.stock_after||0)}*\n💰 *${price}*`;
     if(q.event_type==='RESTOCK')text+=`\n📈 Reposição: *+${Math.max(0,Number(q.stock_after)-Number(q.stock_before))} unidades*`;
@@ -298,5 +329,5 @@ module.exports = function createGgsoma(d) {
       res.set('Cache-Control','no-store');res.send(d.clientePage('Entrega',`<div class="cu-card"><h1>Entrega do pedido #${Number(o.pedido_id)}</h1><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${h(decrypt(o.delivery_enc))}</pre></div>`,req.cliente));
     }));
   }
-  return {init,routes,execute,purchase,sync,saveProduct,deliveryText,encrypt,decrypt,sharedCatalog,sharedOrder};
+  return {init,routes,execute,purchase,sync,saveProduct,deliveryText,encrypt,decrypt,sharedCatalog,sharedOrder,purchasePhrase,resolvePurchasePhrase};
 };

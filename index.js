@@ -5681,19 +5681,20 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await iniciarFluxoPagamento(from,{valor_pix:valor,tipo_pix:'SALDO'},cliente,async(m)=>enviarTexto(from,m),true);return;
   }
 
-  // V5.0 GGSOMA — link individual de anúncio no WhatsApp.
-  // O cliente recebe apenas "Comprar P<ID>"; o nome do fornecedor não aparece.
-  const compraDiretaPremium = textoOriginal.match(/^comprar\s+p(\d+)$/i);
-  if (compraDiretaPremium) {
-    const servicoId = Number(compraDiretaPremium[1]);
-    const servico = await get(`SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1 AND api_provider='GGSOMA'`, [servicoId]);
-    if (!servico) {
-      await enviarTexto(from, '⚠️ Esta oferta não está disponível no momento.');
+  // V5.0 GGSOMA — link individual e limpo no WhatsApp.
+  // Ex.: "Comprar Gemini 18M". O fornecedor e IDs internos não aparecem ao cliente.
+  if (/^comprar\s+/i.test(textoOriginal)) {
+    const produtoDireto = await ggsoma.resolvePurchasePhrase(textoOriginal);
+    if (produtoDireto) {
+      const servico = await get(`SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1 AND api_provider='GGSOMA'`, [Number(produtoDireto.catalogo_id)]);
+      if (!servico) {
+        await enviarTexto(from, '⚠️ Esta oferta não está disponível no momento.');
+        return;
+      }
+      await apagarSessaoPedido(from);
+      await iniciarServicoWhatsApp(from, cliente, servico);
       return;
     }
-    await apagarSessaoPedido(from);
-    await iniciarServicoWhatsApp(from, cliente, servico);
-    return;
   }
 
   // V4.9.5.1 — MENU GLOBAL PRIORITÁRIO
