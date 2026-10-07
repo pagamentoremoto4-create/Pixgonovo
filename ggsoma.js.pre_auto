@@ -7,7 +7,6 @@ const BASE = 'https://ggsoma.store/api/partner/v1';
 module.exports = function createGgsoma(d) {
   const {run,get,all,getConfig,setConfig,axios,DATA_DIR}=d;
   const locks=new Set(); let timer, running=false, lastSyncTry=0, nextPost=0, postQueue=Promise.resolve();
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   function key(){
     const file=path.join(DATA_DIR,'ggsoma-secret.key');
     fs.mkdirSync(DATA_DIR,{recursive:true});
@@ -34,20 +33,6 @@ module.exports = function createGgsoma(d) {
     await d.addColumnIfMissing('ggsoma_products','custom_title','TEXT');
     await d.addColumnIfMissing('ggsoma_products','custom_description','TEXT');
     await d.addColumnIfMissing('ggsoma_products','image_path','TEXT');
-    await d.addColumnIfMissing('ggsoma_products','stock_count','INTEGER DEFAULT 0');
-    await d.addColumnIfMissing('ggsoma_products','announced_new','INTEGER DEFAULT 0');
-    await d.addColumnIfMissing('ggsoma_products','last_announcement_at','TEXT');
-    await d.addColumnIfMissing('ggsoma_products','blocked_auto','INTEGER DEFAULT 0');
-    await d.addColumnIfMissing('ggsoma_products','custom_profit','REAL');
-    await run(`CREATE TABLE IF NOT EXISTS ggsoma_announcement_queue(id INTEGER PRIMARY KEY AUTOINCREMENT,slug TEXT NOT NULL,event_type TEXT NOT NULL,stock_before INTEGER DEFAULT 0,stock_after INTEGER DEFAULT 0,status TEXT DEFAULT 'PENDING',created_at TEXT DEFAULT CURRENT_TIMESTAMP,sent_at TEXT,error TEXT)`);
-    if(!await getConfig('ggsoma_profit_default',''))await setConfig('ggsoma_profit_default','25');
-    if(!await getConfig('ggsoma_auto_stock',''))await setConfig('ggsoma_auto_stock','1');
-    if(!await getConfig('ggsoma_ads_enabled',''))await setConfig('ggsoma_ads_enabled','1');
-    if(!await getConfig('ggsoma_ads_new',''))await setConfig('ggsoma_ads_new','1');
-    if(!await getConfig('ggsoma_ads_restock',''))await setConfig('ggsoma_ads_restock','1');
-    if(!await getConfig('ggsoma_ads_return',''))await setConfig('ggsoma_ads_return','1');
-    if(!await getConfig('ggsoma_ads_min_restock',''))await setConfig('ggsoma_ads_min_restock','10');
-    if(!await getConfig('ggsoma_ads_interval_min',''))await setConfig('ggsoma_ads_interval_min','15');
     await run(`CREATE TABLE IF NOT EXISTS ggsoma_orders(pedido_id INTEGER PRIMARY KEY,external_id TEXT UNIQUE NOT NULL,request_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,attempts INTEGER DEFAULT 0,next_try INTEGER DEFAULT 0,notified INTEGER DEFAULT 0)`);
     await run(`CREATE TABLE IF NOT EXISTS shared_ggsoma_orders(external_id TEXT PRIMARY KEY,slug TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
     await d.addColumnIfMissing('pedidos','ggsoma_checkout_token','TEXT');
@@ -70,64 +55,21 @@ module.exports = function createGgsoma(d) {
     if(!await getConfig('ggsoma_namespace',''))await setConfig('ggsoma_namespace',crypto.randomUUID());
     if(!timer){timer=setInterval(()=>tick().catch(()=>{}),15000);timer.unref();}
   }
-  async function effectiveUsdBrl(){
-    let v=Number(String(await getConfig('ggsoma_usd_brl','0')).replace(',','.'))||0;
-    if(v<=0)v=Number(String(await getConfig('dhru_usd_brl','0')).replace(',','.'))||0;
-    return v;
-  }
-  async function salePrice(product,row){
-    const usd=await effectiveUsdBrl(); if(usd<=0)return 0;
-    const profit=Number(row?.custom_profit ?? await getConfig('ggsoma_profit_default','25'))||25;
-    return Math.ceil((Number(product.yourPrice||0)*usd+profit)*100)/100;
-  }
-  async function ensureCatalogProduct(row,p,enabled,price){
-    let catalog=null;
-    if(row?.catalogo_id)catalog=await get(`SELECT id FROM servicos_catalogo WHERE id=? AND api_provider='GGSOMA'`,[row.catalogo_id]);
-    if(!catalog)catalog=await get(`SELECT id FROM servicos_catalogo WHERE api_provider='GGSOMA' AND api_service_id=? ORDER BY id DESC LIMIT 1`,[p.slug]);
-    if(!catalog){
-      const x=await run(`INSERT INTO servicos_catalogo(nome,preco_padrao,tipo_entrada,entrada_label,ativo,categoria,descricao,prazo,api_provider,api_service_id,api_cost,api_auto,cancelamento_permitido) VALUES(?,?,'TEXTO','Compra',?,?,?,'Entrega automática','GGSOMA',?,?,1,0)`,[p.name,price,enabled?1:0,'Produtos digitais / '+(p.provider?.name||'GGSOMA'),`Duração: ${p.durationDays||'consulte'} dias. Garantia: ${p.warranty?.enabled?p.warranty.days+' dias':'conforme produto'}.`,p.slug,Number(p.yourPrice)]); catalog={id:x.lastID};
-    }else await run(`UPDATE servicos_catalogo SET nome=?,preco_padrao=?,ativo=?,api_service_id=?,api_cost=?,api_auto=1,cancelamento_permitido=0 WHERE id=?`,[p.name,price,enabled?1:0,p.slug,Number(p.yourPrice),catalog.id]);
-    if(Number(row?.catalogo_id)!==Number(catalog.id))await run('UPDATE ggsoma_products SET catalogo_id=? WHERE slug=?',[catalog.id,p.slug]);
-    return catalog.id;
-  }
-  async function queueAd(slug,type,before,after){
-    const map={NEW:'ggsoma_ads_new',RETURN:'ggsoma_ads_return',RESTOCK:'ggsoma_ads_restock'};
-    if(await getConfig('ggsoma_ads_enabled','1')!=='1'||await getConfig(map[type],'1')!=='1')return;
-    const exists=await get(`SELECT id FROM ggsoma_announcement_queue WHERE slug=? AND event_type=? AND status IN ('PENDING','SENDING')`,[slug,type]);
-    if(!exists)await run(`INSERT INTO ggsoma_announcement_queue(slug,event_type,stock_before,stock_after) VALUES(?,?,?,?)`,[slug,type,before,after]);
-  }
   async function sync(){
     const payload=await request('get','/catalog/products');
     if(!Array.isArray(payload.data))throw new Error('Catálogo inválido.');
-    const auto=await getConfig('ggsoma_auto_stock','1')==='1', minRestock=Math.max(1,Number(await getConfig('ggsoma_ads_min_restock','10'))||10);
     for(const p of payload.data){
       if(!p.slug||!['LINK','COUPON','READY_ACCOUNT'].includes(p.deliveryType)||!Number.isFinite(Number(p.yourPrice)))continue;
-      const old=await get('SELECT * FROM ggsoma_products WHERE slug=?',[p.slug]); const before=Number(old?.stock_count||0), after=Number(p.stock?.count||0), inStock=!!p.stock?.inStock&&after>0;
-      await run(`INSERT INTO ggsoma_products(slug,json,present,stock_count) VALUES(?,?,1,?) ON CONFLICT(slug) DO UPDATE SET json=excluded.json,present=1,stock_count=excluded.stock_count`,[p.slug,JSON.stringify(p),after]);
-      const row=await get('SELECT * FROM ggsoma_products WHERE slug=?',[p.slug]);
-      const price=await salePrice(p,row); const enabled=auto&&inStock&&!Number(row.blocked_auto)&&price>0;
-      if(price>0)await ensureCatalogProduct(row,p,enabled,price); else if(row.catalogo_id)await run(`UPDATE servicos_catalogo SET api_cost=?,ativo=0 WHERE id=?`,[Number(p.yourPrice),row.catalogo_id]);
-      if(!old && inStock){await queueAd(p.slug,'NEW',0,after);await run('UPDATE ggsoma_products SET announced_new=1 WHERE slug=?',[p.slug]);}
-      else if(old && before===0 && after>0)await queueAd(p.slug,'RETURN',before,after);
-      else if(old && before>0 && after-before>=minRestock)await queueAd(p.slug,'RESTOCK',before,after);
+      await run(`INSERT INTO ggsoma_products(slug,json,present) VALUES(?,?,1) ON CONFLICT(slug) DO UPDATE SET json=excluded.json,present=1`,[p.slug,JSON.stringify(p)]);
+      const row=await get('SELECT catalogo_id FROM ggsoma_products WHERE slug=?',[p.slug]);
+      if(row.catalogo_id)await run(`UPDATE servicos_catalogo SET api_cost=?,prazo=? WHERE id=?`,[Number(p.yourPrice),'Entrega automática',row.catalogo_id]);
     }
     const slugs=new Set(payload.data.map(p=>p.slug));
-    for(const p of await all('SELECT slug,catalogo_id FROM ggsoma_products'))if(!slugs.has(p.slug)){await run('UPDATE ggsoma_products SET present=0,stock_count=0 WHERE slug=?',[p.slug]);if(p.catalogo_id)await run('UPDATE servicos_catalogo SET ativo=0 WHERE id=?',[p.catalogo_id]);}
+    for(const p of await all('SELECT slug,catalogo_id FROM ggsoma_products'))if(!slugs.has(p.slug)){
+      await run('UPDATE ggsoma_products SET present=0 WHERE slug=?',[p.slug]);
+      if(p.catalogo_id)await run('UPDATE servicos_catalogo SET ativo=0 WHERE id=?',[p.catalogo_id]);
+    }
     await setConfig('ggsoma_sync',new Date().toISOString());return payload.data.length;
-  }
-  async function sendNextAd(){
-    if(await getConfig('ggsoma_ads_enabled','1')!=='1'||!d.sendWhatsAppGroup)return;
-    const group=String(await getConfig('ggsoma_ads_wa_group','')).trim(); if(!group)return;
-    const last=Date.parse(await getConfig('ggsoma_ads_last_sent','')||'')||0, interval=Math.max(1,Number(await getConfig('ggsoma_ads_interval_min','15'))||15)*60000;
-    if(last&&Date.now()-last<interval)return;
-    const q=await get(`SELECT * FROM ggsoma_announcement_queue WHERE status='PENDING' ORDER BY id LIMIT 1`); if(!q)return;
-    const row=await get(`SELECT g.*,s.preco_padrao,s.ativo FROM ggsoma_products g LEFT JOIN servicos_catalogo s ON s.id=g.catalogo_id WHERE g.slug=?`,[q.slug]); if(!row||!Number(row.ativo)){await run(`UPDATE ggsoma_announcement_queue SET status='SKIPPED',error='Produto indisponível' WHERE id=?`,[q.id]);return;}
-    const p=JSON.parse(row.json||'{}'), title=q.event_type==='NEW'?'🆕 *NOVO PRODUTO DISPONÍVEL*':q.event_type==='RETURN'?'🔥 *VOLTOU AO ESTOQUE!*':'📦 *ESTOQUE REFORÇADO*';
-    const name=row.custom_title||p.name||q.slug, price=Number(row.preco_padrao||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}), buyBase=String(await getConfig('ggsoma_ads_buy_url','')).trim();
-    let text=`${title}\n\n⭐ *${name}*\n⚡ Entrega automática\n📦 Estoque: *${Number(q.stock_after||0)}*\n💰 *${price}*`;
-    if(q.event_type==='RESTOCK')text+=`\n📈 Reposição: *+${Math.max(0,Number(q.stock_after)-Number(q.stock_before))} unidades*`;
-    if(buyBase)text+=`\n\n🛒 *COMPRAR AGORA:*\n${buyBase.replace(/\/$/,'')}?produto=${encodeURIComponent(q.slug)}`;
-    try{await run(`UPDATE ggsoma_announcement_queue SET status='SENDING' WHERE id=?`,[q.id]);await d.sendWhatsAppGroup(group,text,row.image_path||'');await run(`UPDATE ggsoma_announcement_queue SET status='SENT',sent_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?`,[q.id]);await run(`UPDATE ggsoma_products SET last_announcement_at=CURRENT_TIMESTAMP WHERE slug=?`,[q.slug]);await setConfig('ggsoma_ads_last_sent',new Date().toISOString());}catch(e){await run(`UPDATE ggsoma_announcement_queue SET status='PENDING',error=? WHERE id=?`,[String(e.message||e).slice(0,300),q.id]);}
   }
   async function saveProduct(slug,price,enabled){
     price=Number(String(price).replace(',','.'));if(!Number.isFinite(price)||price<=0)throw new Error('Informe um preço de venda maior que zero.');
@@ -228,7 +170,7 @@ module.exports = function createGgsoma(d) {
   }
   async function tick(){
     if(running)return;running=true;
-    try{if(await getConfig('ggsoma_enabled','0')==='1' && Date.now()-lastSyncTry>120000){lastSyncTry=Date.now();try{await sync();await sendNextAd();}catch(_){}}const rows=await all(`SELECT p.id FROM pedidos p JOIN servicos_catalogo s ON s.id=p.servico_id LEFT JOIN ggsoma_orders o ON o.pedido_id=p.id WHERE s.api_provider='GGSOMA' AND p.status IN ('PENDENTE','EM PROCESSO','FINALIZADO') AND (o.state IS NULL OR o.state!='COMPLETED' OR (o.state='COMPLETED' AND o.notified=0)) ORDER BY p.id LIMIT 10`);for(const r of rows)await execute(r.id);}finally{running=false;}
+    try{if(await getConfig('ggsoma_enabled','0')==='1' && Date.now()-lastSyncTry>120000){lastSyncTry=Date.now();try{await sync();}catch(_){}}const rows=await all(`SELECT p.id FROM pedidos p JOIN servicos_catalogo s ON s.id=p.servico_id LEFT JOIN ggsoma_orders o ON o.pedido_id=p.id WHERE s.api_provider='GGSOMA' AND p.status IN ('PENDENTE','EM PROCESSO','FINALIZADO') AND (o.state IS NULL OR o.state!='COMPLETED' OR (o.state='COMPLETED' AND o.notified=0)) ORDER BY p.id LIMIT 10`);for(const r of rows)await execute(r.id);}finally{running=false;}
   }
 
   async function sharedCatalog(){
@@ -279,17 +221,14 @@ module.exports = function createGgsoma(d) {
     app.get('/admin/ggsoma',wrap(async(req,res)=>{
       res.set('Cache-Control','no-store');
       const token=decrypt(await getConfig('ggsoma_key','')), enabled=await getConfig('ggsoma_enabled','0');
-      const groups=d.listWhatsAppGroups?await d.listWhatsAppGroups():[]; const selectedGroup=await getConfig('ggsoma_ads_wa_group',''); const profit=await getConfig('ggsoma_profit_default','25'); const usd=await effectiveUsdBrl(); const queue=await all(`SELECT q.*,g.custom_title,g.json FROM ggsoma_announcement_queue q LEFT JOIN ggsoma_products g ON g.slug=q.slug ORDER BY q.id DESC LIMIT 30`);
       const rows=await all(`SELECT g.*,s.preco_padrao,s.ativo FROM ggsoma_products g LEFT JOIN servicos_catalogo s ON s.id=g.catalogo_id ORDER BY slug`);
       const orders=await all('SELECT pedido_id,state,order_code,error,request_id FROM ggsoma_orders ORDER BY pedido_id DESC LIMIT 50');
-      res.send(d.page('GGSOMA API',`<h1>GGSOMA API</h1><p>${h(req.query.ok||req.query.erro||'')}</p><div class="card"><h2>📢 Divulgação automática GGSOMA</h2>${form('/admin/ggsoma/automation',`<label>Lucro padrão por produto (R$)</label><input name="profit" type="number" min="0" step="0.01" value="${h(profit)}"><label>Cotação USD → BRL</label><input name="usd_brl" type="number" min="0" step="0.0001" value="${h(usd||'')}" required><label><input style="width:auto" type="checkbox" name="auto_stock" value="1" ${(await getConfig('ggsoma_auto_stock','1'))==='1'?'checked':''}> Ativar automaticamente produtos com estoque e desativar sem estoque</label><label><input style="width:auto" type="checkbox" name="ads_enabled" value="1" ${(await getConfig('ggsoma_ads_enabled','1'))==='1'?'checked':''}> Anúncios automáticos no WhatsApp</label><label>Grupo de divulgação</label><select name="wa_group"><option value="">Selecione...</option>${groups.map(g=>`<option value="${h(g.id)}" ${g.id===selectedGroup?'selected':''}>${h(g.nome)}</option>`).join('')}</select><label>Reposição mínima para anunciar (+ unidades)</label><input name="min_restock" type="number" min="1" value="${h(await getConfig('ggsoma_ads_min_restock','10'))}"><label>Intervalo mínimo entre anúncios (minutos)</label><input name="interval_min" type="number" min="1" value="${h(await getConfig('ggsoma_ads_interval_min','15'))}"><label>Link/base para COMPRAR AGORA (opcional)</label><input name="buy_url" value="${h(await getConfig('ggsoma_ads_buy_url',''))}" placeholder="https://seu-link-de-compra"><label><input style="width:auto" type="checkbox" name="ads_new" value="1" ${(await getConfig('ggsoma_ads_new','1'))==='1'?'checked':''}> Anunciar produto novo</label><label><input style="width:auto" type="checkbox" name="ads_return" value="1" ${(await getConfig('ggsoma_ads_return','1'))==='1'?'checked':''}> Anunciar quando voltar ao estoque</label><label><input style="width:auto" type="checkbox" name="ads_restock" value="1" ${(await getConfig('ggsoma_ads_restock','1'))==='1'?'checked':''}> Anunciar reposição relevante</label><button>💾 Salvar automação</button>`)}${form('/admin/ggsoma/ad-test','<button>📲 Enviar anúncio de teste no grupo</button>')}<p><b>Fila:</b> ${queue.filter(x=>x.status==='PENDING').length} pendente(s) · ${queue.filter(x=>x.status==='SENT').length} enviado(s) nos últimos registros.</p></div><div class="card"><h2>Configuração</h2><p>Chave: ${token?'••••••••'+h(token.slice(-4)):'Não cadastrada'}</p>${form('/admin/ggsoma/config',`<label>Nova chave API (em branco mantém a atual)</label><input type="password" name="key" autocomplete="new-password"><label><input type="checkbox" name="enabled" value="1" ${enabled==='1'?'checked':''}> Ativar integração</label><button>Salvar</button>`)}<p>Saldo: US$ ${h(await getConfig('ggsoma_balance','—'))}</p>${form('/admin/ggsoma/test','<button>Testar conexão e consultar saldo</button>')}${form('/admin/ggsoma/sync','<button>Sincronizar catálogo</button>')}<p>Última sincronização: ${h(await getConfig('ggsoma_sync','Nunca'))}</p></div><h2>Produtos</h2>${rows.map(r=>{const p=JSON.parse(r.json);return `<div class="card"><h3>${h(p.name)}</h3><p>Custo US$ ${h(p.yourPrice)} · Estoque: ${h(p.stock?.count||0)} · ${h(p.deliveryType)} · Duração ${h(p.durationDays||'—')} dias · Garantia ${h(p.warranty?.enabled?p.warranty.days+' dias':'—')}</p><form method="post" action="/admin/ggsoma/product" enctype="multipart/form-data"><input type="hidden" name="csrf" value="${csrf()}"><input type="hidden" name="slug" value="${h(r.slug)}"><label>Preço de venda R$ (calculado automaticamente; pode ajustar manualmente)</label><input name="price" type="number" step="0.01" min="0.01" required value="${r.preco_padrao||''}"><label>Lucro personalizado R$ (vazio = usa lucro padrão)</label><input name="custom_profit" type="number" min="0" step="0.01" value="${r.custom_profit??''}" placeholder="${h(profit)}"><label><input style="width:auto" name="blocked_auto" type="checkbox" value="1" ${r.blocked_auto?'checked':''}> ⛔ Não vender este produto (bloqueio manual)</label><label>Nome exibido ao cliente (opcional)</label><input name="custom_title" maxlength="160" value="${h(r.custom_title||'')}" placeholder="Ex.: Gemini Pro — 18 Meses"><label>Descrição personalizada (opcional)</label><textarea name="custom_description" rows="7" maxlength="5000" placeholder="Se ficar vazio, será usada a descrição da API traduzida.">${h(r.custom_description||'')}</textarea><label>Foto do produto (opcional)</label><input name="image" type="file" accept="image/*">${r.image_path?`<p>📷 Foto cadastrada. <label style="display:inline"><input style="width:auto" type="checkbox" name="remove_image" value="1"> Remover foto</label></p>`:''}<label><input name="enabled" type="checkbox" value="1" ${r.ativo?'checked':''}> Vender este produto</label><button>Salvar produto</button></form></div>`;}).join('')}<h2>Pedidos GGSOMA</h2><table><tr><th>Pedido</th><th>Status</th><th>Fornecedor</th><th>Erro / rastreio</th></tr>${orders.map(o=>`<tr><td>#${o.pedido_id}</td><td>${h(o.state)}</td><td>${h(o.order_code||'—')}</td><td>${h(o.error||'')} ${h(o.request_id||'')}</td></tr>`).join('')}</table>`));
+      res.send(d.page('GGSOMA API',`<h1>GGSOMA API</h1><p>${h(req.query.ok||req.query.erro||'')}</p><div class="card"><h2>Configuração</h2><p>Chave: ${token?'••••••••'+h(token.slice(-4)):'Não cadastrada'}</p>${form('/admin/ggsoma/config',`<label>Nova chave API (em branco mantém a atual)</label><input type="password" name="key" autocomplete="new-password"><label><input type="checkbox" name="enabled" value="1" ${enabled==='1'?'checked':''}> Ativar integração</label><button>Salvar</button>`)}<p>Saldo: US$ ${h(await getConfig('ggsoma_balance','—'))}</p>${form('/admin/ggsoma/test','<button>Testar conexão e consultar saldo</button>')}${form('/admin/ggsoma/sync','<button>Sincronizar catálogo</button>')}<p>Última sincronização: ${h(await getConfig('ggsoma_sync','Nunca'))}</p></div><h2>Produtos</h2>${rows.map(r=>{const p=JSON.parse(r.json);return `<div class="card"><h3>${h(p.name)}</h3><p>Custo US$ ${h(p.yourPrice)} · Estoque: ${h(p.stock?.count||0)} · ${h(p.deliveryType)} · Duração ${h(p.durationDays||'—')} dias · Garantia ${h(p.warranty?.enabled?p.warranty.days+' dias':'—')}</p><form method="post" action="/admin/ggsoma/product" enctype="multipart/form-data"><input type="hidden" name="csrf" value="${csrf()}"><input type="hidden" name="slug" value="${h(r.slug)}"><label>Preço de venda R$</label><input name="price" type="number" step="0.01" min="0.01" required value="${r.preco_padrao||''}"><label>Nome exibido ao cliente (opcional)</label><input name="custom_title" maxlength="160" value="${h(r.custom_title||'')}" placeholder="Ex.: Gemini Pro — 18 Meses"><label>Descrição personalizada (opcional)</label><textarea name="custom_description" rows="7" maxlength="5000" placeholder="Se ficar vazio, será usada a descrição da API traduzida.">${h(r.custom_description||'')}</textarea><label>Foto do produto (opcional)</label><input name="image" type="file" accept="image/*">${r.image_path?`<p>📷 Foto cadastrada. <label style="display:inline"><input style="width:auto" type="checkbox" name="remove_image" value="1"> Remover foto</label></p>`:''}<label><input name="enabled" type="checkbox" value="1" ${r.ativo?'checked':''}> Vender este produto</label><button>Salvar produto</button></form></div>`;}).join('')}<h2>Pedidos GGSOMA</h2><table><tr><th>Pedido</th><th>Status</th><th>Fornecedor</th><th>Erro / rastreio</th></tr>${orders.map(o=>`<tr><td>#${o.pedido_id}</td><td>${h(o.state)}</td><td>${h(o.order_code||'—')}</td><td>${h(o.error||'')} ${h(o.request_id||'')}</td></tr>`).join('')}</table>`));
     }));
-    app.post('/admin/ggsoma/automation',protect,wrap(async(req,res)=>{await setConfig('ggsoma_profit_default',String(Math.max(0,Number(String(req.body.profit||'25').replace(',','.'))||25)));await setConfig('ggsoma_usd_brl',String(Math.max(0,Number(String(req.body.usd_brl||'0').replace(',','.'))||0)));await setConfig('ggsoma_auto_stock',req.body.auto_stock==='1'?'1':'0');await setConfig('ggsoma_ads_enabled',req.body.ads_enabled==='1'?'1':'0');await setConfig('ggsoma_ads_wa_group',String(req.body.wa_group||''));await setConfig('ggsoma_ads_min_restock',String(Math.max(1,Number(req.body.min_restock)||10)));await setConfig('ggsoma_ads_interval_min',String(Math.max(1,Number(req.body.interval_min)||15)));await setConfig('ggsoma_ads_buy_url',String(req.body.buy_url||'').trim().slice(0,500));await setConfig('ggsoma_ads_new',req.body.ads_new==='1'?'1':'0');await setConfig('ggsoma_ads_return',req.body.ads_return==='1'?'1':'0');await setConfig('ggsoma_ads_restock',req.body.ads_restock==='1'?'1':'0');await sync();res.redirect('/admin/ggsoma?ok=Automação+salva+e+catálogo+recalculado');}));
-    app.post('/admin/ggsoma/ad-test',protect,wrap(async(req,res)=>{const group=await getConfig('ggsoma_ads_wa_group','');if(!group)throw new Error('Selecione o grupo de divulgação.');if(!d.sendWhatsAppGroup)throw new Error('WhatsApp indisponível.');await d.sendWhatsAppGroup(group,'✅ *TESTE DE DIVULGAÇÃO GGSOMA*\n\nSeu grupo está conectado à automação de produtos e estoque.','');res.redirect('/admin/ggsoma?ok=Teste+enviado+ao+grupo');}));
     app.post('/admin/ggsoma/config',protect,wrap(async(req,res)=>{const token=String(req.body.key||'').trim();if(token&&!/^sk_live_[A-Za-z0-9]+$/.test(token))throw new Error('Formato de chave inválido.');if(token)await setConfig('ggsoma_key',encrypt(token));await setConfig('ggsoma_enabled',req.body.enabled==='1'?'1':'0');res.redirect('/admin/ggsoma?ok=Configuração+salva');}));
     app.post('/admin/ggsoma/test',protect,wrap(async(req,res)=>{const b=await request('get','/balance');await setConfig('ggsoma_balance',String(b.balance));res.redirect('/admin/ggsoma?ok=Conectado');}));
     app.post('/admin/ggsoma/sync',protect,wrap(async(req,res)=>{const n=await sync();res.redirect('/admin/ggsoma?ok='+n+'+produtos+sincronizados');}));
-    app.post('/admin/ggsoma/product',uploadPremium.single('image'),protect,wrap(async(req,res)=>{const cp=String(req.body.custom_profit||'').trim();await run('UPDATE ggsoma_products SET custom_profit=?,blocked_auto=? WHERE slug=?',[cp===''?null:Math.max(0,Number(cp.replace(',','.'))||0),req.body.blocked_auto==='1'?1:0,req.body.slug]);await saveProduct(req.body.slug,req.body.price,req.body.blocked_auto==='1'?false:req.body.enabled==='1');const row=await get('SELECT image_path FROM ggsoma_products WHERE slug=?',[req.body.slug]);let imagePath=row?.image_path||'';if(req.body.remove_image==='1'&&imagePath){try{fs.unlinkSync(imagePath)}catch(_){}imagePath='';}if(req.file?.path){if(imagePath&&imagePath!==req.file.path){try{fs.unlinkSync(imagePath)}catch(_){}}imagePath=req.file.path;}await run('UPDATE ggsoma_products SET custom_title=?,custom_description=?,image_path=? WHERE slug=?',[String(req.body.custom_title||'').trim().slice(0,160),String(req.body.custom_description||'').trim().slice(0,5000),imagePath,req.body.slug]);res.redirect('/admin/ggsoma?ok=Produto+salvo');}));
+    app.post('/admin/ggsoma/product',uploadPremium.single('image'),protect,wrap(async(req,res)=>{await saveProduct(req.body.slug,req.body.price,req.body.enabled==='1');const row=await get('SELECT image_path FROM ggsoma_products WHERE slug=?',[req.body.slug]);let imagePath=row?.image_path||'';if(req.body.remove_image==='1'&&imagePath){try{fs.unlinkSync(imagePath)}catch(_){}imagePath='';}if(req.file?.path){if(imagePath&&imagePath!==req.file.path){try{fs.unlinkSync(imagePath)}catch(_){}}imagePath=req.file.path;}await run('UPDATE ggsoma_products SET custom_title=?,custom_description=?,image_path=? WHERE slug=?',[String(req.body.custom_title||'').trim().slice(0,160),String(req.body.custom_description||'').trim().slice(0,5000),imagePath,req.body.slug]);res.redirect('/admin/ggsoma?ok=Produto+salvo');}));
     app.get('/cliente/ggsoma/:id',d.clienteAuth,wrap(async(req,res)=>{
       const o=await get(`SELECT g.* FROM ggsoma_orders g JOIN pedidos p ON p.id=g.pedido_id WHERE p.id=? AND p.revenda_id=? AND g.state='COMPLETED'`,[req.params.id,req.cliente.id]);if(!o)return res.sendStatus(404);
       res.set('Cache-Control','no-store');res.send(d.clientePage('Entrega',`<div class="cu-card"><h1>Entrega do pedido #${Number(o.pedido_id)}</h1><pre style="white-space:pre-wrap;overflow-wrap:anywhere">${h(decrypt(o.delivery_enc))}</pre></div>`,req.cliente));

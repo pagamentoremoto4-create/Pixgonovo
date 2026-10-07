@@ -3273,6 +3273,10 @@ async function abrirCategoriaServicoWhatsApp(from,cliente,opcao){
 async function escolherServicoDaCategoriaWhatsApp(from,cliente,opcao){
   const sess=await carregarSessaoPedido(from); if(!sess?.categoria)return false;
   if(String(opcao)==='0'){
+    if(sess.origemMenu==='blacklist_compacto'){
+      await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+      return true;
+    }
     if(sess.origemMenu==='blacklist'){
       await salvarSessaoPedido(from,{etapa:'menu'});
       await enviarMenuServicosWhatsApp(from,cliente);
@@ -4872,6 +4876,12 @@ Digite *menu* para voltar.`);
     return;
   }
 
+  if (sess?.etapa === 'esim_ddd' && (opcao==='0'||lower==='voltar')) {
+    await salvarSessaoPedido(from,{etapa:'esim_escolha'});
+    await enviarListaEsim(from);
+    return;
+  }
+
   if (sess?.etapa === 'esim_ddd' && /^\d+$/.test(opcao)) {
     const ddds = await dddsEsimDisponiveis(sess.plano);
     const escolhido = ddds[Number(opcao)-1];
@@ -4882,6 +4892,11 @@ Digite *menu* para voltar.`);
   }
 
   if (sess?.etapa === 'esim_dispositivo') {
+    if(opcao==='0'||lower==='voltar'){
+      await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});
+      await enviarEscolhaDddEsim(from,sess.plano,cliente.saldo);
+      return;
+    }
     const dispositivo = opcao === '1' ? 'IPHONE' : opcao === '2' ? 'ANDROID' : '';
     if (!dispositivo) { await enviarTexto(from, '❌ Escolha 1 para iPhone ou 2 para Android.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, dispositivo, ddd: sess.ddd });
@@ -4932,7 +4947,16 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
     const idx=Math.max(0,Number(sess.dhruIndice||0));
     const campo=campos[idx];
     if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados. Sincronize novamente a API.');return;}
-    if(String(textoOriginal||'').trim()==='0'){await apagarSessaoPedido(from);await enviarTexto(from,'Digite *menu* para voltar.');return;}
+    if(String(textoOriginal||'').trim()==='0'||lower==='voltar'){
+      const catNome=String(servico.categoria||'');
+      const catLocal=await get('SELECT * FROM servicos_categorias WHERE ativo=1 AND nome=?',[catNome]).catch(()=>null);
+      if(catLocal && ['BLOQUEIO TIM','DESBLOQUEIO TIM'].includes(String(catLocal.nome||'').toUpperCase())){
+        await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+      }else{
+        await abrirServicosDesbloqueiosWhatsApp(from,cliente);
+      }
+      return;
+    }
     let valorCampo=String(textoOriginal||'').trim();
     if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
     if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
@@ -4952,6 +4976,16 @@ ${dispositivo === 'IPHONE' ? '🍎 Aparelho: iPhone' : '🤖 Aparelho: Android'}
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
+    if(opcao==='0'||lower==='voltar'){
+      const catNome=String(servico.categoria||'');
+      const catLocal=await get('SELECT * FROM servicos_categorias WHERE ativo=1 AND nome=?',[catNome]).catch(()=>null);
+      if(catLocal && ['BLOQUEIO TIM','DESBLOQUEIO TIM'].includes(String(catLocal.nome||'').toUpperCase())){
+        await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+      }else{
+        await abrirServicosDesbloqueiosWhatsApp(from,cliente);
+      }
+      return;
+    }
     if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
@@ -5981,13 +6015,9 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
     return;
   }
 
-  const etapasComVoltarProprio = new Set(['servico_categoria','online_categorias','online_busca','historico_menu','historico_lista','conta_menu','conta_dados','suporte_menu','pix_cadastro_menu']);
-  if (opcao === '0' && sess && sess.etapa !== 'menu' && !etapasComVoltarProprio.has(sess.etapa)) {
-    await apagarSessaoPedido(from);
-    await salvarSessaoPedido(from, { etapa: 'menu' });
-    await enviarMenuServicosWhatsApp(from, cliente);
-    return;
-  }
+  // V5.0.1 VOLTAR HIERÁRQUICO (WhatsApp)
+  // Não existe mais um fallback global que joga qualquer "0" para o menu principal.
+  // Cada etapa trata o VOLTAR retornando somente um nível.
 
   if (sess?.etapa === 'saldo_insuficiente_servico') {
     const opcaoSaldo = normalizarOpcaoSaldoInsuficiente(textoOriginal);
@@ -8298,7 +8328,8 @@ async function getMisticPayConfig() {
   return {
     clientId: String(await getConfig('misticpay_client_id', '') || '').trim(),
     clientSecret: String(await getConfig('misticpay_client_secret', '') || '').trim(),
-    cpfPadrao: String(await getConfig('misticpay_cpf_padrao', '') || '').replace(/\D/g, '')
+    cpfPadrao: String(await getConfig('misticpay_cpf_padrao', '') || '').replace(/\D/g, ''),
+    publicBaseUrl: String(await getConfig('misticpay_public_base_url', '') || BASE_URL || '').trim().replace(/\/$/, '')
   };
 }
 
@@ -8310,20 +8341,31 @@ async function clienteMisticPay() {
 
 async function gerarPixMisticPay(valor, cliente) {
   const { cfg, api } = await clienteMisticPay();
+  if (!cfg.cpfPadrao) throw new Error('Configure o CPF padrão da MisticPay no painel');
+  const nomePagador = String(cliente || 'Cliente')
+    .replace(/^(Telegram|WhatsApp|Assinatura)\s+/i, '')
+    .trim() || 'Cliente';
+  const transactionId = `central_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const payload = {
     amount: Number(valor),
-    payerName: 'Cliente',
-    description: `Pagamento CentralUnlocker ${cliente}`.slice(0,255),
-    projectWebhook: BASE_URL ? `${BASE_URL}/webhook/misticpay` : undefined
+    payerName: nomePagador.slice(0,120),
+    payerDocument: cfg.cpfPadrao,
+    transactionId,
+    description: `CentralUnlocker ${transactionId}`.slice(0,255)
   };
-  // Modo solicitado: tenta sem CPF quando o campo está vazio. Se a API exigir,
-  // basta cadastrar o CPF padrão no painel; o cliente nunca é perguntado.
-  if (cfg.cpfPadrao) payload.payerDocument = cfg.cpfPadrao;
+  if (cfg.publicBaseUrl) payload.projectWebhook = `${cfg.publicBaseUrl}/webhook/misticpay`;
+  console.log('💠 MISTICPAY CREATE:', {
+    amount: payload.amount,
+    payerName: payload.payerName,
+    payerDocument: payload.payerDocument ? `${payload.payerDocument.slice(0,3)}***${payload.payerDocument.slice(-2)}` : '',
+    transactionId: payload.transactionId,
+    projectWebhook: payload.projectWebhook || '(não configurado)'
+  });
   const response = await api.post('/transactions/create', payload);
   const d = response.data;
   return {
     gateway: 'misticpay', raw: d,
-    paymentId: String(d?.data?.transactionId || ''),
+    paymentId: String(d?.data?.transactionId || transactionId),
     qrCode: d?.data?.copyPaste || '',
     qrCodeBase64: d?.data?.qrCodeBase64 || '',
     qrcodeUrl: d?.data?.qrcodeUrl || ''
@@ -11625,7 +11667,7 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
-const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente});
+const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
 // GGSOMA compartilhada: a credencial fica somente no Pixgonovo central.
@@ -14119,7 +14161,7 @@ app.get('/admin/pagamentos-config', async (req, res) => {
     <div class="card"><h2>Mercado Pago</h2><p>Status: <b>${cfg.mercadoPagoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mpCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="mercadopago"><input type="hidden" name="ativo" value="${cfg.mercadoPagoAtivo ? '0' : '1'}"><button class="btn ${cfg.mercadoPagoAtivo ? 'red' : 'green'}">${cfg.mercadoPagoAtivo ? 'Desativar' : 'Ativar'} Mercado Pago</button></form></div>
     <div class="card"><h2>MisticPay</h2><p>Status: <b>${cfg.misticpayAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mistCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><p>CPF padrão: <b>${safeHtml(cpfMask)}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="misticpay"><input type="hidden" name="ativo" value="${cfg.misticpayAtivo ? '0' : '1'}"><button class="btn ${cfg.misticpayAtivo ? 'red' : 'green'}">${cfg.misticpayAtivo ? 'Desativar' : 'Ativar'} MisticPay</button></form></div>
   </div>
-  <div class="card"><h2>⚙️ Configurar MisticPay</h2><p class="muted">O cliente informa somente o valor. Deixe CPF vazio para testar sem documento; se a API recusar, cadastre um CPF padrão aqui.</p><form method="post" action="/admin/pagamentos-config/misticpay"><label>Client ID (pk_...)</label><input name="client_id" value="${safeHtml(mist.clientId)}" placeholder="pk_..." autocomplete="off"><label>Client Secret (sk_...)</label><input type="password" name="client_secret" placeholder="${mist.clientSecret ? '•••••••• (deixe vazio para manter)' : 'sk_...'}" autocomplete="new-password"><label>CPF padrão (opcional)</label><input name="cpf_padrao" value="${safeHtml(mist.cpfPadrao)}" placeholder="Somente números — deixe vazio para testar sem CPF"><br><br><button class="btn green">💾 Salvar MisticPay</button></form></div>
+  <div class="card"><h2>⚙️ Configurar MisticPay</h2><p class="muted">Mesmo padrão da integração MisticPay já validada: CPF fixo, transactionId único e webhook público.</p><form method="post" action="/admin/pagamentos-config/misticpay"><label>Client ID (pk_...)</label><input name="client_id" value="${safeHtml(mist.clientId)}" placeholder="pk_..." autocomplete="off"><label>Client Secret (sk_...)</label><input type="password" name="client_secret" placeholder="${mist.clientSecret ? '•••••••• (deixe vazio para manter)' : 'sk_...'}" autocomplete="new-password"><label>CPF padrão</label><input name="cpf_padrao" value="${safeHtml(mist.cpfPadrao)}" placeholder="Somente números"><label>Endereço público do sistema</label><input name="public_base_url" value="${safeHtml(mist.publicBaseUrl)}" placeholder="https://pixgonovo.onrender.com"><p class="muted">Webhook enviado: <code>${safeHtml(mist.publicBaseUrl ? mist.publicBaseUrl + '/webhook/misticpay' : 'não configurado')}</code></p><br><button class="btn green">💾 Salvar MisticPay</button></form></div>
   <div class="card"><h2>Gateway padrão</h2><p class="muted">Usado quando somente um gateway estiver disponível. Com mais de um ativo, o cliente escolhe.</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway"><option value="pixgo" ${cfg.padrao==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${cfg.padrao==='mercadopago'?'selected':''}>Mercado Pago</option><option value="misticpay" ${cfg.padrao==='misticpay'?'selected':''}>MisticPay</option></select><br><br><button class="btn green">Salvar padrão</button></form></div>
   <div class="card"><h2>Variáveis no Render</h2><p><code>PIXGO_API_KEY</code></p><p><code>MERCADO_PAGO_ACCESS_TOKEN</code></p><p class="muted">MisticPay é configurada diretamente neste painel.</p></div>`));
 });
@@ -14136,10 +14178,12 @@ app.post('/admin/pagamentos-config/misticpay', async (req, res) => {
   const clientId = String(req.body.client_id || '').trim();
   const secretNovo = String(req.body.client_secret || '').trim();
   const cpf = String(req.body.cpf_padrao || '').replace(/\D/g, '');
+  const publicBaseUrl = String(req.body.public_base_url || '').trim().replace(/\/$/, '');
   await setConfig('misticpay_client_id', clientId);
   if (secretNovo) await setConfig('misticpay_client_secret', secretNovo);
   await setConfig('misticpay_cpf_padrao', cpf);
-  notificarPainel('config', '💠 MisticPay atualizada', `Credenciais ${clientId ? 'salvas' : 'incompletas'} • CPF ${cpf ? 'configurado' : 'vazio (teste sem CPF)'}`);
+  await setConfig('misticpay_public_base_url', publicBaseUrl);
+  notificarPainel('config', '💠 MisticPay atualizada', `Credenciais ${clientId ? 'salvas' : 'incompletas'} • CPF ${cpf ? 'configurado' : 'ausente'} • URL pública ${publicBaseUrl ? 'configurada' : 'ausente'}`);
   res.redirect('/admin/pagamentos-config');
 });
 app.post('/admin/pagamentos-config/padrao', async (req, res) => {
