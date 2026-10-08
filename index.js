@@ -5436,11 +5436,21 @@ const consultaDhruStatusPrivado=new Map();
 function consultaFormatarDhruPrivado(bruto){
   const t=traduzirResultadoDhruPt(String(bruto||'')).trim(); if(!t)return t;
   const pick=(rx)=>{const m=t.match(rx);return m?String(m[1]||'').trim():''};
-  const modelo=pick(/(?:model|modelo)\s*[:›-]\s*([^\n\r]+)/i), imei=pick(/imei\s*[:›-]\s*([0-9]{14,17})/i), sn=pick(/(?:serial(?: number)?|sn|n[uú]mero de s[eé]rie)\s*[:›-]\s*([A-Z0-9-]+)/i);
+  const modelo=pick(/(?:model|modelo)\s*[:›-]\s*([^\n\r]+)/i), imei=pick(/(?:imei(?:1)?(?: number| n[uú]mero)?)\s*[:›-]\s*([0-9]{14,17})/i), sn=pick(/(?:serial(?: number)?|sn|n[uú]mero de s[eé]rie)\s*[:›-]\s*([A-Z0-9-]+)/i);
   const fmi=pick(/(?:find my iphone|find my|fmi)\s*[:›-]\s*(on|off)/i).toUpperCase();
   const icloud=pick(/icloud(?: status)?\s*[:›-]\s*([^\n\r]+)/i);
-  if(modelo&&(imei||sn||fmi||icloud)){
-    const ls=[`📱 *${modelo.replace(/\s*[-–]\s*/g,' | ')}*`]; if(imei)ls.push(`🔢 IMEI › \`${imei}\``); if(sn)ls.push(`🆔 SN › \`${sn}\``); if(fmi)ls.push(`${fmi==='ON'?'🔒':'🔓'} FMI › ${fmi==='ON'?'🔴':'🟢'} *${fmi}*`); if(icloud){const good=/clean|limpo|off/i.test(icloud);const bad=/lost|blocked|blacklist|on|ativo/i.test(icloud);ls.push(`☁️ iCloud › ${bad?'🔴':good?'🟢':'🟡'} *${icloud.toUpperCase()}*`);} return ls.join('\n');
+  // V226: não omitir os campos essenciais de consultas SIM-Lock.
+  const simlock=pick(/(?:sim[ -]?lock(?: status)?|carrier lock|bloqueio (?:de )?operadora)\s*[:›-]\s*([^\n\r]+)/i);
+  const carrier=pick(/(?:carrier|operadora|activation policy|pol[ií]tica de ativa[cç][aã]o)\s*[:›-]\s*([^\n\r]+)/i);
+  if(modelo&&(imei||sn||fmi||icloud||simlock||carrier)){
+    const ls=[`📱 *${modelo.replace(/\s*[-–]\s*/g,' | ')}*`];
+    if(imei)ls.push(`🔢 IMEI › \`${imei}\``);
+    if(sn)ls.push(`🆔 SN › \`${sn}\``);
+    if(fmi)ls.push(`${fmi==='ON'?'🔒':'🔓'} FMI › ${fmi==='ON'?'🔴':'🟢'} *${fmi}*`);
+    if(icloud){const good=/clean|limpo|off/i.test(icloud);const bad=/lost|blocked|blacklist|on|ativo/i.test(icloud);ls.push(`☁️ iCloud › ${bad?'🔴':good?'🟢':'🟡'} *${icloud.toUpperCase()}*`);}
+    if(simlock){const locked=/^(locked|bloqueado|sim locked|yes)$/i.test(simlock);const unlocked=/^(unlocked|desbloqueado|no|open)$/i.test(simlock);ls.push(`📶 SIM-Lock › ${locked?'🔴':unlocked?'🟢':'🟡'} *${simlock.toUpperCase()}*`);}
+    if(carrier)ls.push(`📡 Operadora › ${carrier}`);
+    return ls.join('\n');
   }
   return t;
 }
