@@ -2869,7 +2869,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -5319,22 +5319,34 @@ function extrairMensagemWhatsApp(body) {
 }
 
 
-function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false) {
-  const nome = String(cliente?.nome || 'Cliente').trim() || 'Cliente';
-  const saudacao = semSaudacao ? '' : `👋 Olá, *${nome}*!
-
-`;
-  return `${saudacao}🏠 *MENU PRINCIPAL*
-
-💰 Saldo: *${brl(cliente?.saldo || 0)}*
-
-1️⃣ 🔍 *REALIZAR CONSULTA*
-2️⃣ 🛠️ *SERVIÇOS & DESBLOQUEIOS*
-3️⃣ 📱 *COMPRAR eSIM*
-4️⃣ ⭐ *ASSINATURAS PREMIUM*
-5️⃣ 👤 *MINHA CONTA*
-6️⃣ ❌ *CANCELAMENTO*
-7️⃣ 🆘 *SUPORTE*`;
+// V234 — Menu principal WhatsApp editável, sem modificar menus do Telegram.
+// As chaves são fixas para que renomear/reordenar não altere a função acionada.
+const MENU_WHATSAPP_PADRAO = Object.freeze([
+  {id:'consultas',nome:'REALIZAR CONSULTA',emoji:'🔍',ordem:10,ativo:1},
+  {id:'servicos',nome:'SERVIÇOS & DESBLOQUEIOS',emoji:'🛠️',ordem:20,ativo:1},
+  {id:'esim',nome:'COMPRAR ESIM',emoji:'📱',ordem:30,ativo:1},
+  {id:'premium',nome:'ASSINATURAS PREMIUM',emoji:'⭐',ordem:40,ativo:1},
+  {id:'conta',nome:'MINHA CONTA',emoji:'👤',ordem:50,ativo:1},
+  {id:'cancelamento',nome:'CANCELAMENTO',emoji:'❌',ordem:60,ativo:1},
+  {id:'suporte',nome:'SUPORTE',emoji:'🆘',ordem:70,ativo:1}
+]);
+async function menuWhatsAppItens(){
+  let gravado=[];
+  try { const valor=JSON.parse(await getConfig('menu_principal_whatsapp_itens_v234','[]')); if(Array.isArray(valor))gravado=valor; } catch(_e){}
+  return MENU_WHATSAPP_PADRAO.map(p=>{
+    const c=gravado.find(x=>x && x.id===p.id)||{};
+    return {id:p.id,nome:String(c.nome||p.nome).trim().slice(0,65)||p.nome,
+      emoji:String(c.emoji===undefined?p.emoji:c.emoji).trim().slice(0,16),
+      ordem:Number.isFinite(Number(c.ordem))?Number(c.ordem):p.ordem,
+      ativo:c.ativo===undefined?1:(Number(c.ativo)===1?1:0)};
+  }).sort((a,b)=>a.ordem-b.ordem || MENU_WHATSAPP_PADRAO.findIndex(x=>x.id===a.id)-MENU_WHATSAPP_PADRAO.findIndex(x=>x.id===b.id));
+}
+async function menuWhatsAppTexto(cliente, primeiroAcesso=false, pendentes=0, semSaudacao=false){
+  const nome=String(cliente?.nome||'Cliente').trim()||'Cliente';
+  const saudacao=semSaudacao?'':`👋 Olá, *${nome}*!\n\n`;
+  const itens=(await menuWhatsAppItens()).filter(x=>x.ativo);
+  const linhas=itens.map((x,i)=>`${i+1}️⃣ ${x.emoji} *${x.nome}*`);
+  return `${saudacao}🏠 *MENU PRINCIPAL*\n\n💰 Saldo: *${brl(cliente?.saldo||0)}*\n\n${linhas.join('\n')}${linhas.length?'':'\nNenhuma opção disponível no momento.'}`;
 }
 
 function menuServicosWhatsAppTexto(cliente, pendentes=0) {
@@ -5582,7 +5594,7 @@ async function consultaVipExecutarYanPrivado(from,cliente,cmd){
 async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false) {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE", "EM PROCESSO")', [cliente.id]);
   const atual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
-  const texto = menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0), semSaudacao);
+  const texto = await menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0), semSaudacao);
   // Menu principal unificado: foto configurável no painel + menu na mesma mensagem.
   // Mantém o banner embarcado como padrão até o administrador trocar/remover pelo painel.
   const fotoConfig = String(await getConfig('menu_principal_foto','')).trim();
@@ -6154,21 +6166,10 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     }
   }
 
-  // V157: se o cliente ativo ficou 12 horas ou mais sem falar com o bot,
-  // qualquer nova mensagem reabre o atendimento diretamente no menu principal.
-  // O horário anterior é lido antes de registrar a interação atual.
-  const ultimoAcessoAnterior = cliente?.ultimo_acesso ? Date.parse(String(cliente.ultimo_acesso).replace(' ', 'T') + (String(cliente.ultimo_acesso).includes('Z') ? '' : 'Z')) : NaN;
-  const inativoHa12Horas = Number.isFinite(ultimoAcessoAnterior) && (Date.now() - ultimoAcessoAnterior >= 12 * 60 * 60 * 1000);
+  // V233: a inatividade nao dispara mais o menu do WhatsApp.
+  // Preservar o registro de ultimo acesso para historico e administracao.
   await run('UPDATE revendas SET ultimo_acesso=CURRENT_TIMESTAMP, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [cliente.id]);
   cliente = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
-  if (inativoHa12Horas) {
-    encerrarSessaoIAWhatsApp(numeroNorm);
-    await apagarSessaoPedido(from);
-    await salvarSessaoPedido(from, { etapa: 'hub_menu' });
-    console.log(`🕛 V157 MENU 12H: +${numeroNorm} voltou após 12h ou mais sem interação.`);
-    await enviarMenuWhatsApp(from, cliente, false);
-    return;
-  }
 
   // Código de 6 dígitos gerado no Telegram: vincula as duas contas.
   if (/^\d{6}$/.test(textoOriginal)) {
@@ -6297,19 +6298,21 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   let sess = await carregarSessaoPedido(from);
 
   if(sess?.etapa==='hub_menu'){
-    if(opcao==='1'){ await menuConsultasPrivado(from,cliente,true); return; }
-    if(opcao==='2'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
-    if(opcao==='3'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
-    if(opcao==='4'){ await premium.list(from,cliente); return; }
-    if(opcao==='5'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
-    if(opcao==='6'){ await salvarSessaoPedido(from,{etapa:'cancelamento_imeis',voltarPara:'hub'}); await enviarTexto(from,`❌ *CANCELAMENTO*
+    const itensMenu=(await menuWhatsAppItens()).filter(x=>x.ativo);
+    const acaoMenu=/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null;
+    if(acaoMenu==='consultas'){ await menuConsultasPrivado(from,cliente,true); return; }
+    if(acaoMenu==='servicos'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
+    if(acaoMenu==='esim'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
+    if(acaoMenu==='premium'){ await premium.list(from,cliente); return; }
+    if(acaoMenu==='conta'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
+    if(acaoMenu==='cancelamento'){ await salvarSessaoPedido(from,{etapa:'cancelamento_imeis',voltarPara:'hub'}); await enviarTexto(from,`❌ *CANCELAMENTO*
 
 Envie de 1 até 10 IMEIs.
 
 Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizará somente os IMEIs dos seus próprios pedidos.
 
 0️⃣ ⬅️ Voltar`); return; }
-    if(opcao==='7'){ await salvarSessaoPedido(from,{etapa:'suporte_menu',origemMenu:'hub'}); await enviarTexto(from,`🆘 *SUPORTE*
+    if(acaoMenu==='suporte'){ await salvarSessaoPedido(from,{etapa:'suporte_menu',origemMenu:'hub'}); await enviarTexto(from,`🆘 *SUPORTE*
 
 1️⃣ 🔎 Problema com consulta
 2️⃣ 🛒 Problema com serviço/pedido
@@ -14440,6 +14443,44 @@ app.post('/admin/servicos/cancelamento/:id/toggle', async (req, res) => {
   res.redirect('/admin/servicos/cancelamento');
 });
 
+
+// V234 — painel de configuração do menu principal do WhatsApp (somente admin web).
+app.get('/admin/menu-whatsapp',async(req,res)=>{
+  try{
+    const itens=await menuWhatsAppItens();
+    const cards=itens.map((c,i)=>`<div class="card"><h3>${i+1}️⃣ ${safeHtml(c.emoji)} ${safeHtml(c.nome)}</h3>
+      <form method="post" action="/admin/menu-whatsapp/${c.id}">
+      <div class="form-grid"><div><label>Nome da opção</label><input name="nome" maxlength="65" value="${safeHtml(c.nome)}" required></div>
+      <div><label>Emoji</label><input name="emoji" maxlength="16" value="${safeHtml(c.emoji)}"></div>
+      <div><label>Ordem (menor aparece primeiro)</label><input type="number" name="ordem" min="1" max="9999" value="${c.ordem}" required></div>
+      <div><label>Visibilidade</label><select name="ativo"><option value="1" ${c.ativo?'selected':''}>🟢 Exibir</option><option value="0" ${!c.ativo?'selected':''}>🔴 Ocultar</option></select></div></div>
+      <p class="mini-help">Função vinculada: ${safeHtml(c.id)}. Renomear ou reordenar não muda a função.</p>
+      <button class="btn green" type="submit">💾 Salvar</button></form></div>`).join('');
+    const ativos=itens.filter(x=>x.ativo);
+    const previa=ativos.map((x,i)=>`${i+1}️⃣ ${safeHtml(x.emoji)} <b>${safeHtml(x.nome)}</b>`).join('<br>');
+    res.send(page('Menu principal WhatsApp',`<div class="hero"><h1>☰ Menu principal do WhatsApp</h1><p>Edite nomes, emojis, ordem e visibilidade sem alterar as funções, pagamentos ou o Telegram.</p></div>
+    ${req.query.ok?'<div class="card">✅ Alteração salva.</div>':''}${req.query.erro?`<div class="card">⚠️ ${safeHtml(req.query.erro)}</div>`:''}
+    <div class="card"><h2>👁️ Prévia</h2>${previa||'Nenhuma opção visível'}<p class="mini-help">O menu é enviado quando o cliente digita menu. As alterações valem no próximo menu exibido.</p></div>
+    ${cards}<div class="card"><form method="post" action="/admin/menu-whatsapp/restaurar" onsubmit="return confirm('Restaurar todos os nomes, emojis, posições e visibilidade padrão?')"><button class="btn gray">↩️ Restaurar padrão</button></form></div>`));
+  }catch(e){res.status(500).send('Erro ao carregar menu: '+safeHtml(e.message));}
+});
+app.post('/admin/menu-whatsapp/restaurar',async(req,res)=>{
+  await setConfig('menu_principal_whatsapp_itens_v234','[]');
+  res.redirect('/admin/menu-whatsapp?ok=1');
+});
+app.post('/admin/menu-whatsapp/:id',async(req,res)=>{
+  const id=String(req.params.id||'');
+  if(!MENU_WHATSAPP_PADRAO.some(x=>x.id===id))return res.status(404).send('Opção inválida');
+  const nome=String(req.body.nome||'').trim().slice(0,65);
+  const emoji=String(req.body.emoji||'').trim().slice(0,16);
+  const ordem=Number(req.body.ordem);
+  if(!nome||!Number.isInteger(ordem)||ordem<1||ordem>9999)return res.redirect('/admin/menu-whatsapp?erro='+encodeURIComponent('Nome ou ordem inválidos'));
+  const itens=await menuWhatsAppItens();
+  const alvo=itens.find(x=>x.id===id);
+  Object.assign(alvo,{nome,emoji,ordem,ativo:String(req.body.ativo)==='1'?1:0});
+  await setConfig('menu_principal_whatsapp_itens_v234',JSON.stringify(itens));
+  res.redirect('/admin/menu-whatsapp?ok=1');
+});
 
 app.get('/admin/servicos/categorias',async(req,res)=>{
  const cats=await all(`SELECT c.*,(SELECT COUNT(*) FROM servicos_catalogo s WHERE s.categoria_id=c.id) total FROM servicos_categorias c ORDER BY c.ordem,c.id`);
