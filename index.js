@@ -7379,10 +7379,23 @@ Exemplo: 50`);
           const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[Number(servMatch[1])]);
           if(!servico)return tgBot.sendMessage(chatId,'❌ Serviço indisponível.');
           if(servico.api_provider==='PREMIUM')return tgBot.sendMessage(chatId,'❌ Esta categoria antiga foi desativada.');
-          const preco=await precoDaRevenda(cliente.id,servico.id),nome=servico.nome_exibicao||servico.nome,desc=String(servico.descricao_exibicao||servico.descricao||servico.descricao_cliente||'').trim();
+          const preco=await precoDaRevenda(cliente.id,servico.id);
+          // V225: descricoes externas DHRU podem ter Markdown invalido ou legenda longa.
+          const nome=String(servico.nome_exibicao||servico.nome||'Servico').trim();
+          const desc=String(servico.descricao_exibicao||servico.descricao||servico.descricao_cliente||'').trim();
           const prazoOferta=String(servico.prazo||'').trim();
           const voltar=servico.api_provider==='GGSOMA'?'menu_assinatura_premium':(servico.categoria_id?`svc_cat_${servico.categoria_id}`:'menu_servicos');
-          return enviarCardVisual(chatId,q.message,`service_${servico.id}`,`🛍️ *${nome}*\n\n${desc?desc+'\n\n':''}${prazoOferta?'⏳ *Prazo:* '+prazoOferta+'\n\n':''}💰 *Valor:* ${brl(preco)}`,[[tgBtn('COMPRAR',`comprar_servico_${servico.id}`,'success','TG_ICON_COMPRAR','🛒')],[tgBtn('Voltar',voltar,'danger','TG_ICON_VOLTAR','⬅️')]]);
+          const oferta=[`🛍️ ${nome}`,desc,prazoOferta?`⏳ Prazo: ${prazoOferta}`:'',`💰 Valor: ${brl(preco)}`].filter(Boolean).join('\n\n').slice(0,3500);
+          const botoes=[[tgBtn('COMPRAR',`comprar_servico_${servico.id}`,'success','TG_ICON_COMPRAR','🛒')],[tgBtn('Voltar',voltar,'danger','TG_ICON_VOLTAR','⬅️')]];
+          try {
+            if(q.message?.message_id && (q.message.photo||q.message.animation||q.message.video||q.message.document) && oferta.length<=1000){
+              await tgBot.editMessageCaption(oferta,{chat_id:chatId,message_id:q.message.message_id,reply_markup:{inline_keyboard:botoes}});return;
+            }
+            if(q.message?.message_id && !(q.message.photo||q.message.animation||q.message.video||q.message.document)){
+              await tgBot.editMessageText(oferta,{chat_id:chatId,message_id:q.message.message_id,reply_markup:{inline_keyboard:botoes}});return;
+            }
+          }catch(err){console.log('⚠️ V225 CARD SERVICO TG:',err.message);}
+          return tgBot.sendMessage(chatId,oferta,{reply_markup:{inline_keyboard:botoes}});
         }
         const comprarServMatch=data.match(/^comprar_servico_(\d+)$/);
         if(comprarServMatch){
