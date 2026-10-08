@@ -2869,7 +2869,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/ggsoma">🛒 GGSOMA API</a><a href="/admin/dhru">⇄ <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/dhru">🔄 <span>API Dhru</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -3264,7 +3264,7 @@ async function iniciarServicoWhatsApp(from,cliente,servico){
   linhasOferta.push(`💰 *Valor:* ${brl(valor)}`);
   linhasOferta.push('1️⃣ 🛒 COMPRAR AGORA\n0️⃣ ⬅️ VOLTAR');
   const textoOferta=linhasOferta.join('\n\n');
-  const foto=String(servico.api_provider||'').toUpperCase()==='DHRU'?caminhoFotoDhruServico(servico.foto_whatsapp):'';
+  const foto=caminhoFotoDhruServico(servico.foto_whatsapp);
   if(!foto || !await enviarImagem(from,foto,textoOferta))await enviarTexto(from,textoOferta);
   return true;
 }
@@ -4797,6 +4797,29 @@ async function processarMensagemTelegram(msg) {
   if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '') && sessAdmin && !sessAdmin.etapa?.startsWith('produto_') && sessAdmin.etapa !== 'entregar_esim_manual_tg') {
     const txt=String(msg.text||'').trim(); const low=txt.toLowerCase();
     if(['cancelar','sair','voltar'].includes(low)){adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Operação cancelada.');return enviarPainelAdminTelegram(msg.chat.id);}
+    if(sessAdmin.etapa==='admof_editar'){
+      const id=Number(sessAdmin.servico_id);const campo=sessAdmin.campo;
+      const r=await get('SELECT * FROM servicos_catalogo WHERE id=?',[id]);
+      if(!r){adminSessao.delete(fromAdmin);return tgBot.sendMessage(msg.chat.id,'Serviço não encontrado.');}
+      try{
+        if(campo==='foto'){
+          const mid=midiaTelegramDaMensagem(msg);
+          if(!mid||mid.tipo!=='photo')return tgBot.sendMessage(msg.chat.id,'📷 Envie uma FOTO JPG/PNG/WEBP diretamente aqui, ou digite cancelar.');
+          await ofertasTelegramSalvarFoto(mid.id,id);
+        }else{
+          if(!txt)return tgBot.sendMessage(msg.chat.id,'Envie um texto válido.');
+          if(campo==='preco'){
+            const preco=Number(txt.replace(',','.'));if(!Number.isFinite(preco)||preco<0)return tgBot.sendMessage(msg.chat.id,'Digite um preço válido, ex.: 150,00');
+            await run('UPDATE servicos_catalogo SET preco_padrao=? WHERE id=?',[preco,id]);
+            if(String(r.api_provider||'').toUpperCase()==='DHRU')await run(`UPDATE servicos_catalogo SET api_price_mode='MANUAL',api_manual_price=? WHERE id=?`,[preco,id]);
+          }else if(['nome_exibicao','descricao_exibicao','prazo'].includes(campo)){
+            const limite=campo==='descricao_exibicao'?1200:campo==='prazo'?160:180;
+            await run(`UPDATE servicos_catalogo SET ${campo}=? WHERE id=?`,[txt.slice(0,limite),id]);
+          }
+        }
+        adminSessao.delete(fromAdmin);await tgBot.sendMessage(msg.chat.id,'✅ Oferta atualizada.');return ofertasTelegramVer(msg.chat.id,id);
+      }catch(e){return tgBot.sendMessage(msg.chat.id,'⚠️ '+e.message)}
+    }
     if(sessAdmin.etapa==='layout_media'){
       const md=midiaTelegramDaMensagem(msg);if(!md)return tgBot.sendMessage(msg.chat.id,'❌ Envie um GIF, vídeo MP4 ou foto.');
       const visualSlug={esim:'cat_esim',servicos:'cat_servicos',premium:'cat_premium',home:'home'}[sessAdmin.slug]||sessAdmin.slug;
@@ -6007,7 +6030,8 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   if(sessOfertaV224?.etapa==='servico_oferta' && (opcao==='0'||lower==='voltar')){
     if(sessOfertaV224.origemOferta==='blacklist_servicos'||sessOfertaV224.origemOferta==='blacklist_submenu'){
       await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
-    }else if(sessOfertaV224.origemOferta==='desbloqueios_categoria' && sessOfertaV224.origemCategoriaId){
+    }else if(sessOfertaV224.origemCategoriaId && ['desbloqueios_categoria','servico_categoria','servico_escolha'].includes(sessOfertaV224.origemOferta)){
+      // V231: a oferta retorna para a lista de serviços da categoria de origem.
       await abrirCategoriaDesbloqueiosWhatsApp(from,cliente,sessOfertaV224.origemCategoriaId);
     }else if(sessOfertaV224.origemOferta==='servicos_desbloqueios'||sessOfertaV224.origemOferta==='online_busca'||sessOfertaV224.origemOferta==='servico_categoria'||sessOfertaV224.origemOferta==='servico_escolha'){
       await abrirServicosDesbloqueiosWhatsApp(from,cliente);
@@ -6205,7 +6229,8 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
 
 
-  if (['cancelar', 'sair', 'voltar'].includes(lower)) {
+  // V231: 'voltar' pertence à navegação hierárquica de cada etapa, não ao cancelamento global.
+  if (['cancelar', 'sair'].includes(lower)) {
     const sessCancelar = await carregarSessaoPedido(from);
     if (sessCancelar) {
       await apagarSessaoPedido(from);
@@ -7083,11 +7108,40 @@ async function transmitirTodosTG(texto,imagem=null,canais={whatsapp:true,telegra
 async function relatoriosTG(chatId){const [p,c,e,v]=await Promise.all([get('SELECT COUNT(*) qtd FROM pedidos'),get('SELECT COUNT(*) qtd FROM revendas'),get("SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL'"),get("SELECT COALESCE(SUM(valor),0) total FROM pagamentos WHERE status='approved' OR status='PAGO'")]);return tgBot.sendMessage(chatId,`📊 *RELATÓRIOS*\n\n📋 Pedidos: ${p?.qtd||0}\n👥 Clientes: ${c?.qtd||0}\n📥 Estoque disponível: ${e?.qtd||0}\n💰 Pagamentos: ${brl(v?.total||0)}`,{parse_mode:'Markdown',reply_markup:adminVoltar()})}
 async function configuracoesTG(chatId){const ai=await getConfig('ia_ativa','0');return tgBot.sendMessage(chatId,`⚙️ *CONFIGURAÇÕES*\n\n🤖 IA: ${ai==='1'?'Ativada':'Desativada'}\n🌐 Painel: ${BASE_URL||'-'}\n🔐 Admin ID: ${ADMIN_TELEGRAM_ID||'não definido'}`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[[{text:'💾 Fazer backup',callback_data:'admin_backup'}],[{text:'⬅️ Painel',callback_data:'admin_inicio'}]]}})}
 
+// V232: editor de ofertas unificado no Telegram administrativo.
+async function ofertasTelegramLista(chatId,pagina=0){
+ const total=(await get(`SELECT COUNT(*) n FROM servicos_catalogo WHERE COALESCE(api_provider,'') NOT IN ('GGSOMA','PREMIUM')`))?.n||0;
+ const pg=Math.max(0,Math.min(Math.floor((total-1)/12)||0,Number(pagina)||0));
+ const rows=await all(`SELECT id,nome,nome_exibicao,api_provider,ativo FROM servicos_catalogo WHERE COALESCE(api_provider,'') NOT IN ('GGSOMA','PREMIUM') ORDER BY nome COLLATE NOCASE LIMIT 12 OFFSET ?`,[pg*12]);
+ const kb=rows.map(r=>[{text:`${r.ativo?'🟢':'🔴'} ${String(r.api_provider||'').toUpperCase()==='DHRU'?'⚡':'🛠'} ${String(r.nome_exibicao||r.nome).slice(0,45)}`,callback_data:`admof_ver_${r.id}`}]);
+ const nav=[];if(pg>0)nav.push({text:'⬅️ Anterior',callback_data:`admof_lista_${pg-1}`});if((pg+1)*12<total)nav.push({text:'Próxima ➡️',callback_data:`admof_lista_${pg+1}`});if(nav.length)kb.push(nav);
+ kb.push([{text:'⬅️ Administração',callback_data:'admin_inicio'}]);
+ return tgBot.sendMessage(chatId,`📷 *FOTOS E OFERTAS*\n\nServiços próprios e DHRU. Selecione o serviço para editar foto, descrição, preço, prazo, nome, categoria ou status.\n\nPágina ${pg+1} • ${total} serviço(s)`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+}
+async function ofertasTelegramVer(chatId,id){
+ const r=await get('SELECT * FROM servicos_catalogo WHERE id=?',[id]);if(!r)return tgBot.sendMessage(chatId,'Serviço não encontrado.');
+ const kb=[ [{text:'📷 Enviar/trocar foto',callback_data:`admof_edit_${id}_foto`},{text:'🗑 Remover foto',callback_data:`admof_rm_${id}`}], [{text:'📝 Descrição',callback_data:`admof_edit_${id}_descricao_exibicao`},{text:'💰 Preço',callback_data:`admof_edit_${id}_preco`}], [{text:'🏷 Nome',callback_data:`admof_edit_${id}_nome_exibicao`},{text:'⏱ Prazo',callback_data:`admof_edit_${id}_prazo`}], [{text:'📂 Categoria',callback_data:`admof_cat_${id}`},{text:r.ativo?'🔴 Desativar':'🟢 Ativar',callback_data:`admof_toggle_${id}`}], [{text:'⬅️ Serviços',callback_data:'admof_lista_0'}] ];
+ const legenda=`📷 OFERTA #${id}\n\n${r.nome_exibicao||r.nome}\n${String(r.api_provider||'').toUpperCase()==='DHRU'?'⚡ API DHRU':'🛠 Serviço próprio'}\n\n📝 ${String(r.descricao_exibicao||r.descricao||'Sem descrição').slice(0,550)}\n💰 ${brl(r.preco_padrao||0)}\n⏱ ${r.prazo||'Não informado'}\n${r.ativo?'🟢 Ativo':'🔴 Inativo'}`;
+ const foto=caminhoFotoDhruServico(r.foto_whatsapp);
+ if(foto){try{return await tgBot.sendPhoto(chatId,fs.createReadStream(foto),{caption:legenda.slice(0,1000),reply_markup:{inline_keyboard:kb}})}catch(e){console.log('Foto oferta TG:',e.message)}}
+ return tgBot.sendMessage(chatId,legenda,{reply_markup:{inline_keyboard:kb}});
+}
+async function ofertasTelegramSalvarFoto(fileId,servicoId){
+ const info=await tgBot.getFile(fileId);
+ if(Number(info.file_size||0)>6*1024*1024)throw new Error('Imagem excede 6 MB');
+ const arquivo=await tgBot.downloadFile(fileId,DHRU_OFFER_DIR);
+ const ext=path.extname(String(info.file_path||'')).toLowerCase();
+ if(!['.jpg','.jpeg','.png','.webp'].includes(ext)){try{fs.unlinkSync(arquivo)}catch(_){}throw new Error('Envie JPG, PNG ou WEBP');}
+ const nome=`dhru_${Date.now()}_${crypto.randomBytes(10).toString('hex')}${ext==='.jpeg'?'.jpg':ext}`;
+ fs.renameSync(arquivo,path.join(DHRU_OFFER_DIR,nome));
+ await run('UPDATE servicos_catalogo SET foto_whatsapp=? WHERE id=?',[nome,servicoId]);
+}
 function tecladoFixoAdminTelegram() { return { remove_keyboard: true }; }
 function adminTelegramKeyboard() {
   return { inline_keyboard: [
     [{ text: '📊 Dashboard', callback_data: 'admin_inicio' }, { text: '📥 Adicionar estoque', callback_data: 'admstock_escolher' }],
     [{ text: '📦 Produtos', callback_data: 'admin_produtos' }, { text: '📂 Categorias', callback_data: 'admin_categorias' }],
+    [{ text: '📷 Fotos e ofertas', callback_data: 'admof_lista_0' }],
     [{ text: '🛒 Pedidos', callback_data: 'admin_pedidos' }, { text: '👥 Clientes', callback_data: 'admin_clientes' }],
     [{ text: '📢 Mensagens', callback_data: 'admin_mensagens' }, { text: '🖼️ Banners', callback_data: 'admin_banners' }],
     [{ text: '📣 Anúncios automáticos', callback_data: 'admin_campanhas' }],
@@ -7205,6 +7259,14 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         await tgBot.answerCallbackQuery(q.id);
         if(await premium.adminCallback(chatId,q.from.id,data))return;
         const adminKey=tgJid(q.from.id);
+        let ofertaCb=data.match(/^admof_lista_(\d+)$/);if(ofertaCb)return ofertasTelegramLista(chatId,Number(ofertaCb[1]));
+        ofertaCb=data.match(/^admof_ver_(\d+)$/);if(ofertaCb)return ofertasTelegramVer(chatId,Number(ofertaCb[1]));
+        ofertaCb=data.match(/^admof_edit_(\d+)_(foto|preco|nome_exibicao|descricao_exibicao|prazo)$/);
+        if(ofertaCb){const id=Number(ofertaCb[1]),campo=ofertaCb[2];if(!await get('SELECT id FROM servicos_catalogo WHERE id=?',[id]))return tgBot.sendMessage(chatId,'Serviço não encontrado.');adminSessao.set(adminKey,{etapa:'admof_editar',servico_id:id,campo});return tgBot.sendMessage(chatId,campo==='foto'?'📷 Envie a foto do serviço agora (até 6 MB). Digite cancelar para sair.':`✏️ Envie o novo valor de ${campo.replaceAll('_',' ')}. Digite cancelar para sair.`);}
+        ofertaCb=data.match(/^admof_rm_(\d+)$/);if(ofertaCb){await run('UPDATE servicos_catalogo SET foto_whatsapp=? WHERE id=?',['',Number(ofertaCb[1])]);return ofertasTelegramVer(chatId,Number(ofertaCb[1]));}
+        ofertaCb=data.match(/^admof_toggle_(\d+)$/);if(ofertaCb){const id=Number(ofertaCb[1]);const r=await get('SELECT ativo,categoria_id FROM servicos_catalogo WHERE id=?',[id]);if(!r)return tgBot.sendMessage(chatId,'Serviço não encontrado.');if(!r.ativo&&!r.categoria_id)return tgBot.sendMessage(chatId,'⚠️ Selecione a categoria antes de ativar.');await run('UPDATE servicos_catalogo SET ativo=? WHERE id=?',[r.ativo?0:1,id]);return ofertasTelegramVer(chatId,id);}
+        ofertaCb=data.match(/^admof_cat_(\d+)$/);if(ofertaCb){const id=Number(ofertaCb[1]);const cats=await all('SELECT id,nome,emoji FROM servicos_categorias WHERE ativo=1 ORDER BY ordem,id');const kb=cats.map(c=>[{text:`${c.emoji||'📂'} ${c.nome}`,callback_data:`admof_setcat_${id}_${c.id}`}]);kb.push([{text:'⬅️ Serviço',callback_data:`admof_ver_${id}`}]);return tgBot.sendMessage(chatId,'📂 Escolha a categoria:',{reply_markup:{inline_keyboard:kb}});}
+        ofertaCb=data.match(/^admof_setcat_(\d+)_(\d+)$/);if(ofertaCb){await run('UPDATE servicos_catalogo SET categoria_id=? WHERE id=?',[Number(ofertaCb[2]),Number(ofertaCb[1])]);return ofertasTelegramVer(chatId,Number(ofertaCb[1]));}
         if(data==='admin_planos_esim'){return enviarListaPlanosAdminTelegram(chatId);}
         if(data==='admin_esim_operadoras'){return listarOperadorasEsimAdmin(chatId);}
         if(data==='admesimop_nova'){adminSessao.set(adminKey,{etapa:'esimop_nova_nome'});await tgBot.sendMessage(chatId,'➕ Digite o nome que aparecerá no botão (ex.: TIM):');return;}
@@ -14358,7 +14420,7 @@ app.get('/admin/servicos/cancelamento', async (req, res) => {
   const rows = await all('SELECT id, nome, ativo, cancelamento_permitido FROM servicos_catalogo ORDER BY id ASC');
   const solicitacoes = await all(`SELECT sc.*, r.nome revenda_nome FROM solicitacoes_cancelamento sc LEFT JOIN revendas r ON r.id=sc.revenda_id ORDER BY sc.id DESC LIMIT 100`);
   let html = `<div class="hero"><h1>❌ Cancelamento de Serviços</h1><p>Escolha quais serviços podem receber solicitação de cancelamento pelos clientes.</p></div>
-  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a><a class="btn purple" href="/admin/servicos/categorias">📂 Categorias</a></div></div>
+  <div class="topbar"><div class="actions"><a class="btn" href="/admin/servicos">🛠 Serviços</a> <a class="btn green" href="/admin/ofertas">📷 Fotos e ofertas</a><a class="btn purple" href="/admin/servicos/cancelamento">❌ Cancelamento</a><a class="btn green" href="/admin/bloqueio-tim-operadores">👷 Operadores Bloqueio TIM</a><a class="btn purple" href="/admin/servicos/categorias">📂 Categorias</a></div></div>
   <div class="card"><h2>Permissões</h2>`;
   if (!rows.length) html += `<div class="empty">Nenhum serviço cadastrado.</div>`;
   for (const item of rows) {
@@ -15038,6 +15100,38 @@ function caminhoFotoDhruServico(nome){
   const local=path.join(DHRU_OFFER_DIR,arq);
   return fs.existsSync(local)?local:'';
 }
+// V232: painel unificado de ofertas para serviços próprios e API DHRU.
+app.get('/admin/ofertas',async(req,res)=>{
+ const rows=await all(`SELECT s.*,c.nome categoria_nome FROM servicos_catalogo s LEFT JOIN servicos_categorias c ON c.id=s.categoria_id WHERE COALESCE(s.api_provider,'') NOT IN ('GGSOMA','PREMIUM') ORDER BY COALESCE(c.ordem,999),s.nome COLLATE NOCASE`);
+ const cats=await all(`SELECT id,nome,emoji FROM servicos_categorias ORDER BY ordem,id`);
+ const opts=(id)=>'<option value="">Sem categoria</option>'+cats.map(c=>`<option value="${c.id}" ${Number(id)===Number(c.id)?'selected':''}>${safeHtml(c.emoji||'')} ${safeHtml(c.nome)}</option>`).join('');
+ const aviso=req.query.ok?`<div class="card">✅ ${safeHtml(req.query.ok)}</div>`:req.query.erro?`<div class="card">⚠️ ${safeHtml(req.query.erro)}</div>`:'';
+ const html=`<h1>📷 Fotos e ofertas dos serviços</h1><p>Edite fotos, descrição, preço, prazo, nome, categoria e status. Funciona para serviços próprios e DHRU; as fotos aparecem nas ofertas do WhatsApp.</p><p><a class="btn" href="/admin/servicos">← Serviços próprios</a> <a class="btn" href="/admin/dhru">API DHRU</a></p>${aviso}`+rows.map(r=>{
+  const foto=caminhoFotoDhruServico(r.foto_whatsapp);
+  const thumb=foto?`<img src="/admin/ofertas/${r.id}/foto" alt="Foto atual" style="max-width:180px;max-height:140px;border-radius:12px;object-fit:contain;display:block;margin:10px 0">`:'<small>Sem foto cadastrada</small>';
+  return `<div class="card" id="oferta-${r.id}"><h3>${safeHtml(r.nome_exibicao||r.nome)} <small>(${String(r.api_provider||'PROPRIO').toUpperCase()==='DHRU'?'DHRU':'PRÓPRIO'}) #${r.id}</small></h3>${thumb}<form action="/admin/ofertas/${r.id}" method="post" enctype="multipart/form-data"><label>Nome para o cliente</label><input name="nome_exibicao" maxlength="180" value="${safeHtml(r.nome_exibicao||r.nome)}"><label>Descrição da oferta</label><textarea name="descricao_exibicao" rows="3" maxlength="1200">${safeHtml(r.descricao_exibicao||r.descricao||'')}</textarea><label>Preço de venda (R$)</label><input name="preco" type="text" value="${Number(r.preco_padrao||0).toFixed(2)}"><label>Prazo</label><input name="prazo" value="${safeHtml(r.prazo||'')}"><label>Categoria</label><select name="categoria_id">${opts(r.categoria_id)}</select><label>Status</label><select name="ativo"><option value="1" ${r.ativo?'selected':''}>Ativo</option><option value="0" ${!r.ativo?'selected':''}>Inativo</option></select><label>📷 Foto JPG / PNG / WEBP (até 6 MB)</label><input type="file" name="foto_whatsapp" accept="image/jpeg,image/png,image/webp"><label><input type="checkbox" name="remover_foto" value="1"> Remover foto atual</label><button class="btn green">💾 Salvar oferta</button></form></div>`;
+ }).join('');
+ res.send(page('Fotos e ofertas',html));
+});
+app.get('/admin/ofertas/:id/foto',async(req,res)=>{
+ const r=await get('SELECT foto_whatsapp FROM servicos_catalogo WHERE id=?',[req.params.id]);const fp=caminhoFotoDhruServico(r?.foto_whatsapp);if(!fp)return res.sendStatus(404);return res.sendFile(fp);
+});
+app.post('/admin/ofertas/:id',uploadFotoDhru,async(req,res)=>{
+ try{
+  const id=Number(req.params.id);const r=await get(`SELECT * FROM servicos_catalogo WHERE id=? AND COALESCE(api_provider,'') NOT IN ('GGSOMA','PREMIUM')`,[id]);if(!r)throw new Error('Serviço não encontrado');
+  const preco=Number(String(req.body.preco||'').replace(',','.'));if(!Number.isFinite(preco)||preco<0)throw new Error('Preço inválido');
+  const cat=Number(req.body.categoria_id)||null;
+  if(req.body.ativo==='1'&&!cat)throw new Error('Selecione a categoria antes de ativar');
+  const foto=req.file?path.basename(req.file.path):req.body.remover_foto==='1'?'':r.foto_whatsapp||'';
+  const nome=String(req.body.nome_exibicao||'').trim().slice(0,180)||r.nome;
+  const desc=String(req.body.descricao_exibicao||'').trim().slice(0,1200);
+  const prazo=String(req.body.prazo||'').trim().slice(0,160);
+  await run(`UPDATE servicos_catalogo SET nome_exibicao=?,descricao_exibicao=?,preco_padrao=?,prazo=?,categoria_id=?,ativo=?,foto_whatsapp=? WHERE id=?`,[nome,desc,preco,prazo,cat,req.body.ativo==='1'?1:0,foto,id]);
+  // DHRU: preço editado pelo administrador é manual para não ser revertido no recálculo automático.
+  if(String(r.api_provider||'').toUpperCase()==='DHRU')await run(`UPDATE servicos_catalogo SET api_price_mode='MANUAL',api_manual_price=? WHERE id=?`,[preco,id]);
+  res.redirect('/admin/ofertas?ok='+encodeURIComponent('Oferta salva: '+nome)+'#oferta-'+id);
+ }catch(e){res.redirect('/admin/ofertas?erro='+encodeURIComponent(e.message));}
+});
 app.get('/admin/dhru', async (req,res) => {
   const tok=await dhruToken(), base=await dhruBaseUrl(), pub=await dhruPublicBase();
   const rows=await all(`SELECT d.*,s.preco_padrao,s.ativo,s.api_price_mode,s.api_margin_pct,s.api_manual_price,s.nome_exibicao,s.categoria_id,s.descricao_exibicao,s.foto_whatsapp FROM dhru_products d LEFT JOIN servicos_catalogo s ON s.id=d.catalogo_id ORDER BY d.nome COLLATE NOCASE`);
