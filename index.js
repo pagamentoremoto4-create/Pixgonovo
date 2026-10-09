@@ -9683,6 +9683,62 @@ function sessaoWhatsAppTemCredenciaisRestauraveis(sessionDir) {
   }
 }
 
+// V237 — proteção conservadora das sessões de criptografia Baileys.
+// Nunca remove chaves, nunca força logout e nunca altera o JID das mensagens.
+const v237DonosPastasWA = new Map();
+const v237FilaCredenciaisWA = new Map();
+const v237FalhasCryptoWA = new Map();
+function v237ChavePastaWA(dir) { return path.resolve(String(dir || '')); }
+function v237ReservarPastaWA(dir, dono) {
+  const chave = v237ChavePastaWA(dir);
+  const atual = v237DonosPastasWA.get(chave);
+  if (atual && atual !== dono) {
+    console.log(`⛔ V237: conexão duplicada bloqueada para pasta de autenticação; ocupada por ${atual}.`);
+    return false;
+  }
+  v237DonosPastasWA.set(chave, dono);
+  return true;
+}
+function v237LiberarPastaWA(dir, dono) {
+  const chave = v237ChavePastaWA(dir);
+  if (v237DonosPastasWA.get(chave) === dono) v237DonosPastasWA.delete(chave);
+}
+function v237SalvarCredenciaisWA(dir, saveCreds, contexto) {
+  const chave = v237ChavePastaWA(dir);
+  const anterior = v237FilaCredenciaisWA.get(chave) || Promise.resolve();
+  const atual = anterior.catch(() => {}).then(() => saveCreds());
+  v237FilaCredenciaisWA.set(chave, atual);
+  atual.catch(e => console.log(`⚠️ V237 SAVE CREDS ${contexto}:`, e.message));
+  atual.finally(() => { if (v237FilaCredenciaisWA.get(chave) === atual) v237FilaCredenciaisWA.delete(chave); }).catch(() => {});
+  return atual;
+}
+function v237LoggerBaileys(pino, contexto) {
+  const configurado = String(process.env.WHATSAPP_LOG_LEVEL || 'silent').toLowerCase();
+  const nivel = configurado === 'silent' ? 'error' : configurado;
+  const stream = {
+    write(linha) {
+      try {
+        const dado = JSON.parse(linha);
+        const mensagem = [dado.msg, dado.err?.message, dado.err?.type, dado.error?.name].filter(Boolean).join(' ');
+        if (/Bad MAC|No matching sessions|No session record|failed to decrypt message/i.test(mensagem)) {
+          const chave = String(contexto);
+          const estado = v237FalhasCryptoWA.get(chave) || { total: 0, ultimoAviso: 0 };
+          estado.total += 1;
+          const agora = Date.now();
+          if (agora - estado.ultimoAviso >= 60000) {
+            estado.ultimoAviso = agora;
+            console.log(`⚠️ V237 CRYPTO ${contexto}: falhas acumuladas=${estado.total}; erro de sessão detectado, Baileys tentará recuperar normalmente. Nenhuma chave apagada.`);
+          }
+          v237FalhasCryptoWA.set(chave, estado);
+          return;
+        }
+      } catch (_) {}
+      if (configurado !== 'silent') process.stdout.write(linha);
+    }
+  };
+  return pino({ level: nivel }, stream);
+}
+
 // V94: mantém todas as credenciais das sessões novas em um caminho canônico
 // dentro do disco persistente (/data/whatsapp-sessions/<session_key>).
 function pastaCanonicaSessaoWhatsApp(sessionKey) {
@@ -9907,6 +9963,11 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     return;
   }
 
+  const v237Dono = `multi:${sessao.id}`;
+  if (!v237ReservarPastaWA(sessao.sessionDir, v237Dono)) {
+    sessao.status = 'ERRO'; sessao.erro = 'Pasta de sessão em uso por outra conexão WhatsApp.';
+    emitirStatusSessaoMulti(sessao); return;
+  }
   sessao.iniciando = true;
   const socketGeneration = Number(sessao.socketGeneration || 0) + 1;
   sessao.socketGeneration = socketGeneration;
@@ -9916,6 +9977,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
   emitirStatusSessaoMulti(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    await (v237FilaCredenciaisWA.get(v237ChavePastaWA(sessao.sessionDir)) || Promise.resolve()).catch(() => {});
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys sessão #${sessao.id}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger sessão #${sessao.id}`);
     const pino = pinoModule.default || pinoModule;
@@ -9924,7 +9986,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.nome);
     if (!versaoWeb) throw new Error('V153: não foi possível resolver uma versão WA Web válida.');
     const socketAtual = makeWASocket({
-      auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
+      auth: state, logger: v237LoggerBaileys(pino, sessao.nome), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false,
@@ -9933,8 +9995,9 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     sessao.socket = socketAtual;
     console.log(`🧩 V151 ${sessao.nome}: socket único #${socketGeneration} iniciado em modo ${sessao.connectionMode}.`);
     socketAtual.ev.on('creds.update', async () => {
+      if (sessao.socket !== socketAtual || sessao.socketGeneration !== socketGeneration) return;
       try {
-        await saveCreds();
+        await v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.nome);
         if (state?.creds?.registered) console.log(`🔐 V151 ${sessao.nome}: credenciais registradas e salvas no socket #${socketGeneration}.`);
       } catch (e) { console.log(`⚠️ V151 SAVE CREDS ${sessao.nome}:`, e.message); }
     });
@@ -9954,7 +10017,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
           // V94: força a gravação final do creds.json no disco persistente assim
           // que o WhatsApp confirma a autenticação. Evita sessão conectada apenas
           // em memória e perdida após restart/deploy.
-          try { await saveCreds(); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
+          try { await v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.nome); } catch (e) { console.log(`⚠️ V94 SAVE CREDS #${sessao.id}:`, e.message); }
           marcarSessaoWhatsAppConectada(sessao.sessionDir);
           sessao.qrReinicios = 0; sessao.reconexaoTentativas = 0; sessao.ultimaConexaoEm = Date.now(); sessao.conectado = true; sessao.qr = null; sessao.status = 'CONECTADO'; sessao.erro = '';
           await atualizarNumeroSessaoMulti(sessao, jidToNumber(socketAtual?.user?.id || ''));
@@ -9968,6 +10031,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
         if (connection === 'close') {
           if (sessao.socket !== socketAtual) return;
           sessao.conectado = false; sessao.socket = null; sessao.qr = null;
+          v237LiberarPastaWA(sessao.sessionDir, v237Dono);
           if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
           const err = lastDisconnect?.error;
           const code = err?.output?.statusCode || err?.statusCode || err?.data?.statusCode || err?.cause?.output?.statusCode || err?.cause?.statusCode;
@@ -9984,8 +10048,8 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
             // ainda estar false, mesmo após "pairing configured successfully".
             // Salva tudo o que o Baileys entregou e faz UMA única restauração
             // controlada com a mesma pasta de autenticação.
-            try { await saveCreds(); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.nome}:`, e.message); }
-            registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V154 ${sessao.nome}`);
+            try { await v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.nome); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.nome}:`, e.message); }
+            registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, () => v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.nome), sessao.sessionDir, `V154 ${sessao.nome}`);
             const podeFinalizar515 = sessao.connectionMode === 'qr' && !opcoes.apos515;
             console.log(`🔄 V154 515 ${sessao.nome}: registered=${registradaAgora} podeFinalizar=${podeFinalizar515}; reinício controlado.`);
             if (registradaAgora || podeFinalizar515) {
@@ -10078,6 +10142,7 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
       }
     });
   } catch (e) {
+    v237LiberarPastaWA(sessao.sessionDir, v237Dono);
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null;
     emitirStatusSessaoMulti(sessao); console.log(`❌ V151 INICIAR SESSÃO #${sessao.id}:`, e.stack || e.message);
     if (sessaoWhatsAppTemCredenciaisRestauraveis(sessao.sessionDir)) {
@@ -10124,6 +10189,7 @@ async function desconectarSessaoWhatsAppMulti(id, apagarCredenciais = true) {
   const socketAtual = sessao.socket;
   try { if (socketAtual && apagarCredenciais) await socketAtual.logout(); else if (socketAtual?.end) socketAtual.end(new Error('desconexão pelo painel')); } catch (_) {}
   if (whatsappSocket === socketAtual) { whatsappSocket = null; conectado = false; whatsappNumeroConectado = ''; whatsappStatus = 'DESCONECTADO'; }
+  v237LiberarPastaWA(sessao.sessionDir, `multi:${sessao.id}`);
   sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.status = 'DESCONECTADO'; sessao.erro = ''; sessao.qrReinicios = 0;
   if (apagarCredenciais) { try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); limparMarcadorSessaoWhatsApp(sessao.sessionDir); }
   emitirStatusSessaoMulti(sessao);
@@ -10232,6 +10298,8 @@ async function processarMensagemSuporte({ numero, nome, texto, jid }) {
 async function iniciarWhatsAppExtra(key, opcoes = {}) {
   const sessao = whatsappExtra[key];
   if (!sessao || !sessao.enabled || sessao.iniciando) return;
+  const v237Dono = `extra:${key}`;
+  if (!v237ReservarPastaWA(sessao.sessionDir, v237Dono)) return;
   sessao.iniciando = true; sessao.status = 'INICIANDO'; sessao.erro = '';
   sessao.connectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
   sessao.pairingNumero = '';
@@ -10240,18 +10308,19 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
   emitirStatusExtra(sessao);
   try {
     fs.mkdirSync(sessao.sessionDir, { recursive: true });
+    await (v237FilaCredenciaisWA.get(v237ChavePastaWA(sessao.sessionDir)) || Promise.resolve()).catch(() => {});
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, `carregar Baileys ${key}`);
     const pinoModule = await comTimeoutWhatsApp(import('pino'), 10000, `carregar logger ${key}`);
     const pino = pinoModule.default || pinoModule;
     const makeWASocket = baileys.default || baileys.makeWASocket;
     const { state, saveCreds } = await comTimeoutWhatsApp(baileys.useMultiFileAuthState(sessao.sessionDir), 15000, `carregar sessão ${key}`);
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, sessao.label);
-    const socketAtual = makeWASocket({ auth: state, logger: pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' }), printQRInTerminal: false,
+    const socketAtual = makeWASocket({ auth: state, logger: v237LoggerBaileys(pino, sessao.label), printQRInTerminal: false,
       ...(versaoWeb ? { version: versaoWeb } : {}),
       browser: baileys.Browsers?.ubuntu ? baileys.Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: false, connectTimeoutMs: 30000, defaultQueryTimeoutMs: 30000, keepAliveIntervalMs: 20000 });
     sessao.socket = socketAtual;
-    socketAtual.ev.on('creds.update', async () => { try { await saveCreds(); } catch (e) { console.log(`⚠️ V150 SAVE CREDS ${sessao.label}:`, e.message); } });
+    socketAtual.ev.on('creds.update', async () => { try { await v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.label); } catch (e) { console.log(`⚠️ V150 SAVE CREDS ${sessao.label}:`, e.message); } });
     socketAtual.ev.on('connection.update', async update => {
       const { connection, lastDisconnect, qr } = update || {};
       if (qr) {
@@ -10265,6 +10334,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         if (sessao.socket !== socketAtual) return;
         sessao.conectado = false;
         sessao.socket = null;
+        v237LiberarPastaWA(sessao.sessionDir, v237Dono);
         const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
         const loggedOut = code === baileys.DisconnectReason?.loggedOut;
         const restartRequired = code === baileys.DisconnectReason?.restartRequired || code === 515;
@@ -10272,8 +10342,8 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
         const podeReiniciarQr = sessao.connectionMode === 'qr' && !loggedOut && sessao.qrReinicios < WHATSAPP_QR_MAX_REINICIOS;
         sessao.qr = null;
         if (restartRequired) {
-          try { await saveCreds(); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.label}:`, e.message); }
-          const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, sessao.sessionDir, `V154 ${sessao.label}`);
+          try { await v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.label); } catch (e) { console.log(`⚠️ V154 SAVE 515 ${sessao.label}:`, e.message); }
+          const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, () => v237SalvarCredenciaisWA(sessao.sessionDir, saveCreds, sessao.label), sessao.sessionDir, `V154 ${sessao.label}`);
           const podeFinalizar515 = sessao.connectionMode === 'qr' && !opcoes.apos515;
           console.log(`🔄 V154 515 ${sessao.label}: registered=${registradaAgora} podeFinalizar=${podeFinalizar515}`);
           if (registradaAgora || podeFinalizar515) {
@@ -10305,6 +10375,7 @@ async function iniciarWhatsAppExtra(key, opcoes = {}) {
     });
     // A sessão de anúncios deliberadamente não registra messages.upsert.
   } catch (e) {
+    v237LiberarPastaWA(sessao.sessionDir, v237Dono);
     sessao.status = 'ERRO'; sessao.erro = e.message || String(e); sessao.conectado = false; sessao.socket = null; emitirStatusExtra(sessao);
     console.log(`❌ INICIAR WHATSAPP ${key}:`, e.stack || e.message);
     if (sessao.connectionMode === 'restaurar' && sessaoWhatsAppRegistrada(sessao.sessionDir)) agendarReconexaoExtra(key);
@@ -10315,6 +10386,7 @@ async function desconectarWhatsAppExtra(key) {
   const sessao = whatsappExtra[key]; if (!sessao) return;
   try { if (sessao.socket) await sessao.socket.logout(); } catch (_) {}
   if (sessao.timer) clearTimeout(sessao.timer);
+  v237LiberarPastaWA(sessao.sessionDir, `extra:${key}`);
   sessao.timer = null; sessao.qrReinicios = 0; sessao.socket = null; sessao.conectado = false; sessao.qr = null; sessao.pairingCode = ''; sessao.pairingNumero = ''; sessao.connectionMode = 'qr'; sessao.numero = ''; sessao.status = 'DESCONECTADO'; sessao.erro = '';
   try { fs.rmSync(sessao.sessionDir, { recursive: true, force: true }); } catch (_) {} fs.mkdirSync(sessao.sessionDir, { recursive: true }); emitirStatusExtra(sessao);
 }
@@ -10497,6 +10569,11 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     return;
   }
 
+  if (!v237ReservarPastaWA(WHATSAPP_SESSION_DIR, 'legacy:services')) {
+    whatsappUltimoErro = 'Pasta de autenticação em uso pela central multissessão.';
+    console.log('⛔ V237: conexão legada impedida para preservar a sessão ativa.');
+    return;
+  }
   whatsappIniciando = true;
   whatsappConnectionMode = opcoes.modo === 'restaurar' ? 'restaurar' : 'qr';
   whatsappPairingNumero = '';
@@ -10514,6 +10591,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     fs.accessSync(WHATSAPP_SESSION_DIR, fs.constants.R_OK | fs.constants.W_OK);
     console.log('✅ Pasta da sessão acessível para leitura e gravação');
 
+    await (v237FilaCredenciaisWA.get(v237ChavePastaWA(WHATSAPP_SESSION_DIR)) || Promise.resolve()).catch(() => {});
     console.log('📦 Carregando Baileys...');
     const baileys = await comTimeoutWhatsApp(import('@whiskeysockets/baileys'), 20000, 'carregar Baileys');
     console.log('✅ Baileys carregado');
@@ -10529,7 +10607,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       15000,
       'carregar sessão'
     );
-    const logger = pino({ level: process.env.WHATSAPP_LOG_LEVEL || 'silent' });
+    const logger = v237LoggerBaileys(pino, 'Bot de Serviços');
     const versaoWeb = await obterVersaoWebWhatsApp(baileys, 'Bot de Serviços');
 
     console.log('🔌 Criando conexão do WhatsApp...');
@@ -10552,7 +10630,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
     whatsappSocket = socketAtual;
     console.log('✅ Conexão criada; aguardando QR Code ou restauração da sessão');
 
-    socketAtual.ev.on('creds.update', async () => { try { await saveCreds(); if (state?.creds?.registered) console.log('🔐 V150 Bot de Serviços: credenciais registradas e salvas.'); } catch (e) { console.log('⚠️ V150 SAVE CREDS BOT:', e.message); } });
+    socketAtual.ev.on('creds.update', async () => { try { await v237SalvarCredenciaisWA(WHATSAPP_SESSION_DIR, saveCreds, 'Bot de Serviços'); if (state?.creds?.registered) console.log('🔐 V150 Bot de Serviços: credenciais registradas e salvas.'); } catch (e) { console.log('⚠️ V150 SAVE CREDS BOT:', e.message); } });
     socketAtual.ev.on('connection.update', async update => {
       try {
         const { connection, lastDisconnect, qr } = update || {};
@@ -10583,6 +10661,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           io.emit('whatsapp-status', { status: whatsappStatus, numero: whatsappNumeroConectado });
         }
         if (connection === 'close') {
+          v237LiberarPastaWA(WHATSAPP_SESSION_DIR, 'legacy:services');
           if (whatsappSocket !== socketAtual) return;
           conectado = false;
           whatsappSocket = null;
@@ -10594,8 +10673,8 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
           qrCodeBase64 = null;
           console.log('⚠️ WHATSAPP DESCONECTADO:', statusCode || motivo);
           if (restartRequired) {
-            try { await saveCreds(); } catch (e) { console.log('⚠️ V154 SAVE 515 Bot de Serviços:', e.message); }
-            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, saveCreds, WHATSAPP_SESSION_DIR, 'V154 Bot de Serviços');
+            try { await v237SalvarCredenciaisWA(WHATSAPP_SESSION_DIR, saveCreds, 'Bot de Serviços'); } catch (e) { console.log('⚠️ V154 SAVE 515 Bot de Serviços:', e.message); }
+            const registradaAgora = await confirmarCredenciaisRegistradasWhatsApp(state, () => v237SalvarCredenciaisWA(WHATSAPP_SESSION_DIR, saveCreds, 'Bot de Serviços'), WHATSAPP_SESSION_DIR, 'V154 Bot de Serviços');
             const podeFinalizar515 = whatsappConnectionMode === 'qr' && !opcoes.apos515;
             console.log(`🔄 V154 515 Bot de Serviços: registered=${registradaAgora} podeFinalizar=${podeFinalizar515} mode=${whatsappConnectionMode}`);
             if (registradaAgora || podeFinalizar515) {
@@ -10689,6 +10768,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
       }
     });
   } catch (e) {
+    v237LiberarPastaWA(WHATSAPP_SESSION_DIR, 'legacy:services');
     whatsappUltimoErro = e.message || String(e);
     whatsappStatus = 'ERRO';
     conectado = false;
@@ -10704,6 +10784,7 @@ async function iniciarWhatsAppQrCode(opcoes = {}) {
 }
 
 async function desconectarWhatsApp() {
+  v237LiberarPastaWA(WHATSAPP_SESSION_DIR, 'legacy:services');
   try { if (whatsappSocket) await whatsappSocket.logout(); } catch (e) { console.log('⚠️ LOGOUT WHATSAPP:', e.message); }
   whatsappSocket = null;
   whatsappQrReinicios = 0;
