@@ -1552,6 +1552,27 @@ function dhruStatusNormalizado(valor){
   if(['pending','queued','waiting','accepted','submitted','new','pendente','enviado'].includes(st)) return 'PENDENTE';
   return '';
 }
+// V239: confirmação individual editada, preservando dados e sessão de origem.
+async function dhruEditarPendenteWhatsApp(pedidoId,destino){
+  if(isTgJid(destino)||/^\d+$/.test(String(destino)))return false;
+  if(!WHATSAPP_ENABLED||!['baileys','qrcode'].includes(WHATSAPP_PROVIDER))return false;
+  const numero=normalizarNumeroWhatsApp(String(destino).startsWith('wa:')?String(destino).slice(3):jidToNumber(destino));
+  if(!numero)return false;
+  try{
+    const registro=JSON.parse(await getConfig(`dhru_v239_pendente_${pedidoId}_${numero}`,'null'));
+    if(!registro?.key?.id||!registro.key.remoteJid||!registro.texto)return false;
+    const idade=Date.now()-Number(registro.enviadoEm);
+    // Margem de 10 segundos para transmissão. Editar não reinicia o prazo.
+    if(!Number.isFinite(idade)||idade<0||idade>=15*60*1000-10000)return false;
+    const sessao=registro.sessaoId?whatsappSessoes.get(Number(registro.sessaoId)):null;
+    const sock=registro.sessaoId?(sessao?.conectado?sessao.socket:null):(conectado?whatsappSocket:null);
+    if(!sock)return false;
+    const texto=registro.texto.replace(/Status:\s*PENDENTE/i,'Status: EM PROCESSO');
+    if(texto===registro.texto)return false;
+    await sock.sendMessage(registro.key.remoteJid,{text:texto,edit:registro.key});
+    return true;
+  }catch(e){console.log('⚠️ DHRU edição indisponível; usando novo aviso:',pedidoId,e.message);return false;}
+}
 const dhruFeedbackFilas=new Map();
 async function processarFeedbackDhru(body){
   const chave=String(body?.reference_id||'').trim();
@@ -1572,7 +1593,8 @@ async function dhruAvisarProcesso(pedido,cliente){
     const key=`dhru_v238_processo_${pedido.id}_${destino}`;
     if((await getConfig(key,'0'))==='1')continue;
     try{
-      const ok=await enviarTexto(destino,mensagem);
+      const editado=await dhruEditarPendenteWhatsApp(pedido.id,destino);
+      const ok=editado||await enviarTexto(destino,mensagem);
       if(ok!==false)await setConfig(key,'1');
     }catch(e){console.log('⚠️ DHRU aviso em processo',pedido.id,e.message);}
   }
@@ -3480,7 +3502,7 @@ async function resolverJidWhatsAppEnvio(numero, socketPreferido=null) {
   return numberToJid(number);
 }
 
-async function enviarWhatsAppTexto(numero, text) {
+async function enviarWhatsAppTexto(numero, text, opcoes = {}) {
   if (!WHATSAPP_ENABLED) {
     console.log('⚠️ Envio WhatsApp desativado por WHATSAPP_ENABLED.');
     return false;
@@ -3503,6 +3525,10 @@ async function enviarWhatsAppTexto(numero, text) {
       const destino = await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
       const envio = await sock.sendMessage(destino, { text: String(text || '') });
+      if(opcoes.dhruPedidoId && envio?.key?.id){
+        try{await setConfig(`dhru_v239_pendente_${opcoes.dhruPedidoId}_${number}`,JSON.stringify({key:envio.key,sessaoId:sessaoBot?.id||null,enviadoEm:Date.now(),texto:String(text||'')}));}
+        catch(e){console.log('⚠️ DHRU referência não salva:',opcoes.dhruPedidoId,e.message);}
+      }
       console.log(`✅ V4.9.5.4 WhatsApp enviado para ${number} (${destino}) id=${envio?.key?.id || 'sem-id'}`);
       return true;
     }
@@ -3522,7 +3548,7 @@ async function enviarWhatsAppTexto(numero, text) {
   }
   return false;
 }
-async function enviarTexto(to, text) {
+async function enviarTexto(to, text, opcoes = {}) {
   try {
     if (!to) return false;
     if (isTgJid(to) || /^\d+$/.test(String(to))) {
@@ -3532,9 +3558,9 @@ async function enviarTexto(to, text) {
       await tgBot.sendMessage(chatId, String(text || ''));
       return true;
     }
-    if (String(to).startsWith('wa:')) return await enviarWhatsAppTexto(String(to).slice(3), text);
-    if (String(to).includes('@s.whatsapp.net')) return await enviarWhatsAppTexto(jidToNumber(to), text);
-    return await enviarWhatsAppTexto(to, text);
+    if (String(to).startsWith('wa:')) return await enviarWhatsAppTexto(String(to).slice(3), text, opcoes);
+    if (String(to).includes('@s.whatsapp.net')) return await enviarWhatsAppTexto(jidToNumber(to), text, opcoes);
+    return await enviarWhatsAppTexto(to, text, opcoes);
   } catch (e) { console.log('❌ ERRO ENVIAR TEXTO:', e.message); }
   return false;
 }
@@ -5326,7 +5352,7 @@ Digite *menu* para voltar.`);
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido Telegram', `${cliente.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(cliente, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
+      await enviarParaCanaisCliente(cliente, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.nome}\n${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from, {dhruPedidoId:servico.api_provider==='DHRU'?criados[0].id:null});
       return;
     }
     notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
@@ -7012,7 +7038,7 @@ ${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoP
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
-📍 Status: PENDENTE`, from);
+📍 Status: PENDENTE`, from, {dhruPedidoId:servico.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
     if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
       for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
     }
@@ -7052,7 +7078,7 @@ async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entrada
   notificarPainel('pedido','🔔 Novo pedido WhatsApp',`${cliente.nome} - ${servico.nome}`);
   await avisarNovoPedidoAdmins(pedido);
   const dadosPt=await dhruEntradaPedidoPt(servico,entradaSerializada);
-  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n📋 Pedido: #${ins.lastID}\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n📍 *Status: PENDENTE*`,from);
+  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n📋 Pedido: #${ins.lastID}\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n📍 *Status: PENDENTE*`,from,{dhruPedidoId:ins.lastID});
   try{await executarPedidoDhru(ins.lastID);}catch(e){console.log('❌ DHRU pedido',ins.lastID,e.message);}
   return true;
 }
@@ -8102,7 +8128,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n📋 Pedido: #${criados[0].id}\n🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n📋 Pedido: #${criados[0].id}\n🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from, {dhruPedidoId:servico.api_provider==='DHRU'?criados[0].id:null});
       return;
     }
 
@@ -9327,7 +9353,7 @@ ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-📍 Status: PENDENTE`, jid);
+📍 Status: PENDENTE`, jid, {dhruPedidoId:servico.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
   if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
@@ -9459,7 +9485,7 @@ async function finalizarPedido(pedido, opcoes = {}) {
   if (opcoes.notificarCliente !== false) await notificarPedido(atualizado, 'finalizar');
 }
 
-async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '') {
+async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '', opcoes = {}) {
   const destinos = new Set();
   const telegramId = cliente?.telegram_id;
   const whatsappNumero = normalizarNumeroWhatsApp(cliente?.whatsapp);
@@ -9470,7 +9496,7 @@ async function enviarParaCanaisCliente(cliente, mensagem, fallbackDestino = '') 
   let enviados = 0;
   for (const destino of destinos) {
     try {
-      const ok = await enviarTexto(destino, mensagem);
+      const ok = await enviarTexto(destino, mensagem, opcoes);
       if (ok !== false) enviados++;
     } catch (e) {
       console.log('⚠️ FALHA ENVIO MULTICANAL:', destino, e.message);
@@ -12799,7 +12825,7 @@ app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   if(modalidade==='PRE_PAGO'&&criados.length)await run('UPDATE revendas SET saldo=MAX(0,saldo-?),atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[preco*criados.length,atual.id]);
   if(!criados.length)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro','Nenhum pedido novo foi criado; os itens já estão em andamento.');
   notificarPainel('pedido','🌐 Novo pedido pelo site',`${atual.nome} - ${s.nome}`);if(criados.length===1)await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?',[criados[0].id]));else await avisarNovoLoteAdmins(atual,s,criados.length,preco*criados.length);
-  await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}${val.invalidos?.length?'\n\n'+avisoImeisInvalidos(val.invalidos):''}`,destino);
+  await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}${val.invalidos?.length?'\n\n'+avisoImeisInvalidos(val.invalidos):''}`,destino,{dhruPedidoId:s.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
   if(['DHRU','GGSOMA'].includes(s.api_provider))for(const p of criados){try{await executarPedidoDhru(p.id)}catch(e){console.log('❌ DHRU site',p.id,e.message)}}
   clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.${val.invalidos?.length?' '+avisoImeisInvalidos(val.invalidos):''}`);
 });
