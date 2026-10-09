@@ -1609,10 +1609,12 @@ async function processarFeedbackDhruInterno(body){
     const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
     const ok=['success','completed','complete','done'].includes(status),fail=['rejected','reject','failed','failure','cancelled','canceled'].includes(status);
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finalizado_em END WHERE id=?`,[orderId,ok?'CONCLUIDA':fail?'ERRO':(status.toUpperCase()||'PROCESSANDO'),replay,replay,fail?replay:'',ok||fail,execId]);
-    if(ok&&replay){
+    if(ok&&replay&&!Number(row.resultado_entregue)){
       const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');
-      if(numero){ await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId)); consultaDhruStatusPrivado.delete(execId); await consultaEnviarDhruCompletoPrivado(`wa:${numero}`,replay); }
+      if(numero){await consultaEnviarDhruCompletoPrivado(`wa:${numero}`,replay);await run(`UPDATE consulta_dhru_execucoes SET resultado_entregue=1 WHERE id=?`,[execId]);}
       try{await avisarGrupoMovimentacao('consulta',row.cliente_nome||'Cliente',await nomeConsultaExecucao(row));}catch(_){}
+    }else if(['in-process','in_process','processing','processando'].includes(status)){
+      await consultaDhruAtualizarCartao(execId,'EM PROCESSO');
     }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId));consultaDhruStatusPrivado.delete(execId);if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
     return {consultaPrivadaId:execId,status,replay};
   }
@@ -1626,8 +1628,18 @@ async function processarFeedbackDhruInterno(body){
     const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderId,(status||'PROCESSANDO').toUpperCase(),replay,replay,execId]);
     if(['success','completed','complete','done'].includes(status) && replay){
-      if(consultaDhruEmMemoria?.id===execId) await consultaDhruEntregar(consultaDhruEmMemoria,replay);
-      else await run(`UPDATE consulta_dhru_execucoes SET status='CONCLUIDA_PENDENTE_ENTREGA',resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[replay,execId]);
+      if(consultaDhruEmMemoria?.id===execId&&!Number(row.resultado_entregue)) await consultaDhruEntregar(consultaDhruEmMemoria,replay);
+      else if(!Number(row.resultado_entregue)){
+        // V240: conclusão após reinício ou liberação do grupo; não depende de memória.
+        const sessao=await obterSessaoBotConectada().catch(()=>null);
+        const sock=sessao?.socket||(conectado?whatsappSocket:null);
+        if(sock&&row.grupo_whatsapp){
+          const ctx={...row,socket:sock,grupo:row.grupo_whatsapp};
+          try{await consultaDhruEntregar(ctx,replay);}catch(e){console.log('⚠️ V240 ENTREGA GRUPO',execId,e.message);await run(`UPDATE consulta_dhru_execucoes SET status='CONCLUIDA_PENDENTE_ENTREGA',resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[replay,execId]);}
+        }else await run(`UPDATE consulta_dhru_execucoes SET status='CONCLUIDA_PENDENTE_ENTREGA',resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[replay,execId]);
+      }
+    }else if(['in-process','in_process','processing','processando'].includes(status)){
+      await consultaDhruAtualizarCartao(execId,'EM PROCESSO');
     }else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
       await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(replay||`Dhru: ${status}`).slice(0,800),execId]);
       if(consultaDhruEmMemoria?.id===execId){
@@ -2328,6 +2340,12 @@ async function initDB() {
     atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP,
     finalizado_em TEXT
   )`);
+  // V240: persistência do cartão de acompanhamento e prevenção de entregas repetidas.
+  await addColumnIfMissing('consulta_dhru_execucoes','mensagem_jid','TEXT');
+  await addColumnIfMissing('consulta_dhru_execucoes','mensagem_key','TEXT');
+  await addColumnIfMissing('consulta_dhru_execucoes','mensagem_enviada_em','INTEGER');
+  await addColumnIfMissing('consulta_dhru_execucoes','resultado_entregue','INTEGER DEFAULT 0');
+  await addColumnIfMissing('consulta_dhru_execucoes','aviso_processo','INTEGER DEFAULT 0');
   for (const c of ['/check','/xiaomi','/converter']) {
     await run(`INSERT OR IGNORE INTO consulta_dhru_comandos(comando,nome_exibicao,ativo) VALUES(?,?,1)`,[c,c.slice(1).toUpperCase()]);
   }
@@ -5598,6 +5616,57 @@ async function consultaPrivadaEnviarProcessando(from,nome,dado){
 async function consultaPrivadaApagarProcessando(status){
   try{if(status?.jid&&status?.key){const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(sock)await sock.sendMessage(status.jid,{delete:status.key});}}catch(e){console.log('⚠️ APAGAR PROCESSANDO:',e.message)}
 }
+// V240: cartão de status editável, com fallback quando WhatsApp não aceita edição.
+function consultaDhruTextoStatus(row,fase){
+  const nome=String(row?.nome_exibicao||row?.comando||'Consulta DHRU');
+  const id=Number(row?.id||0);
+  const label=fase==='EM PROCESSO'?'🔵 *EM PROCESSO*':'🟡 *PENDENTE*';
+  const info=fase==='EM PROCESSO'?'O fornecedor iniciou sua consulta.':'Pedido recebido. Aguardando o fornecedor iniciar.';
+  return `🔎 *CONSULTA DHRU #${id}*\n📋 ${nome}\n\n${label}\n${info}`;
+}
+async function consultaDhruAtualizarCartao(execId,fase){
+  const row=await get(`SELECT e.*,c.comando,c.nome_exibicao FROM consulta_dhru_execucoes e LEFT JOIN consulta_dhru_comandos c ON c.id=e.comando_id WHERE e.id=?`,[execId]);
+  if(!row||Number(row.resultado_entregue))return;
+  const destino=String(row.grupo_whatsapp||row.cliente_jid||'');
+  const texto=consultaDhruTextoStatus(row,fase);
+  const sessao=await obterSessaoBotConectada().catch(()=>null);
+  const sock=(row.grupo_whatsapp?consultaDhruEmMemoria?.socket:null)||sessao?.socket||(conectado?whatsappSocket:null);
+  if(!sock||!destino)return;
+  if(fase==='EM PROCESSO'&&Number(row.aviso_processo))return;
+  let editado=false;
+  if(fase==='EM PROCESSO'&&row.mensagem_key&&row.mensagem_jid&&Date.now()-Number(row.mensagem_enviada_em||0)<14*60*1000){
+    try{const key=JSON.parse(row.mensagem_key);await sock.sendMessage(row.mensagem_jid,{text:texto,edit:key});editado=true;}catch(e){console.log('⚠️ V240 EDIÇÃO CONSULTA DHRU:',e.message);}
+  }
+  if(!editado){
+    try{const jid=row.mensagem_jid|| (row.grupo_whatsapp?destino:await resolverJidWhatsAppEnvio(normalizarNumeroWhatsApp(jidToNumber(destino)||destino),sock));
+      const sent=await sock.sendMessage(jid,{text:texto});
+      if(fase==='PENDENTE'&&sent?.key)await run(`UPDATE consulta_dhru_execucoes SET mensagem_jid=?,mensagem_key=?,mensagem_enviada_em=? WHERE id=?`,[jid,JSON.stringify(sent.key),Date.now(),execId]);
+    }catch(e){console.log('⚠️ V240 AVISO CONSULTA DHRU:',e.message);return;}
+  }
+  if(fase==='EM PROCESSO')await run(`UPDATE consulta_dhru_execucoes SET aviso_processo=1 WHERE id=?`,[execId]);
+}
+async function consultaDhruStatusRecebido(execId,uuid){
+  await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status='PENDENTE',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[uuid||'',execId]);
+  await consultaDhruAtualizarCartao(execId,'PENDENTE');
+}
+let consultaDhruPollRodando=false;
+async function consultaDhruPollPersistente(){
+  if(consultaDhruPollRodando)return;
+  consultaDhruPollRodando=true;
+  try{
+    const rows=await all(`SELECT * FROM consulta_dhru_execucoes WHERE COALESCE(order_uuid,'')<>'' AND COALESCE(resultado_entregue,0)=0 AND UPPER(COALESCE(status,'')) IN ('PENDENTE','PROCESSANDO','IN-PROCESS','IN_PROCESS','EM PROCESSO','AGUARDANDO_FEEDBACK') ORDER BY atualizado_em ASC LIMIT 25`);
+    for(const row of rows){try{
+      const resp=await consultarPedidoDhru(row.order_uuid),d=resp?.data||{},st=String(d.status||'').toLowerCase(),replay=dhruDecodeReplay(d.replay||d.reply||d.result||d.message||'');
+      if(['success','completed','complete','done'].includes(st)&&replay){await processarFeedbackDhru({reference_id:`${row.grupo_whatsapp?'group':'private'}-${row.id}`,order_id:row.order_uuid,status:st,replay});continue;}
+      if(['rejected','reject','failed','failure','cancelled','canceled'].includes(st)){await processarFeedbackDhru({reference_id:`${row.grupo_whatsapp?'group':'private'}-${row.id}`,order_id:row.order_uuid,status:st,replay});continue;}
+      if(['in-process','in_process','processing','processando','em processo'].includes(st)){
+        await run(`UPDATE consulta_dhru_execucoes SET status='PROCESSANDO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND COALESCE(resultado_entregue,0)=0`,[row.id]);
+        await consultaDhruAtualizarCartao(row.id,'EM PROCESSO');
+      }
+    }catch(e){console.log('⚠️ V240 POLLING CONSULTA DHRU',row.id,e.message);}}
+  }finally{consultaDhruPollRodando=false;}
+}
+setInterval(()=>consultaDhruPollPersistente().catch(e=>console.log('⚠️ V240 POLLING:',e.message)),20000).unref?.();
 const consultaDhruStatusPrivado=new Map();
 // V227: entrega fiel de TODOS os campos retornados pela DHRU, sem resumo.
 function consultaFormatarDhruPrivado(bruto){
@@ -6267,8 +6336,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
       try {
         const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(mapaDhruSolto.id)||null,Number(mapaDhruSolto.servico_id),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
         const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(prod.product_uuid,valores,ref);
-        await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
-        consultaDhruStatusPrivado.set(r.lastID,await consultaPrivadaEnviarProcessando(from,String(mapaDhruSolto.nome_exibicao||mapaDhruSolto.comando||'Consulta'),resto));
+        await consultaDhruStatusRecebido(r.lastID,envio.orderUuid||'');
       } catch(e) { await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`); }
       return;
     }
@@ -6491,9 +6559,8 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
     try{
       const r=await run(`INSERT INTO consulta_dhru_execucoes(comando_id,servico_id,cliente_jid,cliente_nome,grupo_whatsapp,entrada,status) VALUES(?,?,?,?,?,?,'ENVIANDO')`,[Number(sess.comandoId)||null,Number(sess.servicoId),numberToJid(numeroNorm),cliente.nome||nome||'Cliente','',JSON.stringify(valores)]);
       const ref=`private-${r.lastID}`; const envio=await dhruEnviarPedidoOficial(sess.produtoUuid,valores,ref);
-      await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[envio.orderUuid||'',envio.orderUuid?'PROCESSANDO':'AGUARDANDO_FEEDBACK',r.lastID]);
       await salvarSessaoPedido(from,{etapa:'hub_menu'});
-      consultaDhruStatusPrivado.set(r.lastID,await consultaPrivadaEnviarProcessando(from,String(sess.nomeComando||'Consulta'),Object.values(valores).join(' | ')));
+      await consultaDhruStatusRecebido(r.lastID,envio.orderUuid||'');
     }catch(e){await enviarTexto(from,`❌ Não foi possível iniciar a consulta agora.\n${String(e.message||e)}`);}
     return;
   }
@@ -11841,7 +11908,7 @@ async function consultaDhruEntregar(ctx,resultado){
     await ctx.socket.sendMessage(ctx.grupo,{text:resultadoCliente.slice(i,i+LIMITE)});
   }
 
-  await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[bruto,ctx.id]);
+  await run(`UPDATE consulta_dhru_execucoes SET status='FINALIZADA',resultado=?,resultado_entregue=1,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[bruto,ctx.id]);
   await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null;
 }
 async function consultaDhruAcompanhar(ctx){
@@ -11883,12 +11950,12 @@ async function consultaDhruExecutarGrupo(socketAtual,msg,grupo,participante,text
     const order=envio.orderUuid||'';
     ctx.order_uuid=order||null;
     ctx.aguardando_feedback=!order;
-    await run(`UPDATE consulta_dhru_execucoes SET order_uuid=?,status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[order,order?'PROCESSANDO':'AGUARDANDO_FEEDBACK',ctx.id]);
+    await consultaDhruStatusRecebido(ctx.id,order);
     // V206: segurança exclusiva das consultas Dhru do grupo: libera em no máximo 60s, sem cancelar o retorno do fornecedor.
     setTimeout(()=>{ if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruLiberarGrupo(ctx).catch(()=>{}); },60000);
     // Se a API já devolveu order_uuid, acompanha por polling; caso contrário o mesmo
     // feedback_url usado pelos pedidos normais concluirá a consulta via reference_id group-ID.
-    if(order) consultaDhruAcompanhar(ctx).catch(e=>console.log('❌ DHRU GRUPO',e.message));
+    // V240: acompanhamento persistente centralizado; sem dois pollers para o mesmo pedido.
     return true;
   }catch(e){
     await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(e.message).slice(0,800),ctx.id]);
@@ -12025,9 +12092,11 @@ function registrarSaudacaoEntradaGrupoConsultas(socketAtual,sessao=null){
   });
 }
 
+// V240: a assinatura utiliza exclusivamente os meios ativos no painel geral.
 async function consultaAssinaturaGateway(){
-  const g=String(await getConfig('consulta_assinatura_gateway','mercadopago')).toLowerCase();
-  return ['pixgo','mercadopago'].includes(g)?g:'mercadopago';
+  const cfg=await gatewaysPagamentoAtivos();
+  if(!cfg.lista.length) return null;
+  return cfg.lista.includes(cfg.padrao)?cfg.padrao:cfg.lista[0];
 }
 async function consultaAssinaturaPromocaoConfig(){
   const modelosSalvos=String(await getConfig('consulta_promo_modelos_json','')||'').trim();
@@ -12081,16 +12150,15 @@ async function consultaAssinaturaClienteCadastro(jid,nome='Cliente'){
 }
 async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   const cliente=await consultaAssinaturaClienteCadastro(jid,nome), gateway=await consultaAssinaturaGateway();
-  const pgcfg=await getPagamentoConfig();
-  if((gateway==='pixgo'&&!pgcfg.pixgoAtivo)||(gateway==='mercadopago'&&!pgcfg.mercadoPagoAtivo)){
-    await sock.sendMessage(grupo,{text:`⚠️ ${nomeGateway(gateway)} está desativado nas formas de pagamento. Fale com o administrador.`}); return true;
+  if(!gateway){
+    await sock.sendMessage(grupo,{text:'⚠️ Nenhuma forma de pagamento está ativa no painel. Fale com o administrador.'}); return true;
   }
   const preco=await consultaAssinaturaPrecoPlano(plano);
   let documento='';
   if(gateway==='pixgo'){
     documento=String(cliente.revenda?.pix_documento||'').replace(/\D/g,'');
     if(![11,14].includes(documento.length)){
-      await sock.sendMessage(grupo,{text:`⚠️ @${cliente.numero}, para gerar o PIX pela PixGo é necessário ter CPF/CNPJ cadastrado na sua conta. Atualize seu cadastro com o suporte ou aguarde o administrador selecionar Mercado Pago.`,mentions:[jid]}); return true;
+      await sock.sendMessage(grupo,{text:`⚠️ @${cliente.numero}, para gerar o PIX pela PixGo é necessário ter CPF/CNPJ cadastrado na sua conta. Atualize seu cadastro com o suporte ou entre em contato com o suporte.`,mentions:[jid]}); return true;
     }
   }
   await sock.sendMessage(grupo,{text:`⏳ @${cliente.numero}, gerando PIX de ${brl(preco.final)} para o plano ${plano.nome}...`,mentions:[jid]});
@@ -12486,7 +12554,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="card"><h2>💎 Controle de assinaturas</h2><p class="muted">Quando ativado, todos os comandos Yan e Dhru verificam a validade do assinante antes de iniciar. /comandos e /assinatura continuam disponíveis.</p><form method="post" action="/admin/consultas-assinatura/assinaturas/config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${assinaturaControle?'checked':''}> Exigir assinatura ativa para consultar</label><button class="btn green">💾 Salvar controle</button></form></div>
   <div class="card"><h2>💰 Planos de assinatura</h2><p class="muted">Planos padrão: 1 dia R$ 10, 3 dias R$ 13, 7 dias R$ 17, 15 dias R$ 30 e 30 dias R$ 50. Você pode editar ou criar novos.</p><form method="post" action="/admin/consultas-assinatura/plano/novo" class="forms-inline"><input name="nome" placeholder="Nome do plano" required><input name="dias" type="number" min="1" placeholder="Dias" required><input name="preco" placeholder="Preço" required><button class="btn green">➕ Novo plano</button></form><table style="margin-top:12px"><tr><th>ID</th><th>Configuração</th></tr>${assinaturaPlanosRows}</table></div>
   <div class="card"><h2>👥 Assinantes do grupo</h2><p class="muted">Na ativação manual, selecione um cliente já cadastrado no sistema. Ao renovar uma assinatura ativa, os dias são somados ao vencimento atual.</p><form method="post" action="/admin/consultas-assinatura/assinante/ativar" class="forms-inline"><select name="cliente_id" required><option value="">🔎 Selecione o cliente...</option>${assinaturaClienteOpts}</select><select name="plano_id" required><option value="">Escolha o plano...</option>${assinaturaPlanoOpts}</select><button class="btn green">✅ Ativar assinatura</button></form><table style="margin-top:14px"><tr><th>Cliente</th><th>Plano</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr>${assinaturaAssinantesRows}</table></div>
-  <div class="card"><h2>💳 Pagamento automático da assinatura</h2><p class="muted">Escolha qual gateway será usado pelo comando /assinar. O cliente não escolhe o provedor: o painel define.</p><form method="post" action="/admin/consultas-assinatura/pagamento-config" class="forms-inline"><select name="gateway"><option value="pixgo" ${assinaturaGateway==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${assinaturaGateway==='mercadopago'?'selected':''}>Mercado Pago</option></select><button class="btn green">💾 Salvar gateway</button></form><small>PixGo exige CPF/CNPJ cadastrado no cliente. Mercado Pago gera o PIX sem pedir documento no grupo.</small></div>
+  <div class="card"><h2>💳 Pagamento automático da assinatura</h2><p class="muted">O ConsultaVIP usa automaticamente a forma de pagamento ativa e prioritária configurada no painel principal.</p><p><b>Gateway atual:</b> ${safeHtml(assinaturaGateway?nomeGateway(assinaturaGateway):'Nenhum ativo')}</p><small>Para trocar o provedor, utilize Formas de Pagamento no painel principal. PixGo exige CPF/CNPJ cadastrado no cliente.</small></div>
   <div class="card"><h2>🎁 Promoção</h2><p class="muted">Aplique desconto percentual em um plano e deixe o bot anunciar automaticamente no grupo.</p><form method="post" action="/admin/consultas-assinatura/promocao-config"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${promoCfg.ativo?'checked':''}> Ativar promoção</label><label>Plano promocional</label><select name="plano_id"><option value="">Selecione...</option>${assinaturaPlanos.filter(p=>Number(p.ativo)).map(p=>`<option value="${p.id}" ${Number(promoCfg.planoId)===Number(p.id)?'selected':''}>${safeHtml(p.nome)} — ${safeHtml(brl(p.preco))}</option>`).join('')}</select><label>Desconto (%)</label><input name="percentual" type="number" min="0" max="100" step="0.01" value="${safeHtml(String(promoCfg.percentual))}"><label>Início (opcional)</label><input name="inicio" type="datetime-local" value="${safeHtml(promoCfg.inicio?promoCfg.inicio.slice(0,16):'')}"><label>Fim (opcional)</label><input name="fim" type="datetime-local" value="${safeHtml(promoCfg.fim?promoCfg.fim.slice(0,16):'')}"><label>Anunciar a cada quantas horas?</label><input name="intervalo_horas" type="number" min="1" max="168" value="${safeHtml(String(promoCfg.intervaloHoras))}"><h3>Mensagens prontas</h3>${promoCfg.modelos.map((m,i)=>`<label>Modelo ${i+1}</label><textarea name="modelo_${i}" rows="4">${safeHtml(m)}</textarea>`).join('')}<div class="actions"><button class="btn green">💾 Salvar promoção</button><button class="btn" name="acao" value="restaurar">↩ Restaurar mensagens</button></div></form></div>
   <div class="card"><h2>🔔 Renovação e indicação</h2><form method="post" action="/admin/consultas-assinatura/bonus-config"><label><input style="width:auto" type="checkbox" name="bonus_ativo" value="1" ${bonusRenovAtivo?'checked':''}> Bônus para renovação antes do vencimento</label><input name="bonus_dias" type="number" min="0" max="365" value="${bonusRenovDias}" placeholder="Dias de bônus"><label><input style="width:auto" type="checkbox" name="indicacao_ativa" value="1" ${indicacaoAtiva?'checked':''}> Sistema de indicação</label><input name="indicacao_bonus" type="number" min="0" max="365" value="${indicacaoBonus}" placeholder="Dias por indicação convertida"><button class="btn green">💾 Salvar regras</button></form><small>Comandos do cliente: /indicacao e /indicado NUMERO. O bônus da indicação só é liberado após a primeira assinatura paga do indicado.</small></div>
   <div class="grid"><div class="card"><h3>Assinantes ativos</h3><p><b>${totalAtivos}</b></p></div><div class="card"><h3>Receita de assinaturas no mês</h3><p><b>${safeHtml(brl(receitaMes?.total||0))}</b></p></div><div class="card"><h3>Consultas Yan no mês</h3><p><b>${Number(consultasMes?.total||0)}</b></p></div></div>
@@ -12557,7 +12625,7 @@ app.post('/admin/consultas-assinatura/assinante/ativar',async(req,res)=>{
   catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/pagamento-config',async(req,res)=>{
-  try{ const g=['pixgo','mercadopago'].includes(String(req.body.gateway||''))?String(req.body.gateway):'mercadopago'; await setConfig('consulta_assinatura_gateway',g); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(`Pagamento das assinaturas: ${nomeGateway(g)}.`)); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
+  try{ const g=await consultaAssinaturaGateway(); res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(g?`ConsultaVIP utiliza ${nomeGateway(g)} (painel principal).`:'Ative um meio de pagamento no painel principal.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/consultas-assinatura/promocao-config',async(req,res)=>{
   try{ if(req.body.acao==='restaurar'){await setConfig('consulta_promo_modelos_json',JSON.stringify(CONSULTA_PROMO_MODELOS_PADRAO));} else { const pct=Math.max(0,Math.min(100,Number(String(req.body.percentual||'0').replace(',','.'))||0)); await setConfig('consulta_promo_ativo',req.body.ativo==='1'?'1':'0'); await setConfig('consulta_promo_plano_id',String(Number(req.body.plano_id||0))); await setConfig('consulta_promo_percentual',String(pct)); await setConfig('consulta_promo_inicio',String(req.body.inicio||'')); await setConfig('consulta_promo_fim',String(req.body.fim||'')); await setConfig('consulta_promo_intervalo_horas',String(Math.max(1,Number(req.body.intervalo_horas||6)||6))); const ms=[0,1,2,3,4].map(i=>String(req.body[`modelo_${i}`]||'').trim()).filter(Boolean); await setConfig('consulta_promo_modelos_json',JSON.stringify(ms.length?ms:CONSULTA_PROMO_MODELOS_PADRAO)); } res.redirect('/admin/consultas-assinatura?ok='+encodeURIComponent(req.body.acao==='restaurar'?'Mensagens promocionais restauradas.':'Promoção atualizada.')); }catch(e){res.redirect('/admin/consultas-assinatura?erro='+encodeURIComponent(e.message));}
