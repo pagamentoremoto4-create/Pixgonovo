@@ -1348,7 +1348,7 @@ async function executarPedidoDhru(pedidoId){
     const envio=await dhruEnviarPedidoOficial(pedido.api_service_id,campos,referenceId);
     const resp=envio.resp, orderUuid=envio.orderUuid;
     await run(`UPDATE dhru_orders SET status=?,order_uuid=?,request_json=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderUuid?'ENVIADO':'AGUARDANDO_FEEDBACK',orderUuid,JSON.stringify(envio.payload),JSON.stringify(resp),ins.lastID]);
-    await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[pedido.id]);
+    // Aceitação do pedido não significa início do processamento pelo fornecedor.
     console.log(`✅ DHRU pedido ${pedido.id} aceito pelo fornecedor${orderUuid?' | '+orderUuid:' | aguardando feedback'}`);
     return {executado:true,sucesso:true,orderUuid:orderUuid||null,aguardandoFeedback:!orderUuid,resposta:resp};
   } catch(e){
@@ -1543,7 +1543,41 @@ async function avisarGrupoConsultaPrivadaConcluida(ctx){
   }catch(e){console.log('⚠️ AVISO GRUPO CONSULTAVIP:',e.message)}
 }
 
+// V238: sincronização de status DHRU com notificações persistentes por canal.
+function dhruStatusNormalizado(valor){
+  const st=String(valor||'').trim().toLowerCase().replace(/[\s-]+/g,'_');
+  if(['success','completed','complete','done','concluido','finalizado'].includes(st)) return 'FINALIZADO';
+  if(['rejected','reject','failed','failure','cancelled','canceled','rejeitado','cancelado'].includes(st)) return 'CANCELADO';
+  if(['processing','in_process','in_progress','inprocess','processando','em_processo','running','started'].includes(st)) return 'EM PROCESSO';
+  if(['pending','queued','waiting','accepted','submitted','new','pendente','enviado'].includes(st)) return 'PENDENTE';
+  return '';
+}
+const dhruFeedbackFilas=new Map();
 async function processarFeedbackDhru(body){
+  const chave=String(body?.reference_id||'').trim();
+  const anterior=dhruFeedbackFilas.get(chave)||Promise.resolve();
+  const atual=anterior.catch(()=>{}).then(()=>processarFeedbackDhruInterno(body));
+  dhruFeedbackFilas.set(chave,atual);
+  try{return await atual;}finally{if(dhruFeedbackFilas.get(chave)===atual)dhruFeedbackFilas.delete(chave);}
+}
+async function dhruAvisarProcesso(pedido,cliente){
+  const destinos=new Set();
+  if(cliente?.telegram_id)destinos.add(tgJid(cliente.telegram_id));
+  const wa=normalizarNumeroWhatsApp(cliente?.whatsapp||pedido.revenda_numero||pedido.cliente_whatsapp);
+  if(wa)destinos.add(`wa:${wa}`);
+  if(!destinos.size&&pedido.revenda_jid)destinos.add(pedido.revenda_jid);
+  const servico=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+  const mensagem=`🟡 *SERVIÇO EM PROCESSO*\n\n📋 Pedido: #${pedido.id}\n🛠 Serviço: ${servico?nomeServicoWhatsApp(servico):dhruNomeServicoPt(pedido.servico_nome)}\n\nO fornecedor iniciou seu serviço. Avisaremos quando finalizar.`;
+  for(const destino of destinos){
+    const key=`dhru_v238_processo_${pedido.id}_${destino}`;
+    if((await getConfig(key,'0'))==='1')continue;
+    try{
+      const ok=await enviarTexto(destino,mensagem);
+      if(ok!==false)await setConfig(key,'1');
+    }catch(e){console.log('⚠️ DHRU aviso em processo',pedido.id,e.message);}
+  }
+}
+async function processarFeedbackDhruInterno(body){
   const reference=String(body?.reference_id||'').trim();
   const pm=reference.match(/^private-(\d+)$/i);
   if(pm){
@@ -1587,12 +1621,18 @@ async function processarFeedbackDhru(body){
   const pedidoId=Number(reference); if(!pedidoId) throw new Error('reference_id inválido');
   const pedido=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
   if(!pedido) throw new Error('pedido não encontrado');
+  if(['FINALIZADO','CANCELADO','CONCLUIDO'].includes(String(pedido.status||'').toUpperCase()))return {pedidoId,ignorado:true};
   const status=String(body?.status||'').toLowerCase();
+  const fase=dhruStatusNormalizado(status);
   const orderId=String(body?.order_id||body?.order_uuid||'');
-  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.message||'');
-  await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,status.toUpperCase()||'ATUALIZADO',JSON.stringify(body),replay,pedidoId]);
+  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+  if(fase==='FINALIZADO'&&!replay){
+    await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status='AGUARDANDO_FEEDBACK',feedback_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,JSON.stringify(body),pedidoId]);
+    return {pedidoId,status,aguardandoResultado:true};
+  }
+  await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,fase==='FINALIZADO'?'CONCLUIDO':fase==='CANCELADO'?'REJEITADO':fase==='PENDENTE' && (await getConfig(`dhru_v238_iniciado_${pedidoId}`,'0'))!=='1'?'PENDENTE':'PROCESSANDO',JSON.stringify(body),replay,pedidoId]);
   const cliente=pedido.revenda_id?await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]):null;
-  if(['success','completed','complete','done'].includes(status)){
+  if(fase==='FINALIZADO'){
     const jaFinalizado=String(pedido.status).toUpperCase()==='FINALIZADO';
     if(!jaFinalizado) await finalizarPedido(pedido,{notificarCliente:false});
     if(cliente && !jaFinalizado){
@@ -1601,16 +1641,25 @@ async function processarFeedbackDhru(body){
       const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
       const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const saldoLinha=clienteAtual?`\n\n💳 Saldo: ${brl(clienteAtual.saldo||0)}`:'';
-      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n🛠 Serviço: ${servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
+      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n📋 Pedido: #${pedido.id}\n🛠 Serviço: ${servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
     }
-  } else if(['rejected','reject','failed','failure','cancelled','canceled'].includes(status)){
+  } else if(fase==='CANCELADO'){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
+    let estornoRealizado=Number(atual?.estornado||0)===1;
     if(atual?.revenda_id && Number(atual.cobrado||0)===1 && Number(atual.estornado||0)!==1){
       await run('UPDATE revendas SET saldo=saldo+?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[Number(atual.valor||0),atual.revenda_id]);
       await run(`UPDATE pedidos SET cobrado=0,estornado=1,status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
+      estornoRealizado=true;
     } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
     const servicoRejeitado=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
-    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n🛠 ${servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n💰 O valor foi estornado quando aplicável.`,pedido.revenda_jid||'');
+    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n📋 Pedido: #${pedido.id}\n🛠 ${servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n${estornoRealizado?'💰 Valor estornado ao seu saldo.':'💰 Este pedido não teve valor a estornar.'}`,pedido.revenda_jid||'');
+  } else if(fase==='EM PROCESSO'){
+    await setConfig(`dhru_v238_iniciado_${pedidoId}`,'1');
+    await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO','CONCLUIDO')`,[pedidoId]);
+    if(pedido.status!=='EM PROCESSO')notificarPainel('pedido','🟡 Serviço em processo',`Pedido #${pedidoId}`);
+    await dhruAvisarProcesso(pedido,cliente);
+  } else if(fase==='PENDENTE' && (await getConfig(`dhru_v238_iniciado_${pedidoId}`,'0'))!=='1'){
+    await run(`UPDATE pedidos SET status='PENDENTE',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO','CONCLUIDO')`,[pedidoId]);
   }
   return {pedidoId,status,replay};
 }
@@ -1627,24 +1676,19 @@ async function acompanharPedidosDhru(){
   if(dhruPollEmExecucao) return;
   dhruPollEmExecucao=true;
   try{
-    const pendentes=await all(`SELECT * FROM dhru_orders WHERE status IN ('ENVIADO','PROCESSANDO','AGUARDANDO_FEEDBACK') AND COALESCE(order_uuid,'')<>'' ORDER BY id ASC LIMIT 30`);
+    const pendentes=await all(`SELECT d.* FROM dhru_orders d JOIN pedidos p ON p.id=d.pedido_id WHERE p.status NOT IN ('FINALIZADO','CANCELADO','CONCLUIDO') AND d.status NOT IN ('ERRO_ENVIO','ENVIANDO') AND COALESCE(d.order_uuid,'')<>'' ORDER BY d.atualizado_em ASC,d.id ASC LIMIT 30`);
     for(const row of pendentes){
       try{
         const resp=await consultarPedidoDhru(row.order_uuid);
         const d=resp?.data||{};
         const st=String(d?.status||'').toLowerCase();
-        await run(`UPDATE dhru_orders SET status=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),JSON.stringify(resp),row.id]);
-        if(['rejected','reject','failed','failure','cancelled','canceled'].includes(st)){
-          await processarFeedbackDhru({reference_id:row.reference_id,order_id:row.order_uuid,status:st,replay:d?.replay||d?.reply||d?.message||''});
-        } else if(['success','completed','complete','done'].includes(st)){
-          const replay=d?.replay||d?.reply||d?.result||d?.message||'';
-          if(replay){
-            await processarFeedbackDhru({reference_id:row.reference_id,order_id:row.order_uuid,status:st,replay});
-          } else {
-            await run(`UPDATE dhru_orders SET status='AGUARDANDO_FEEDBACK',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[row.id]);
-          }
+        await run(`UPDATE dhru_orders SET response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[JSON.stringify(resp),row.id]);
+        const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+        if(dhruStatusNormalizado(st)==='FINALIZADO'&&!replay){
+          // Aguarda o resultado completo antes de entregar a conclusão ao cliente.
+          await run(`UPDATE dhru_orders SET status='AGUARDANDO_FEEDBACK',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[row.id]);
         } else {
-          await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO')`,[row.pedido_id]);
+          await processarFeedbackDhru({reference_id:row.reference_id,order_id:row.order_uuid,status:st,replay});
         }
       }catch(e){ console.log('⚠️ DHRU STATUS',row.order_uuid,e?.response?.status||'',e?.response?.data?.message||e.message); }
     }
@@ -6962,12 +7006,13 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
       : `${entradaIcone} ${entradaLabel}s:\n${criados.map(item => item.entrada).join('\n')}`;
     await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
+📋 Pedido(s): ${criados.map(c=>`#${c.id}`).join(', ')}
 🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}
 ${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoPt(servico,criados[0].entrada) : detalhesEntradas}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(totalPedido)}
 
-${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, from);
+📍 Status: PENDENTE`, from);
     if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
       for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
     }
@@ -7007,7 +7052,7 @@ async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entrada
   notificarPainel('pedido','🔔 Novo pedido WhatsApp',`${cliente.nome} - ${servico.nome}`);
   await avisarNovoPedidoAdmins(pedido);
   const dadosPt=await dhruEntradaPedidoPt(servico,entradaSerializada);
-  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n🟡 *Status: EM PROCESSO*`,from);
+  await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n📋 Pedido: #${ins.lastID}\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n📍 *Status: PENDENTE*`,from);
   try{await executarPedidoDhru(ins.lastID);}catch(e){console.log('❌ DHRU pedido',ins.lastID,e.message);}
   return true;
 }
@@ -8057,7 +8102,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     if (criados.length === 1) {
       notificarPainel('pedido', '🔔 Novo pedido recebido', `${revenda.nome} - ${servico.nome}`);
       await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n${servico.api_provider==='DHRU'?'🟡 Status: EM PROCESSO':'📍 Status: PENDENTE'}`, from);
+      await enviarParaCanaisCliente(revenda, `📦 Pedido recebido\n\n📋 Pedido: #${criados[0].id}\n🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}\n${servico.api_provider==='DHRU'?await dhruEntradaPedidoPt(servico,criados[0].entrada):`${iconeEntradaServico(servico)} ${entradaLabel}: ${criados[0].entrada}`}\n📦 Quantidade: 1\n💰 Valor: ${brl(valor)}\n\n📍 Status: PENDENTE`, from);
       return;
     }
 
@@ -9276,12 +9321,13 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   const entradasTexto = criados.map(c => c.entrada).join('\n');
   await enviarParaCanaisCliente(cliente, `📦 Pedido recebido
 
+📋 Pedido(s): ${criados.map(c=>`#${c.id}`).join(', ')}
 🛠 Serviço: ${servico.api_provider==='DHRU'?nomeServicoWhatsApp(servico):servico.nome}
 ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.entrada||entradasTexto) : `${iconeEntradaServico(servico)} ${entradaLabel}: ${entradasTexto}`}
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: PENDENTE'}`, jid);
+📍 Status: PENDENTE`, jid);
   if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
@@ -13035,7 +13081,7 @@ app.get('/admin/pedidos', async (req, res) => {
   const rows = await all(sql, params);
   await enriquecerPedidosComHistoricoInterno(rows);
   const html = `<div class="topbar"><h1>📋 Pedidos</h1><div><a class="btn gray" href="/admin/pedidos">Todos</a><a class="btn" href="/admin/pedidos?status=PENDENTE">Pendentes</a><a class="btn orange" href="/admin/pedidos?status=EM PROCESSO">Em Processo</a><a class="btn green" href="/admin/pedidos?status=FINALIZADO">Finalizados</a><a class="btn red" href="/admin/pedidos?status=CANCELADO">Cancelados</a></div></div>
-  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, Telegram ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}`;
+  <div class="card"><form class="search" method="get"><input name="q" value="${safeHtml(q)}" placeholder="Buscar entrada, IMEI, Telegram ou nome"><button class="btn">Buscar</button></form></div>${pedidoTable(rows)}<script>setInterval(function(){if(!document.hidden&&!document.querySelector('input:focus,textarea:focus,select:focus'))location.reload();},20000);</script>`;
   res.send(page('Pedidos', html));
 });
 app.get('/admin/dados-internos-imei', async (req, res) => {
