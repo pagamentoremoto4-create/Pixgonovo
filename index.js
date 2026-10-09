@@ -3257,7 +3257,7 @@ async function iniciarServicoWhatsApp(from,cliente,servico){
   const descricao=String(servico.descricao_exibicao||servico.descricao||'').trim();
   const prazo=String(servico.prazo||'').trim();
   const valor=await precoDaRevenda(cliente.id,servico.id);
-  await salvarSessaoPedido(from,{etapa:'servico_oferta',servicoId:servico.id,origemOferta:origem,origemCategoriaId:Number(sessAnterior?.categoriaId||0)});
+  await salvarSessaoPedido(from,{etapa:'servico_oferta',servicoId:servico.id,origemOferta:origem,origemCategoriaId:Number(sessAnterior?.categoriaId||0),origemCategoria:sessAnterior?.categoria||null,origemMenu:sessAnterior?.origemMenu||''});
   const linhasOferta=[`🛠️ *${nomeServicoWhatsApp(servico)}*`];
   if(descricao)linhasOferta.push(`📋 *Descrição:*\n${descricao}`);
   if(prazo)linhasOferta.push(`⏳ *Prazo:* ${prazo}`);
@@ -3275,20 +3275,42 @@ async function iniciarColetaServicoWhatsApp(from,cliente,servico){
     await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
     await enviarTexto(from,`🛒 ${nomeServicoWhatsApp(servico)}\n\n💰 ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n1️⃣ Confirmar compra (1 unidade)\n0️⃣ Voltar`);return true;
   }
+  const sessOrigem=await carregarSessaoPedido(from);
+  const contextoVoltar=sessOrigem?.etapa==='servico_oferta'?{origemOferta:sessOrigem.origemOferta,origemCategoriaId:Number(sessOrigem.origemCategoriaId||0),origemCategoria:sessOrigem.origemCategoria||null,origemMenu:sessOrigem.origemMenu||''}:{};
   if(servico.api_provider==='DHRU'){
     const pDhru=await dhruProductForService(servico.id),fsDhru=dhruFieldsUsuario(pDhru);
     const simplesImei=fsDhru.length===1&&String(fsDhru[0]?.name||'').toUpperCase()==='IMEI';
     if(!simplesImei&&fsDhru.length){
-      await salvarSessaoPedido(from,{etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
+      await salvarSessaoPedido(from,{...contextoVoltar,etapa:'dhru_campo',servicoId:servico.id,dhruCampos:fsDhru,dhruValores:[],dhruIndice:0});
       await enviarTexto(from,`🛠 *${nomeServicoWhatsApp(servico)}*\n\n💰 Valor: ${brl(await precoDaRevenda(cliente.id,servico.id))}\n\n${dhruPromptCampo(fsDhru[0],0,fsDhru.length)}\n\n0️⃣ ⬅️ Voltar`);
       return true;
     }
   }
-  await salvarSessaoPedido(from,{etapa:'entrada',servicoId:servico.id});
+  await salvarSessaoPedido(from,{...contextoVoltar,etapa:'entrada',servicoId:servico.id});
   const tipo=normalizarTipoEntrada(servico.tipo_entrada);
   if(tipo==='IMEI')await enviarTexto(from,`📱 Informe o IMEI:\n\nPode enviar de 1 até 5 IMEIs. O sistema corrige automaticamente espaços, pontos, traços e símbolos.`);
   else await enviarTexto(from,`${iconeEntradaServico(servico)} Informe o ${labelEntradaServico(servico)}:`);
   return true;
+}
+// V235 — retorno contextual da coleta: nunca usar o menu global para o zero.
+async function voltarColetaServicoWhatsApp(from,cliente,sess){
+  const categoriaId=Number(sess?.origemCategoriaId||0);
+  if(categoriaId){
+    await abrirCategoriaDesbloqueiosWhatsApp(from,cliente,categoriaId);
+    return;
+  }
+  if(['blacklist_submenu','blacklist_servicos'].includes(String(sess?.origemOferta||''))){
+    await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+    return;
+  }
+  if(sess?.origemCategoria){
+    await salvarSessaoPedido(from,{etapa:'servico_categoria',categoria:sess.origemCategoria,origemMenu:sess.origemMenu||''});
+    const lista=await listarServicosCategoriaTexto(cliente,sess.origemCategoria);
+    await enviarTexto(from,lista.texto);
+    return;
+  }
+  // Sem categoria de origem (por exemplo, link direto), retorna à lista de categorias.
+  await abrirServicosDesbloqueiosWhatsApp(from,cliente);
 }
 async function enviarMenuHistoricoWhatsApp(from){
   await enviarTexto(from,`📋 *Histórico*\n\n1️⃣ ⏳ Em processo\n2️⃣ ✅ Concluídos\n3️⃣ ❌ Cancelados\n4️⃣ 📚 Todos os pedidos\n\n0️⃣ ⬅️ Voltar`);
@@ -5210,6 +5232,7 @@ Digite *menu* para voltar.`);
       return;
     }
     if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
+    if(opcao==='0'||lower==='voltar'){await voltarColetaServicoWhatsApp(from,cliente,sess);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
     const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);
@@ -5913,6 +5936,21 @@ async function cancelarFluxoSilenciosamente(from, numeroNorm, textoOriginal, eta
   return true;
 }
 
+// V236: revisão obrigatória dos dados antes de gerar cobrança ou enviar pedidos.
+async function prepararConfirmacaoServicoWhatsApp(from,cliente,servico,sess,entradas,modo='entrada'){
+  const valores=Array.isArray(entradas)?entradas:[entradas];
+  const valor=await precoDaRevenda(cliente.id,servico.id);
+  const dados=modo==='dhru'
+    ? await dhruEntradaPedidoPt(servico,valores[0])
+    : valores.map(v=>`${iconeEntradaServico(servico)} ${labelEntradaServico(servico)}: ${v}`).join('\n');
+  await salvarSessaoPedido(from,{
+    ...sess,etapa:'confirmacao_servico',confirmacaoModo:modo,
+    confirmacaoEntradas:valores,confirmacaoEmMs:Date.now()
+  });
+  await enviarTexto(from,`⚠️ *CONFIRME OS DADOS DO PEDIDO*\n\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dados}\n📦 Quantidade: ${valores.length}\n💰 Valor total: ${brl(valor*valores.length)}\n\nConfira os dados com atenção. Nenhum pedido será criado ou cobrado antes da sua confirmação.\n\n1️⃣ ✅ CONFIRMAR E CONTINUAR\n2️⃣ ✏️ CORRIGIR DADOS\n0️⃣ ⬅️ VOLTAR`);
+  return true;
+}
+
 async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
@@ -6072,7 +6110,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     .replace(/[!?.,;:]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  const ehMenuGlobal = /^(?:\/?menu+|inicio|0)$/.test(comandoMenuGlobal);
+  const ehMenuGlobal = /^(?:\/?menu+|inicio)$/.test(comandoMenuGlobal);
   if (ehMenuGlobal) {
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
@@ -6815,6 +6853,50 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     return;
   }
 
+  // V236: o usuário precisa confirmar explicitamente os dados coletados.
+  if(sess?.etapa==='confirmacao_servico'){
+    const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
+    if(!servico){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Serviço indisponível.');return;}
+    if(opcao==='0'||lower==='voltar'){
+      await voltarColetaServicoWhatsApp(from,cliente,sess);
+      return;
+    }
+    if(opcao==='2'){
+      if(sess.confirmacaoModo==='dhru'){
+        const campos=Array.isArray(sess.dhruCampos)?sess.dhruCampos:dhruFieldsUsuario(await dhruProductForService(servico.id));
+        if(!campos.length){await enviarTexto(from,'❌ Campos indisponíveis. Tente novamente mais tarde.');return;}
+        await salvarSessaoPedido(from,{...sess,etapa:'dhru_campo',dhruCampos:campos,dhruValores:[],dhruIndice:0,confirmacaoEntradas:undefined});
+        await enviarTexto(from,`${dhruPromptCampo(campos[0],0,campos.length)}\n\n0️⃣ ⬅️ Voltar`);
+      }else{
+        await salvarSessaoPedido(from,{...sess,etapa:'entrada',confirmacaoEntradas:undefined,confirmacaoAprovada:false});
+        const tipo=normalizarTipoEntrada(servico.tipo_entrada);
+        await enviarTexto(from,tipo==='IMEI'?'📱 Informe novamente o IMEI (até 5 IMEIs):\n\n0️⃣ ⬅️ Voltar':`${iconeEntradaServico(servico)} Informe novamente ${labelEntradaServico(servico)}:\n\n0️⃣ ⬅️ Voltar`);
+      }
+      return;
+    }
+    if(opcao!=='1'){
+      await enviarTexto(from,'❌ Escolha 1 para confirmar, 2 para corrigir ou 0 para voltar.');
+      return;
+    }
+    // Prazo para não aceitar uma confirmação antiga após mudança de preço/cadastro.
+    if(Date.now()-Number(sess.confirmacaoEmMs||0)>30*60*1000){
+      await apagarSessaoPedido(from);
+      await enviarTexto(from,'⌛ Confirmação expirada. Selecione o serviço novamente.');
+      return;
+    }
+    if(sess.confirmacaoModo==='dhru'){
+      const entrada=String(sess.confirmacaoEntradas?.[0]||'');
+      if(!entrada){await enviarTexto(from,'❌ Dados ausentes. Corrija a informação.');return;}
+      await processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entrada,true);
+      return;
+    }
+    const entrada=String(sess.confirmacaoTextoOriginal||sess.confirmacaoEntradas?.join('\n')||'');
+    if(!entrada){await enviarTexto(from,'❌ Dados ausentes. Corrija a informação.');return;}
+    await salvarSessaoPedido(from,{...sess,etapa:'entrada',confirmacaoAprovada:true});
+    await processarMensagemWhatsApp({numero:numeroNorm,nome:cliente.nome||nome,texto:entrada,sessaoId});
+    return;
+  }
+
   if (sess?.etapa === 'dhru_campo') {
     const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
     if(!servico){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Serviço indisponível.');return;}
@@ -6822,7 +6904,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     const idx=Math.max(0,Number(sess.dhruIndice||0));
     const campo=campos[idx];
     if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados. Sincronize novamente a API.');return;}
-    if(String(textoOriginal||'').trim()==='0'){await apagarSessaoPedido(from);await enviarTexto(from,'Digite *menu* para voltar.');return;}
+    if(opcao==='0'||lower==='voltar'){await voltarColetaServicoWhatsApp(from,cliente,sess);return;}
     let valorCampo=String(textoOriginal||'').trim();
     if(campo.required===false && ['pular','skip','-'].includes(valorCampo.toLowerCase())) valorCampo='';
     if(campo.required!==false && !valorCampo){await enviarTexto(from,dhruPromptCampo(campo,idx,campos.length));return;}
@@ -6843,11 +6925,16 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
     if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
+    if(opcao==='0'||lower==='voltar'){await voltarColetaServicoWhatsApp(from,cliente,sess);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
     const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);
     if(erroDhru){await enviarTexto(from,erroDhru);return;}
     if(validacao.invalidos?.length) await enviarTexto(from,avisoImeisInvalidos(validacao.invalidos));
+    if(sess.confirmacaoAprovada!==true){
+      await prepararConfirmacaoServicoWhatsApp(from,cliente,servico,{...sess,confirmacaoTextoOriginal:textoOriginal},validacao.entradas,'entrada');
+      return;
+    }
     const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
     const valor = await precoDaRevenda(cliente.id, servico.id);
     const totalPedido = valor * validacao.entradas.length;
@@ -6896,9 +6983,14 @@ ${servico.api_provider === 'DHRU' ? '🟡 Status: EM PROCESSO' : '📍 Status: P
 
 
 
-async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entradaSerializada){
+async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entradaSerializada,confirmado=false){
   const erroDhru=await dhruErroImeiAntesPedido(servico,[entradaSerializada]);
   if(erroDhru){await enviarTexto(from,erroDhru);return true;}
+  if(!confirmado){
+    const sess=await carregarSessaoPedido(from);
+    await prepararConfirmacaoServicoWhatsApp(from,cliente,servico,sess||{},[entradaSerializada],'dhru');
+    return true;
+  }
   const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
   const valor=await precoDaRevenda(cliente.id,servico.id);
   const modalidade=await modalidadeServicoRevenda(cliente.id,servico.id);
