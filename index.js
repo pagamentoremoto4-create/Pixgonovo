@@ -6969,7 +6969,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     const escolhido = ddds[Number(opcao)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
-    await confirmarEsimTexto(from, sess.plano, escolhido.ddd, revenda);
+    await confirmarEsimTexto(from, sess.plano, escolhido.ddd, cliente);
     return;
   }
 
