@@ -3848,10 +3848,28 @@ async function entregarEsimPorDispositivo(destino, item, dispositivo, nomePlano)
 }
 
 // V223: confirmação única para iPhone e Android no WhatsApp.
-function textoConfirmacaoEsimWhatsApp(plano, ddd) {
-  return `🛒 *CONFIRMAR eSIM*\n\n📱 ${plano.nome_plano}\n📍 DDD: ${ddd || '-'}\n💰 Valor: ${brl(plano.preco_revenda)}\n\n1️⃣ Confirmar compra/pagamento\n2️⃣ Trocar DDD\n3️⃣ Cancelar`;
+function simboloOperadoraEsim(nome) {
+  const n=String(nome||'').toUpperCase();
+  return /TIM/.test(n)?'🔵':/CLARO/.test(n)?'🔴':/VIVO/.test(n)?'🟣':'📱';
 }
-
+function textoConfirmacaoEsimWhatsApp(plano, ddd, saldo, unidades) {
+  const preco=Number(plano.preco_revenda||0);
+  const comSaldo=Number(saldo||0)>=preco;
+  return `🛒 *CONFIRMAR eSIM*\n📱 ${simboloOperadoraEsim(plano.nome_plano)} ${plano.nome_plano} • DDD ${ddd}\n📦 Disponíveis: ${Number(unidades||0)} unidade(s)\n💰 ${brl(preco)}\n💳 Saldo: ${brl(saldo||0)}\n\n*PAGAMENTO*\n${comSaldo?'1️⃣ Usar saldo\n2️⃣ Pagar PIX\n3️⃣ Trocar DDD\n0️⃣ Voltar':'1️⃣ Pagar PIX\n2️⃣ Trocar DDD\n0️⃣ Voltar'}`;
+}
+async function confirmarEsimTexto(from, plano, ddd, revenda) {
+  const r=await get('SELECT saldo FROM revendas WHERE id=?',[revenda.id]);
+  const e=await get(`SELECT COUNT(*) AS qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+  await enviarTexto(from,textoConfirmacaoEsimWhatsApp(plano,ddd,r?.saldo||0,e?.qtd||0));
+}
+async function pagarEsimDiretoPix(from, revenda, plano, ddd) {
+  const atual=await get('SELECT * FROM esim_planos WHERE id=?',[plano.id]);
+  if(!atual) return enviarTexto(from,'❌ Plano indisponível.');
+  const valor=await precoEsimDaRevenda(revenda.id,atual.id);
+  const est=await get(`SELECT COUNT(*) qtd FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=?`,[plano.nome_plano,ddd]);
+  if(!Number(est?.qtd||0)) return enviarTexto(from,'❌ Este DDD ficou sem estoque. Volte e escolha outro.');
+  return iniciarFluxoPagamento(from,{etapa:'esim_pagamento_pix',tipo_pix:'SERVICO',tipo_compra:'ESIM',valor_pix:valor,totalPedido:valor,plano:{id:atual.id,nome_plano:plano.nome_plano,preco_revenda:valor},ddd,quantidade:1,saldo_usado:0},revenda,async m=>enviarTexto(from,m));
+}
 // V223: os dados de ativação são recuperados apenas dos eSIMs vendidos ao próprio cliente.
 function menuEntregaEsimWhatsApp() {
   return '1️⃣ Como instalar\n2️⃣ Meus pedidos\n0️⃣ Menu principal';
@@ -4849,17 +4867,13 @@ async function enviarCategoriaServicosTelegram(chatId,cliente,categoria,message=
   return enviarCardVisual(chatId,message,prefix,`${categoria.emoji||'🛠️'} *${String(categoria.nome).toUpperCase()}*\n\nEscolha um serviço:`,kb);
 }
 async function enviarEsimBotoesTelegram(chatId, message=null) {
-  await carregarVisualTelegram();
-  // A operadora aparece pelo cadastro administrativo, não pela existência de estoque.
-  // Assim TIM/CLARO/VIVO podem ser exibidas mesmo vazias e o admin mantém controle de ativar/apagar/adicionar.
-  const ops=await all(`SELECT * FROM telegram_esim_operadoras WHERE ativo=1 ORDER BY ordem,id`);
-  if(!ops.length) return atualizarCardTelegram(chatId,message,'❌ *Nenhuma operadora eSIM cadastrada no momento.*',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
-  const kb=[];
-  for(let i=0;i<ops.length;i+=2){
-    kb.push(ops.slice(i,i+2).map(o=>tgBtn(String(o.nome).toUpperCase(),`esim_op_${o.id}`,o.estilo||'primary',o.icon_key||'',o.fallback_emoji||'📲')));
-  }
+  const cliente = await get('SELECT * FROM revendas WHERE telegram_id=?', [String(chatId)]);
+  const planos = await planosEsimDisponiveis(cliente?.id || null);
+  if (!planos.length) return atualizarCardTelegram(chatId,message,'📱 *COMPRAR eSIM*\n\nNenhum plano disponível no momento.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
+  const texto = '📱 *COMPRAR eSIM*\n\n📦 *PLANOS DISPONÍVEIS*\n\n' + planos.map((p,i)=>`${i+1}️⃣ ${simboloOperadoraEsim(p.nome_plano)} ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${p.qtd} unidade${p.qtd===1?'':'s'}`).join('\n\n');
+  const kb = planos.map(p=>[tgBtn(`${simboloOperadoraEsim(p.nome_plano)} ${p.nome_plano} • ${p.qtd} un.`,`esim_${p.id}`,'primary')]);
   kb.push([tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]);
-  return enviarCardVisual(chatId,message,'cat_esim','📱 *COMPRA ESIM*\n\nEscolha a operadora:',kb);
+  return atualizarCardTelegram(chatId,message,texto,kb);
 }
 async function enviarPlanosOperadoraTelegram(chatId,cliente,operadora,message=null){
   // V4.9.4.2 — Operadora -> planos cadastrados nessa operadora -> estoque do próprio plano.
@@ -5234,25 +5248,26 @@ Digite *menu* para voltar.`);
     const escolhido = ddds[Number(opcao)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
+    await confirmarEsimTexto(from, sess.plano, escolhido.ddd, cliente);
     return;
   }
 
   // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
+    await confirmarEsimTexto(from, sess.plano, sess.ddd, cliente);
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (opcao === '3' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, cliente.saldo); return; }
-    if (opcao !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o DDD ou 3 para cancelar.'); return; }
-    await apagarSessaoPedido(from);
-    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
-    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, 'UNIVERSAL', sess.ddd);
-    return;
+    const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
+    const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
+    const temSaldo=Number(r?.saldo||0)>=valor;
+    if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
+    if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
+    if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
+    if(opcao===(temSaldo?'2':'1'))return pagarEsimDiretoPix(from,r||cliente,sess.plano,sess.ddd);
+    await confirmarEsimTexto(from,sess.plano,sess.ddd,r||cliente);return;
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
@@ -6954,25 +6969,26 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     const escolhido = ddds[Number(opcao)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
+    await confirmarEsimTexto(from, sess.plano, escolhido.ddd, revenda);
     return;
   }
 
   // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
+    await confirmarEsimTexto(from, sess.plano, sess.ddd, revenda);
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (opcao === '3' || lower === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (opcao === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, cliente.saldo); return; }
-    if (opcao !== '1') { await apagarSessaoPedido(from); console.log('🔇 V160 CONFIRMAÇÃO ESIM INVÁLIDA:', numeroNorm, textoOriginal); return; }
-    await apagarSessaoPedido(from);
-    const revAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]);
-    await entregarEsimRevenda(from, revAtual || cliente, sess.plano, 'UNIVERSAL', sess.ddd);
-    return;
+    const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
+    const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
+    const temSaldo=Number(r?.saldo||0)>=valor;
+    if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
+    if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
+    if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
+    if(opcao===(temSaldo?'2':'1'))return pagarEsimDiretoPix(from,r||cliente,sess.plano,sess.ddd);
+    await confirmarEsimTexto(from,sess.plano,sess.ddd,r||cliente);return;
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(opcao)) {
@@ -7874,7 +7890,8 @@ Exemplo:
           const disponivel=Number(est?.qtd||0);
           if(!disponivel)return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
           await salvarSessaoPedido(from,{etapa:'esim_quantidade',plano,ddd,quantidade:1});
-          return atualizarCardTelegram(chatId,q.message,textoQuantidadeEsim(plano,ddd,1,disponivel,cliente),tecladoQuantidadeEsim(plano.id,1));
+           const revAtual=await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]);
+           return atualizarCardTelegram(chatId,q.message,textoConfirmacaoEsimWhatsApp(plano,ddd,revAtual?.saldo||0,disponivel),tecladoQuantidadeEsim(plano.id,1,Number(revAtual?.saldo||0)>=Number(plano.preco_revenda||0)));
         }
         const qtyMatch = data.match(/^esim_qty_(minus|plus)_(\d+)$/);
         if (qtyMatch) {
@@ -8091,25 +8108,26 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     const escolhido = ddds[Number(texto)-1];
     if (!escolhido) { await enviarTexto(from, '❌ DDD inválido. Escolha uma opção da lista.'); return; }
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: escolhido.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, escolhido.ddd));
+    await confirmarEsimTexto(from,sess.plano,escolhido.ddd,revenda);
     return;
   }
 
   // Compatibilidade com sessões antigas salvas antes da V223.
   if (sess?.etapa === 'esim_dispositivo') {
     await salvarSessaoPedido(from, { etapa: 'esim_confirmar', plano: sess.plano, ddd: sess.ddd });
-    await enviarTexto(from, textoConfirmacaoEsimWhatsApp(sess.plano, sess.ddd));
+    await confirmarEsimTexto(from,sess.plano,sess.ddd,revenda);
     return;
   }
 
   if (sess?.etapa === 'esim_confirmar') {
-    if (texto === '3' || texto === 'cancelar') { await apagarSessaoPedido(from); await enviarTexto(from, '✅ Compra de eSIM cancelada.'); return; }
-    if (texto === '2') { await salvarSessaoPedido(from, { etapa: 'esim_ddd', plano: sess.plano }); await enviarEscolhaDddEsim(from, sess.plano, revenda.saldo); return; }
-    if (texto !== '1') { await enviarTexto(from, 'Digite 1 para confirmar, 2 para trocar o DDD ou 3 para cancelar.'); return; }
-    const plano = sess.plano;
-    await apagarSessaoPedido(from);
-    await entregarEsimRevenda(from, revenda, plano, 'UNIVERSAL', sess.ddd);
-    return;
+    const r=await get('SELECT * FROM revendas WHERE id=?',[revenda.id]);
+    const valor=await precoEsimDaRevenda(revenda.id,sess.plano.id);
+    const temSaldo=Number(r?.saldo||0)>=valor;
+    if(texto==='0'||texto==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
+    if(texto===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
+    if(texto==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||revenda,sess.plano,'UNIVERSAL',sess.ddd);}
+    if(texto===(temSaldo?'2':'1'))return pagarEsimDiretoPix(from,r||revenda,sess.plano,sess.ddd);
+    await confirmarEsimTexto(from,sess.plano,sess.ddd,r||revenda);return;
   }
 
   if (sess?.etapa === 'servico_escolha' && /^\d+$/.test(texto)) {
@@ -8327,16 +8345,9 @@ Nenhum plano disponível no momento.
 0️⃣ ⬅️ Voltar`);
     return;
   }
-  let txt = `📱 Comprar eSIM
-
-`;
-  planos.forEach((p, i) => { txt += `${i + 1}️⃣ ${p.nome_plano}
-💰 ${brl(p.preco_revenda)} | 📦 ${Number(p.qtd || 0)} disponíveis
-
-`; });
-  txt += `0️⃣ ⬅️ Voltar
-
-💬 Digite a opção desejada.`;
+  let txt='📱 *COMPRAR eSIM*\n\n📦 *PLANOS DISPONÍVEIS*\n\n';
+  planos.forEach((p,i)=>{txt+=`${i+1}️⃣ ${simboloOperadoraEsim(p.nome_plano)} ${p.nome_plano} — ${brl(p.preco_revenda)}\n📦 ${Number(p.qtd||0)} unidade(s)\n\n`;});
+  txt+='0️⃣ Voltar\n\n💬 Digite a opção desejada.';
   await enviarTexto(from, txt);
 }
 
@@ -9277,10 +9288,9 @@ function textoQuantidadeEsim(plano,ddd,quantidade,disponivel,cliente){
   const unit=Number(plano?.preco_revenda||0), total=unit*quantidade;
   return `📦 *QUANTIDADE DE eSIM*\n\n📱 ${plano.nome_plano}\n📍 DDD: *${ddd}*\n\nSelecione a quantidade:\n\n➖   *${quantidade}*   ➕\n\n💰 Unitário: ${brl(unit)}\n💵 Total: *${brl(total)}*\n📦 Disponível: ${disponivel}\n💳 Seu saldo: ${brl(cliente?.saldo||0)}`;
 }
-function tecladoQuantidadeEsim(planoId,quantidade){
+function tecladoQuantidadeEsim(planoId,quantidade,comSaldo=true){
   return [
-    [tgBtn('➖',`esim_qty_minus_${planoId}`,'primary'),tgBtn(String(quantidade),`esim_qty_minus_${planoId}`,'primary'),tgBtn('➕',`esim_qty_plus_${planoId}`,'primary')],
-    [tgBtn('USAR SALDO',`esim_pay_saldo_${planoId}`,'success','TG_ICON_SALDO','💰')],
+    ...(comSaldo?[[tgBtn('USAR SALDO',`esim_pay_saldo_${planoId}`,'success','TG_ICON_SALDO','💰')]]:[]),
     [tgBtn('PAGAR COM PIX',`esim_pay_pix_${planoId}`,'primary','TG_ICON_PIX','💠')],
     [tgBtn('Trocar DDD',`comprar_esim_${planoId}`,'danger','TG_ICON_VOLTAR','⬅️')]
   ];
@@ -9358,11 +9368,37 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
   return true;
 }
 
-async function entregarEsimPagoDireto(revendaId, jid, contexto) {
+async function entregarEsimPagoDireto(revendaId,jid,contexto) {
   const plano=contexto?.plano||{};
-  const quantidade=Math.max(1,Number(contexto?.quantidade||1));
+  const ddd=normalizarDddEsim(contexto?.ddd||'');
   const total=Number(contexto?.totalPedido||0);
-  return entregarEsimsQuantidade(revendaId,jid,{plano,ddd:contexto?.ddd||'',quantidade,totalPedido:total,origem:'PIX'});
+  if(!revendaId||!plano.nome_plano||!ddd||total<=0) return false;
+  const rev=await get('SELECT * FROM revendas WHERE id=?',[revendaId]);
+  if(!rev) return false;
+  const item=await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND nome_plano=? AND ddd=? ORDER BY id LIMIT 1`,[plano.nome_plano,ddd]);
+  if(!item) {await avisarAdminTelegram(`⚠️ PIX eSIM pago, sem estoque: ${plano.nome_plano} DDD ${ddd}, cliente ${revendaId}`);await enviarTexto(jid,'🟠 Pagamento confirmado. Entrega pendente por indisponibilidade de estoque. Não pague novamente.');return false;}
+  const pronto=await garantirDadosAtivacaoEsim(item);
+  if(!pronto?.lpa_completo||!pronto?.smdp||!pronto?.codigo_ativacao||!fs.existsSync(caminhoArquivoEsim(pronto.arquivo_qr))){
+    await avisarAdminTelegram(`⚠️ PIX eSIM pago, QR inválido: #${item.id}`);
+    await enviarTexto(jid,'🟠 Pagamento confirmado. Entrega pendente por problema no QR. Não pague novamente.');return false;
+  }
+  // Reserva atômica impede duas compras de consumirem a mesma unidade.
+  const reservado=await run(`UPDATE esim_estoque SET status='RESERVADO' WHERE id=? AND status='DISPONIVEL'`,[item.id]);
+  if(!reservado?.changes)return false;
+  try {
+    const ins=await run(`INSERT INTO pedidos (tipo,revenda_id,revenda_nome,revenda_jid,revenda_numero,servico_nome,entrada_valor,tipo_entrada,entrada_label,valor,status,cobrado,finalizado_em)
+      VALUES ('REVENDA',?,?,?,?,?,?,'OUTRO','eSIM PIX',?,'FINALIZADO',1,CURRENT_TIMESTAMP)`,[rev.id,rev.nome,jid,rev.whatsapp||jidToNumber(jid),`eSIM ${plano.nome_plano}`,plano.nome_plano,total]);
+    await run(`UPDATE esim_estoque SET status='VENDIDO',revenda_id=?,revenda_nome=?,pedido_id=?,dispositivo_entrega='QR_MANUAL',vendido_em=CURRENT_TIMESTAMP WHERE id=? AND status='RESERVADO'`,[rev.id,rev.nome,ins.lastID,item.id]);
+    pronto.pedido_id=ins.lastID;
+    await entregarQrComInstrucoesEBotao(jid,pronto,plano.nome_plano,1,1);
+    notificarPainel('esim','📱 eSIM vendido por PIX',`${rev.nome} - ${plano.nome_plano} - DDD ${ddd}`);
+    return true;
+  }catch(e){
+    console.log('❌ Entrega eSIM PIX pendente:',e.message);
+    await avisarAdminTelegram(`⚠️ PIX eSIM pago, entrega pendente para ${jid}. eSIM #${item.id}: ${e.message}`);
+    await enviarTexto(jid,'🟠 Pagamento confirmado, mas a entrega está pendente. Suporte avisado. Não pague novamente.');
+    return false;
+  }
 }
 
 async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
@@ -9443,7 +9479,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       clearInterval(interval);
       finalizarVerificacao();
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
-      const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status!="completed"', [paymentId]);
+      const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status="pending"', [paymentId]);
       if (!marcado?.changes) return;
 
       let novo = null;
@@ -9460,6 +9496,14 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         }
         return;
       }
+       let contextoEsim=null;
+       try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
+       if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
+         await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
+         const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim);
+         await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',[ok?'delivered':'delivery_pending',paymentId]);
+         return;
+       }
       if (revendaId) {
         const rev = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
         if (rev) {
