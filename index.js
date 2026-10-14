@@ -6270,7 +6270,19 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'hub_menu' });
     console.log(`🏠 V4.9.5.4 MENU GLOBAL: +${numeroNorm} — ${textoOriginal} | destino=${whatsappJidPorNumero.get(numeroNorm) || 'resolver'}`);
-    await enviarMenuWhatsApp(from, cliente, false);
+    // V243: comando Menu em texto puro por padrão. Em alguns aparelhos o
+    // banner com legenda fica em 'Aguardando mensagem' após sendMessage resolver.
+    // Mantém o conteúdo do menu e não altera o banner de boas-vindas.
+    // Para reativar a imagem também neste comando: WHATSAPP_MENU_TEXTO_SEGURO=0.
+    if (String(process.env.WHATSAPP_MENU_TEXTO_SEGURO || '1') === '1') {
+      const pedidosAbertos = await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE", "EM PROCESSO")', [cliente.id]);
+      const clienteAtual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
+      const textoMenu = await menuWhatsAppTexto(clienteAtual, false, Number(pedidosAbertos?.qtd || 0), false);
+      const enviado = await enviarTexto(from, textoMenu);
+      console.log(`🏠 V243 MENU TEXTO SEGURO: +${numeroNorm} | aceitoPeloSocket=${!!enviado}`);
+    } else {
+      await enviarMenuWhatsApp(from, cliente, false);
+    }
     return;
   }
 
@@ -10268,6 +10280,20 @@ async function iniciarSessaoWhatsAppMulti(id, opcoes = {}) {
     });
 
     registrarSaudacaoEntradaGrupoConsultas(socketAtual, sessao);
+
+    // V243: status de entrega não é a mesma coisa que sendMessage resolvido.
+    // Somente registra eventos; não reenvia automaticamente (evita duplicações).
+    socketAtual.ev.on('messages.update', updates => {
+      if (sessao.socket !== socketAtual) return;
+      for (const item of updates || []) {
+        const k = item?.key || {};
+        const jid = String(k.remoteJid || '');
+        if (!k.fromMe || !jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
+        const st = item?.update?.status;
+        if (st == null) continue;
+        console.log(`📨 V243 WA STATUS ENVIO: sessao=${sessao.nome} id=${k.id || '-'} destino=${jid} status=${st}`);
+      }
+    });
 
     socketAtual.ev.on('messages.upsert', async ({ messages, type }) => {
       // V96: mensagens FROMME sincronizadas do celular podem chegar como append,
