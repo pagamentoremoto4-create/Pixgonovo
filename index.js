@@ -9108,24 +9108,48 @@ async function gerarPixDepixPay(valor,cliente,documento) {
 // V246: rota oficial confirmada na documentação DePix Pay (04/07/2026).
 // O webhook nunca autoriza entrega isoladamente; a consulta autenticada confirma
 // identificador, status e valor contra a cobrança gravada no banco local.
+// V249: diagnóstico seguro da resposta DePix Pay. A API documenta os campos
+// em data.payment_id, data.amount e data.status. Não liberar sem validar os três.
 async function consultarStatusDepixPay(paymentId) {
   const id=String(paymentId||'').trim();
-  if(!/^[A-Za-z0-9_-]{5,100}$/.test(id)) return null;
-  const url='https://api.depixpay.com/api/v1/payment/'+encodeURIComponent(id)+'/status';
-  const resp=await axios.get(url,{headers:{'X-API-Key':await depixApiKey()},timeout:15000});
-  if(resp.data?.success!==true) return null;
-  const d=resp.data?.data||{};
-  if(String(d.payment_id||'')!==id) return null;
-  const raw=String(d.status||'').toLowerCase();
-  if(!['pending','completed','expired','cancelled','refunded'].includes(raw))return null;
-  const amount=Number(d.amount);
-  if(!Number.isFinite(amount)||amount<=0)return null;
+  if(!/^dep_[A-Za-z0-9_-]{5,96}$/.test(id))return null;
+  const apiKey=await depixApiKey();
+  const base='https://api.depixpay.com/api/v1/payment/'+encodeURIComponent(id);
   const pedido=await get('SELECT valor FROM pix_pedidos WHERE payment_id=? AND gateway=?',[id,'depixpay']);
-  if(pedido && Math.round(Number(pedido.valor)*100)!==Math.round(amount*100)) {
-    console.error('⚠️ DEPIX PAY: valor divergente na confirmação, pagamento bloqueado:',id);
-    return null;
-  }
-  return {success:true,data:{payment_id:id,amount,status:raw,raw_status:raw}};
+  if(!pedido){console.warn('⚠️ DEPIX VALIDAÇÃO: cobrança ausente no banco',id);return null;}
+  const esperado=Number(pedido.valor);
+  if(!Number.isFinite(esperado)||esperado<=0){console.warn('⚠️ DEPIX VALIDAÇÃO: valor local inválido',id);return null;}
+  const validar=(body,origem)=>{
+    if(!body||body.success!==true||!body.data||typeof body.data!=='object'){
+      console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'resposta_sem_data', 'success=',body?.success,'error=',String(body?.error||'').slice(0,60));
+      return null;
+    }
+    const d=body.data;
+    if(String(d.payment_id||'')!==id){console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'id_divergente');return null;}
+    const status=String(d.status||'').trim().toLowerCase();
+    if(!['pending','completed','expired','cancelled','refunded'].includes(status)){
+      console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'status_invalido',JSON.stringify(status));return null;
+    }
+    const amount=Number(d.amount);
+    if(!Number.isFinite(amount)||amount<=0){console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'valor_ausente_ou_invalido',typeof d.amount);return null;}
+    if(Math.round(esperado*100)!==Math.round(amount*100)){
+      console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'valor_divergente','local=',esperado.toFixed(2),'api=',amount.toFixed(2),'status=',status);
+      return null;
+    }
+    return {success:true,data:{payment_id:id,amount,status,raw_status:status}};
+  };
+  let principal=null;
+  try {
+    principal=(await axios.get(base+'/status',{headers:{'X-API-Key':apiKey},timeout:15000})).data;
+    const result=validar(principal,'/status');
+    if(result)return result;
+  }catch(e){console.warn('⚠️ DEPIX CONSULTA HTTP:',id,'/status',e.response?.status||'rede',String(e.response?.data?.error||e.message).slice(0,100));}
+  // Fallback documentado: GET /payment/{id}, útil se a rota /status
+  // retornar dados incompletos. Mesma autenticação e validação estrita.
+  try {
+    const detalhes=(await axios.get(base,{headers:{'X-API-Key':apiKey},timeout:15000})).data;
+    return validar(detalhes,'/payment/{id}');
+  }catch(e){console.warn('⚠️ DEPIX CONSULTA HTTP:',id,'/payment/{id}',e.response?.status||'rede',String(e.response?.data?.error||e.message).slice(0,100));return null;}
 }
 async function testarConexaoDepixPay(){
   const resp=await axios.get('https://api.depixpay.com/api/v1/merchant/me',{
