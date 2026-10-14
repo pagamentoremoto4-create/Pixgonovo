@@ -342,7 +342,17 @@ function all(sql, params = []) {
 function onlyDigits(v) { return String(v || '').replace(/\D/g, ''); }
 function documentoPixValido(v) {
   const d = onlyDigits(v);
-  return d.length === 11 || d.length === 14;
+  if (d.length === 11) {
+    if (/^(\d)\1{10}$/.test(d)) return false;
+    for (let t=9;t<11;t++) { let sum=0; for(let i=0;i<t;i++)sum+=Number(d[i])*(t+1-i); const digit=(sum*10)%11%10; if(digit!==Number(d[t]))return false; }
+    return true;
+  }
+  if (d.length === 14) {
+    if (/^(\d)\1{13}$/.test(d)) return false;
+    for (let t=12;t<14;t++) { let sum=0, weight=t===12?5:6; for(let i=0;i<t;i++) {sum+=Number(d[i])*weight;weight=weight===2?9:weight-1;} const r=sum%11; if(Number(d[t])!==(r<2?0:11-r))return false; }
+    return true;
+  }
+  return false;
 }
 function mascararDocumentoPix(v) {
   const d = onlyDigits(v);
@@ -5204,17 +5214,18 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo, 2 para Mercado Pago ou 3 para MisticPay.'); return; }
-    if (gateway !== 'pixgo') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    if (!cfg.lista.length) { await enviarTexto(from, '⚠️ Pagamentos indisponíveis.'); return; }
+    if ((await gatewayPrincipal()) !== 'depixpay') { await finalizarGeracaoPix(from, { ...sess, gateway: await gatewayPrincipal() }, cliente, async (m) => enviarTexto(from, m), true); return; }
     const documentoVinculado = await documentoPixCliente(cliente);
-    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
-    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
-    await enviarTexto(from, `✅ PixGo selecionado.\n\n📄 Informe o CPF ou CNPJ do pagador.`); return;
+    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'depixpay', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'depixpay' });
+    await enviarTexto(from, `📄 Informe seu CPF ou CNPJ uma única vez para gerar o PIX.`); return;
   }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
-    if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
-    await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
+    if (!documentoPixValido(documento)) { await enviarTexto(from, '❌ CPF/CNPJ inválido. Confira os números e tente novamente.'); return; }
+    await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[documento,cliente.id]);
+    await finalizarGeracaoPix(from, { ...sess, gateway: sess.gateway || 'depixpay', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
   }
 
   if (sess?.etapa === 'esim_escolha' && /^\d+$/.test(opcao)) {
@@ -6620,17 +6631,18 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
   if (sess?.etapa === 'aguardando_gateway_pix') {
     const gateway = gatewayDaOpcao(textoOriginal);
     const cfg = await gatewaysPagamentoAtivos();
-    if (!gateway || !cfg.lista.includes(gateway)) { await enviarTexto(from, '❌ Escolha 1 para PixGo, 2 para Mercado Pago ou 3 para MisticPay.'); return; }
-    if (gateway !== 'pixgo') { await finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    if (!cfg.lista.length) { await enviarTexto(from, '⚠️ Pagamentos indisponíveis.'); return; }
+    if ((await gatewayPrincipal()) !== 'depixpay') { await finalizarGeracaoPix(from, { ...sess, gateway: await gatewayPrincipal() }, cliente, async (m) => enviarTexto(from, m), true); return; }
     const documentoVinculado = await documentoPixCliente(cliente);
-    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
-    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
-    await enviarTexto(from, `✅ PixGo selecionado.\n\n📄 Informe o CPF ou CNPJ do pagador.`); return;
+    if (documentoVinculado) { await finalizarGeracaoPix(from, { ...sess, gateway: 'depixpay', documento_pix: documentoVinculado }, cliente, async (m) => enviarTexto(from, m), true); return; }
+    await salvarSessaoPedido(from, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'depixpay' });
+    await enviarTexto(from, `📄 Informe seu CPF ou CNPJ uma única vez para gerar o PIX.`); return;
   }
   if (sess?.etapa === 'aguardando_cpf_pix') {
     const documento = textoOriginal.replace(/\D/g, '');
-    if (![11, 14].includes(documento.length)) { await enviarTexto(from, '❌ Documento inválido. Envie um CPF com 11 números ou CNPJ com 14 números.'); return; }
-    await finalizarGeracaoPix(from, { ...sess, gateway: 'pixgo', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
+    if (!documentoPixValido(documento)) { await enviarTexto(from, '❌ CPF/CNPJ inválido. Confira os números e tente novamente.'); return; }
+    await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[documento,cliente.id]);
+    await finalizarGeracaoPix(from, { ...sess, gateway: sess.gateway || 'depixpay', documento_pix: documento }, cliente, async (m) => enviarTexto(from, m), true); return;
   }
 
   // Mantém a sessão recuperada do SQLite/memória. Não sobrescrever aqui,
@@ -7777,14 +7789,14 @@ O número que enviar o código será vinculado automaticamente à sua conta do T
         if (data === 'gateway_pixgo' || data === 'gateway_mercadopago' || data === 'gateway_misticpay') {
           const sess = await carregarSessaoPedido(from);
           if (!sess || sess.etapa !== 'aguardando_gateway_pix') return tgBot.sendMessage(chatId, '⌛ Esta cobrança expirou. Gere um novo PIX.');
-          const gateway = data === 'gateway_pixgo' ? 'pixgo' : (data === 'gateway_misticpay' ? 'misticpay' : 'mercadopago');
+          const gateway = await gatewayPrincipal();
           const cfgGate = await gatewaysPagamentoAtivos();
           if (!cfgGate.lista.includes(gateway)) return tgBot.sendMessage(chatId, '⚠️ Esta forma de pagamento está desativada.');
-          if (gateway !== 'pixgo') return finalizarGeracaoPix(from, { ...sess, gateway }, cliente, async (m) => tgBot.sendMessage(chatId, m));
+          if (gateway !== 'depixpay') return finalizarGeracaoPix(from, { ...sess, gateway:await gatewayPrincipal() }, cliente, async (m) => tgBot.sendMessage(chatId, m));
           const doc = await documentoPixCliente(cliente);
-          if (doc) return finalizarGeracaoPix(from, { ...sess, gateway:'pixgo', documento_pix:doc }, cliente, async (m) => tgBot.sendMessage(chatId, m));
-          await salvarSessaoPedido(from, { ...sess, etapa:'aguardando_cpf_pix', gateway:'pixgo' });
-          return tgBot.sendMessage(chatId, '📄 Informe o CPF ou CNPJ do pagador para usar PixGo.\n\nEnvie somente os números.');
+          if (doc) return finalizarGeracaoPix(from, { ...sess, gateway:'depixpay', documento_pix:doc }, cliente, async (m) => tgBot.sendMessage(chatId, m));
+          await salvarSessaoPedido(from, { ...sess, etapa:'aguardando_cpf_pix', gateway:'depixpay' });
+          return tgBot.sendMessage(chatId, '📄 Informe seu CPF ou CNPJ uma única vez para gerar o PIX.\n\nEnvie somente os números.');
         }
         if (data === 'pagar_outro') {
           await salvarSessaoPedido(from, { etapa: 'aguardando_valor_pix', tipo_pix: 'SALDO' });
@@ -8974,27 +8986,34 @@ async function textoBackups() {
 }
 
 async function getPagamentoConfig() {
-  const pixgoAtivo = (await getConfig('pagamento_pixgo_ativo', '1')) === '1';
+  const depixpayAtivo = (await getConfig('pagamento_depixpay_ativo', '0')) === '1';
   const mercadoPagoAtivo = (await getConfig('pagamento_mercadopago_ativo', '0')) === '1';
   const misticpayAtivo = (await getConfig('pagamento_misticpay_ativo', '0')) === '1';
-  let padrao = String(await getConfig('pagamento_gateway_padrao', 'pixgo')).toLowerCase();
-  if (!['pixgo', 'mercadopago', 'misticpay'].includes(padrao)) padrao = 'pixgo';
-  return { pixgoAtivo, mercadoPagoAtivo, misticpayAtivo, padrao };
+  let padrao = String(await getConfig('pagamento_gateway_padrao', 'depixpay')).toLowerCase();
+  if (!['depixpay','mercadopago','misticpay'].includes(padrao)) padrao='depixpay';
+  return { depixpayAtivo, mercadoPagoAtivo, misticpayAtivo, padrao };
 }
-
 async function gatewaysPagamentoAtivos() {
   const c = await getPagamentoConfig();
   const lista = [];
-  if (c.pixgoAtivo) lista.push('pixgo');
+  if (c.depixpayAtivo) lista.push('depixpay');
   if (c.mercadoPagoAtivo) lista.push('mercadopago');
   if (c.misticpayAtivo) lista.push('misticpay');
   return { ...c, lista };
 }
-
 function nomeGateway(gateway) {
   if (gateway === 'mercadopago') return 'Mercado Pago';
   if (gateway === 'misticpay') return 'MisticPay';
-  return 'PixGo';
+  if (gateway === 'depixpay') return 'DePix Pay';
+  return 'PixGo (histórico)';
+}
+// O checkout do cliente é neutro, mas o aviso de tokenização é obrigatório pela DePix Pay.
+function avisoTokenizacaoPix(gateway) {
+  return gateway === 'depixpay' ? '\nℹ️ O valor pago em PIX será tokenizado em DePix (ativo digital pareado ao real) e liquidado ao vendedor.' : '';
+}
+async function gatewayPrincipal() {
+  const cfg=await gatewaysPagamentoAtivos();
+  return cfg.lista.includes(cfg.padrao)?cfg.padrao:(cfg.lista[0]||null);
 }
 
 async function getMisticPayConfig() {
@@ -9043,6 +9062,78 @@ async function gerarPixMisticPay(valor, cliente) {
     qrCodeBase64: d?.data?.qrCodeBase64 || '',
     qrcodeUrl: d?.data?.qrcodeUrl || ''
   };
+}
+
+// V245: credencial DePix Pay protegida em repouso por chave local persistente em DATA_DIR.
+// Em instalações sem disco persistente, a chave se perde após reinício: não ativar sem volume /data.
+function depixMasterKey() {
+  const path=require('path'), fs=require('fs');
+  const base=process.env.DATA_DIR || '/data';
+  if (!fs.existsSync(base)) throw new Error('DATA_DIR persistente ausente: configure volume no Render');
+  const file=path.join(base,'.depixpay-key');
+  if (!fs.existsSync(file)) { const key=crypto.randomBytes(32); fs.writeFileSync(file,key,{mode:0o600,flag:'wx'}); }
+  const key=fs.readFileSync(file);
+  if(key.length!==32) throw new Error('Chave de criptografia DePix Pay inválida');
+  return key;
+}
+function protegerApiKeyDepix(valor) {
+  const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',depixMasterKey(),iv);
+  const data=Buffer.concat([cipher.update(String(valor),'utf8'),cipher.final()]);
+  return ['v1',iv.toString('base64'),cipher.getAuthTag().toString('base64'),data.toString('base64')].join(':');
+}
+function recuperarApiKeyDepix(valor) {
+  if (!String(valor).startsWith('v1:')) return '';
+  const [,iv,tag,data]=String(valor).split(':');
+  const decipher=crypto.createDecipheriv('aes-256-gcm',depixMasterKey(),Buffer.from(iv,'base64'));
+  decipher.setAuthTag(Buffer.from(tag,'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(data,'base64')),decipher.final()]).toString('utf8');
+}
+async function depixApiKey() {
+  const stored=await getConfig('depixpay_api_key_encrypted','');
+  if (!stored) throw new Error('Cadastre a API Key da DePix Pay no painel');
+  return recuperarApiKeyDepix(stored);
+}
+async function gerarPixDepixPay(valor,cliente,documento) {
+  if (!documentoPixValido(documento)) throw new Error('CPF/CNPJ válido obrigatório para DePix Pay');
+  const amount=Number(valor);
+  if (!Number.isFinite(amount)||amount<10||amount>5000) throw new Error('Valor fora dos limites DePix Pay (R$ 10 a R$ 5.000)');
+  const apiKey=await depixApiKey();
+  const response=await axios.post('https://api.depixpay.com/api/v1/payment/create', {
+    amount,description:`Pedido ${Date.now()}`.slice(0,120),customer_cpf:onlyDigits(documento)
+  },{headers:{'X-API-Key':apiKey,'Content-Type':'application/json'},timeout:30000});
+  const d=response.data?.data || {};
+  if(response.data?.success!==true||!d.payment_id||!d.qr_code)throw new Error('Resposta incompleta da DePix Pay');
+  return {gateway:'depixpay',paymentId:String(d.payment_id),qrCode:String(d.qr_code)};
+}
+// V246: rota oficial confirmada na documentação DePix Pay (04/07/2026).
+// O webhook nunca autoriza entrega isoladamente; a consulta autenticada confirma
+// identificador, status e valor contra a cobrança gravada no banco local.
+async function consultarStatusDepixPay(paymentId) {
+  const id=String(paymentId||'').trim();
+  if(!/^[A-Za-z0-9_-]{5,100}$/.test(id)) return null;
+  const url='https://api.depixpay.com/api/v1/payment/'+encodeURIComponent(id)+'/status';
+  const resp=await axios.get(url,{headers:{'X-API-Key':await depixApiKey()},timeout:15000});
+  if(resp.data?.success!==true) return null;
+  const d=resp.data?.data||{};
+  if(String(d.payment_id||'')!==id) return null;
+  const raw=String(d.status||'').toLowerCase();
+  if(!['pending','completed','expired','cancelled','refunded'].includes(raw))return null;
+  const amount=Number(d.amount);
+  if(!Number.isFinite(amount)||amount<=0)return null;
+  const pedido=await get('SELECT valor FROM pix_pedidos WHERE payment_id=? AND gateway=?',[id,'depixpay']);
+  if(pedido && Math.round(Number(pedido.valor)*100)!==Math.round(amount*100)) {
+    console.error('⚠️ DEPIX PAY: valor divergente na confirmação, pagamento bloqueado:',id);
+    return null;
+  }
+  return {success:true,data:{payment_id:id,amount,status:raw,raw_status:raw}};
+}
+async function testarConexaoDepixPay(){
+  const resp=await axios.get('https://api.depixpay.com/api/v1/merchant/me',{
+    headers:{'X-API-Key':await depixApiKey()},timeout:15000
+  });
+  if(resp.data?.success!==true||!resp.data?.data?.id||resp.data?.data?.is_active!==true)
+    throw new Error('Merchant não está ativo ou a API retornou dados inválidos');
+  return resp.data.data;
 }
 
 async function gerarPixPixGo(valor, cliente, documento) {
@@ -9125,7 +9216,8 @@ async function gerarPix(valor, cliente, documento, gateway='pixgo') {
   try {
     if (gateway === 'mercadopago') return await gerarPixMercadoPago(valor, cliente);
     if (gateway === 'misticpay') return await gerarPixMisticPay(valor, cliente);
-    return await gerarPixPixGo(valor, cliente, documento);
+    if (gateway === 'depixpay') return await gerarPixDepixPay(valor,cliente,documento);
+    throw new Error('Gateway indisponível ou desativado');
   } catch (e) {
     console.log(`ERRO ${nomeGateway(gateway).toUpperCase()}:`, e.response?.data || e.message);
     return null;
@@ -9134,14 +9226,14 @@ async function gerarPix(valor, cliente, documento, gateway='pixgo') {
 
 
 async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
-  const gateway = sess.gateway || 'pixgo';
+  const gateway = sess.gateway || await gatewayPrincipal();
   const ehTelegram = String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:');
   if (!ehTelegram) await enviarMensagem('⏳ Gerando PIX...');
-  const documento = gateway === 'pixgo' ? String(sess.documento_pix || '') : '';
+  const documento = gateway === 'depixpay' ? String(sess.documento_pix || '') : '';
   const pix = await gerarPix(sess.valor_pix, `${ehTelegram ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
   await apagarSessaoPedido(chave);
   if (!pix) {
-    await enviarMensagem(`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)}. Tente novamente ou escolha outra forma de pagamento.`);
+    await enviarMensagem(`❌ Não foi possível gerar o PIX. Tente novamente ou contate o suporte.`);
     return false;
   }
   const valor = Number(sess.valor_pix || 0);
@@ -9179,7 +9271,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       const detalhe = planoNome
         ? `${planoNome}${ddd ? ` • DDD ${ddd}` : ''}${qtd > 1 ? ` • ${qtd} eSIMs` : ' • 1 eSIM'}`
         : (sess.tipo_pix === 'SALDO' ? 'Adicionar saldo' : 'Pagamento do pedido');
-      const caption = `💠 PIX\n\n💰 ${brl(valor)}\n\n${detalhe}\n\n📷 Aponte a câmera ou copie o PIX\n\n🟡 Aguardando pagamento`;
+      const caption = `💠 PIX\n\n💰 ${brl(valor)}\n\n${detalhe}\n\n📷 Aponte a câmera ou copie o PIX\n\n🟡 Aguardando pagamento${avisoTokenizacaoPix(gateway)}`;
       const teclado = [[{ text: '📋 COPIAR PIX', copy_text: { text: codigoPix } }]];
       if (sess?.tipo_compra === 'ESIM') teclado.push([{ text: '⬅️ VOLTAR AO MENU', callback_data: 'menu_voltar' }]);
       await botDestino.sendPhoto(idDestino, qrBuffer, { caption, reply_markup: { inline_keyboard: teclado } });
@@ -9190,7 +9282,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
     }
   }
 
-  await enviarMensagem(`✅ PIX GERADO\n\n🏦 ${nomeGateway(gateway)}\n💰 Valor: ${brl(valor)}`);
+  await enviarMensagem(`✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}${avisoTokenizacaoPix(gateway)}`);
 
   if (['mercadopago','misticpay'].includes(gateway) && pix?.qrCodeBase64) {
     try {
@@ -9210,6 +9302,13 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
     } catch (e) { console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message); }
   }
 
+  if(gateway==='depixpay' && qrCode && !ehTelegram) {
+    try {
+      const qrBuffer=await QRCode.toBuffer(String(qrCode),{width:520,margin:2});
+      const numero=String(chave).startsWith('wa:')?String(chave).slice(3):String(chave);
+      if(whatsappSocket&&conectado) await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(numero)),{image:qrBuffer,mimetype:'image/png',caption:'📲 QR Code PIX'});
+    }catch(e){console.log('⚠️ QR DePix:',e.message);}
+  }
   await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
   await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
@@ -9223,36 +9322,20 @@ async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codig
     await enviarMensagem('⚠️ Pagamentos temporariamente indisponíveis. Entre em contato com o suporte.');
     return false;
   }
-  if (cfg.lista.length > 1) {
-    await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_gateway_pix' });
-    if (String(chave).startsWith('tg:')) {
-      const chatId = String(chave).slice(3);
-      await tgBot.sendMessage(chatId, '💳 *Escolha a forma de pagamento:*', { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[
-        [tgBtn('PixGo', 'gateway_pixgo', 'primary', 'TG_ICON_PIX')],
-        [tgBtn('Mercado Pago', 'gateway_mercadopago', 'success', 'TG_ICON_PAGAR')],
-        [tgBtn('MisticPay', 'gateway_misticpay', 'success', 'TG_ICON_PIX')],
-        [tgBtn('Cancelar', 'saldo_cancelar', 'danger', 'TG_ICON_VOLTAR')]
-      ]}});
-    } else {
-      await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago\n3️⃣ MisticPay');
-    }
-    return false;
-  }
-  const gateway = cfg.lista[0];
-  if (gateway === 'pixgo') {
+  const gateway = await gatewayPrincipal();
+  if (gateway === 'depixpay') {
     const documentoVinculado = await documentoPixCliente(cliente);
-    if (documentoVinculado) {
-      return finalizarGeracaoPix(chave, { ...sess, gateway: 'pixgo', documento_pix: documentoVinculado }, cliente, enviarMensagem, codigoMonoespacado);
-    }
-    await salvarSessaoPedido(chave, { ...sess, etapa: 'aguardando_cpf_pix', gateway: 'pixgo' });
-    await enviarMensagem(`📄 Informe o CPF ou CNPJ do pagador para gerar o PIX de ${brl(sess.valor_pix)}.\n\nEnvie somente os números:\n• CPF: 11 dígitos\n• CNPJ: 14 dígitos.`);
+    if (documentoVinculado) return finalizarGeracaoPix(chave,{...sess,gateway,documento_pix:documentoVinculado},cliente,enviarMensagem,codigoMonoespacado);
+    await salvarSessaoPedido(chave,{...sess,etapa:'aguardando_cpf_pix',gateway});
+    await enviarMensagem('📄 Para gerar seu primeiro PIX, informe seu CPF ou CNPJ. Este cadastro será solicitado apenas uma vez.');
     return false;
   }
-  return finalizarGeracaoPix(chave, { ...sess, gateway }, cliente, enviarMensagem, codigoMonoespacado);
+  return finalizarGeracaoPix(chave,{...sess,gateway},cliente,enviarMensagem,codigoMonoespacado);
 }
 
 async function consultarStatus(paymentId, gateway='pixgo') {
   try {
+    if (gateway === 'depixpay') return await consultarStatusDepixPay(paymentId);
     if (gateway === 'misticpay') {
       const { api } = await clienteMisticPay();
       const d = (await api.post('/transactions/check', { transactionId: paymentId }, { timeout: 15000 })).data;
@@ -9282,10 +9365,7 @@ async function escolherGatewayParaSessao(chave, sessao, enviarMensagem) {
     await enviarMensagem('⚠️ Pagamentos temporariamente indisponíveis. Entre em contato com o suporte.');
     return null;
   }
-  if (cfg.lista.length === 1) return cfg.lista[0];
-  await salvarSessaoPedido(chave, { ...sessao, etapa: 'aguardando_gateway_pix' });
-  await enviarMensagem('💳 Escolha a forma de pagamento:\n\n1️⃣ PixGo\n2️⃣ Mercado Pago\n3️⃣ MisticPay');
-  return null;
+  return await gatewayPrincipal();
 }
 
 function gatewayDaOpcao(texto) {
@@ -11127,13 +11207,13 @@ async function consultavipTratarPagamentoMensagem(msg,txt){
   const chave=`cvtg:${msg.from.id}`,sess=await carregarSessaoPedido(chave);if(!sess)return false;
   const {cliente}=await cadastrarClienteTelegram(msg.from),enviar=m=>consultaVipBot.sendMessage(msg.chat.id,m);
   if(sess.etapa==='aguardando_gateway_pix'){
-    const gateway=gatewayDaOpcao(txt);if(!gateway){await enviar('❌ Escolha 1 para PixGo ou 2 para Mercado Pago.');return true;}
-    if(gateway==='pixgo'){const doc=await documentoPixCliente(cliente);if(doc){await finalizarGeracaoPix(chave,{...sess,gateway,documento_pix:doc},cliente,enviar);return true;}await salvarSessaoPedido(chave,{...sess,etapa:'aguardando_cpf_pix',gateway});await enviar('📄 Envie o CPF ou CNPJ do pagador, somente números.');return true;}
+    const gateway=await gatewayPrincipal();if(!gateway){await enviar('⚠️ Gere um novo PIX pelo menu.');return true;}
+    if(gateway==='depixpay'){const doc=await documentoPixCliente(cliente);if(doc){await finalizarGeracaoPix(chave,{...sess,gateway,documento_pix:doc},cliente,enviar);return true;}await salvarSessaoPedido(chave,{...sess,etapa:'aguardando_cpf_pix',gateway});await enviar('📄 Envie o CPF ou CNPJ do pagador, somente números.');return true;}
     await finalizarGeracaoPix(chave,{...sess,gateway},cliente,enviar);return true;
   }
   if(sess.etapa==='aguardando_cpf_pix'){
     const doc=onlyDigits(txt);if(!documentoPixValido(doc)){await enviar('❌ CPF/CNPJ inválido. Envie somente 11 ou 14 números.');return true;}
-    await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[doc,cliente.id]);await finalizarGeracaoPix(chave,{...sess,documento_pix:doc,gateway:'pixgo'},cliente,enviar);return true;
+    await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[doc,cliente.id]);await finalizarGeracaoPix(chave,{...sess,documento_pix:doc,gateway:sess.gateway||'depixpay'},cliente,enviar);return true;
   }
   return false;
 }
@@ -12225,19 +12305,20 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   }
   const preco=await consultaAssinaturaPrecoPlano(plano);
   let documento='';
-  if(gateway==='pixgo'){
+  if(gateway==='depixpay'){
     documento=String(cliente.revenda?.pix_documento||'').replace(/\D/g,'');
     if(![11,14].includes(documento.length)){
-      await sock.sendMessage(grupo,{text:`⚠️ @${cliente.numero}, para gerar o PIX pela PixGo é necessário ter CPF/CNPJ cadastrado na sua conta. Atualize seu cadastro com o suporte ou entre em contato com o suporte.`,mentions:[jid]}); return true;
+      await sock.sendMessage(grupo,{text:`⚠️ @${cliente.numero}, para gerar o PIX é necessário ter CPF/CNPJ cadastrado na sua conta. Atualize seu cadastro com o suporte ou entre em contato com o suporte.`,mentions:[jid]}); return true;
     }
   }
   await sock.sendMessage(grupo,{text:`⏳ @${cliente.numero}, gerando PIX de ${brl(preco.final)} para o plano ${plano.nome}...`,mentions:[jid]});
   const pix=await gerarPix(preco.final,`Assinatura ${cliente.nome}`,documento,gateway);
-  if(!pix?.paymentId||!pix?.qrCode){ await sock.sendMessage(grupo,{text:`❌ Não foi possível gerar o PIX pelo ${nomeGateway(gateway)} agora.`}); return true; }
+  if(!pix?.paymentId||!pix?.qrCode){ await sock.sendMessage(grupo,{text:`❌ Não foi possível gerar o PIX agora.`}); return true; }
   const contexto={tipoCompra:'ASSINATURA_GRUPO',planoId:Number(plano.id),clienteNumero:cliente.numero,clienteJid:jid,clienteNome:cliente.nome,grupoWhatsapp:grupo,valorNormal:preco.normal,descontoPercentual:preco.percentual,promocao:preco.promo?1:0};
   await run(`INSERT OR REPLACE INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','ASSINATURA',?,?)`,[String(pix.paymentId),cliente.revenda?.id||null,jid,jid,preco.final,JSON.stringify(contexto),gateway]);
   await run(`INSERT OR REPLACE INTO consulta_assinatura_pagamentos(payment_id,cliente_numero,cliente_jid,cliente_nome,plano_id,valor_normal,desconto_percentual,valor_pago,gateway,status,promocao) VALUES(?,?,?,?,?,?,?,?,?,'PENDENTE',?)`,[String(pix.paymentId),cliente.numero,jid,cliente.nome,plano.id,preco.normal,preco.percentual,preco.final,gateway,preco.promo?1:0]);
-  let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n🏦 ${nomeGateway(gateway)}\n💰 Valor: *${brl(preco.final)}*`;
+  let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n💰 Valor: *${brl(preco.final)}*`;
+  if(gateway==='depixpay') cab+=avisoTokenizacaoPix(gateway);
   if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
   await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
   // Envia o QR Code. Se o Mercado Pago não devolver a imagem Base64, gera a imagem a partir do PIX Copia e Cola.
@@ -12837,6 +12918,22 @@ app.post('/webhook/pixgo', (req, res) => {
 // Rota de diagnóstico: permite confirmar pelo navegador/Postman que o endpoint está online.
 app.get('/webhook/pixgo', (req, res) => res.status(200).json({ ok: true, webhook: 'pixgo' }));
 
+
+app.post('/webhook/depixpay',(req,res)=>{
+  res.status(200).json({ok:true});
+  setImmediate(async()=>{try{
+    const payload=req.body||{};
+    if(payload.event!=='payment.completed')return;
+    const paymentId=String(payload?.data?.payment_id||payload?.payment_id||'').trim();
+    if(!paymentId)return;
+    const p=await get('SELECT * FROM pix_pedidos WHERE payment_id=? AND gateway=?',[paymentId,'depixpay']);
+    if(!p||p.status!=='pending')return;
+    // O webhook não libera o pedido sozinho: consulta autenticada na API é obrigatória.
+    const st=await consultarStatusDepixPay(paymentId);
+    if(st?.success&&st.data?.status==='completed')verificarPagamento(paymentId,p.revenda_id,p.cliente_jid||p.revenda_jid,p.valor,p.tipo_pagamento||'SALDO',p.contexto_json,'depixpay');
+  }catch(e){console.log('⚠️ DEPIX WEBHOOK:',e.message);}});
+});
+app.get('/webhook/depixpay',(req,res)=>res.json({ok:true,webhook:'depixpay'}));
 
 // =========================
 // SITE DO CLIENTE — V170
@@ -15195,27 +15292,45 @@ app.post('/admin/servico/:id/baixar-excel', async (req, res) => {
 });
 
 
-app.get('/admin/pagamentos-config', async (req, res) => {
-  const cfg = await getPagamentoConfig();
-  const pixgoCred = !!process.env.PIXGO_API_KEY;
-  const mpCred = !!process.env.MERCADO_PAGO_ACCESS_TOKEN;
-  const mist = await getMisticPayConfig();
-  const mistCred = !!(mist.clientId && mist.clientSecret);
-  const cpfMask = mist.cpfPadrao ? `${mist.cpfPadrao.slice(0,3)}***${mist.cpfPadrao.slice(-2)}` : 'Não informado — teste sem CPF';
-  res.send(page('Formas de pagamento', `<h1>💳 Formas de pagamento</h1>
-  <div class="grid">
-    <div class="card"><h2>PixGo</h2><p>Status: <b>${cfg.pixgoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${pixgoCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="pixgo"><input type="hidden" name="ativo" value="${cfg.pixgoAtivo ? '0' : '1'}"><button class="btn ${cfg.pixgoAtivo ? 'red' : 'green'}">${cfg.pixgoAtivo ? 'Desativar' : 'Ativar'} PixGo</button></form></div>
-    <div class="card"><h2>Mercado Pago</h2><p>Status: <b>${cfg.mercadoPagoAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mpCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="mercadopago"><input type="hidden" name="ativo" value="${cfg.mercadoPagoAtivo ? '0' : '1'}"><button class="btn ${cfg.mercadoPagoAtivo ? 'red' : 'green'}">${cfg.mercadoPagoAtivo ? 'Desativar' : 'Ativar'} Mercado Pago</button></form></div>
-    <div class="card"><h2>MisticPay</h2><p>Status: <b>${cfg.misticpayAtivo ? '✅ ATIVO' : '❌ DESATIVADO'}</b></p><p>Credencial: <b>${mistCred ? '✅ CONFIGURADA' : '⚠️ AUSENTE'}</b></p><p>CPF padrão: <b>${safeHtml(cpfMask)}</b></p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="misticpay"><input type="hidden" name="ativo" value="${cfg.misticpayAtivo ? '0' : '1'}"><button class="btn ${cfg.misticpayAtivo ? 'red' : 'green'}">${cfg.misticpayAtivo ? 'Desativar' : 'Ativar'} MisticPay</button></form></div>
-  </div>
-  <div class="card"><h2>⚙️ Configurar MisticPay</h2><p class="muted">Mesmo padrão da integração MisticPay já validada: CPF fixo, transactionId único e webhook público.</p><form method="post" action="/admin/pagamentos-config/misticpay"><label>Client ID (pk_...)</label><input name="client_id" value="${safeHtml(mist.clientId)}" placeholder="pk_..." autocomplete="off"><label>Client Secret (sk_...)</label><input type="password" name="client_secret" placeholder="${mist.clientSecret ? '•••••••• (deixe vazio para manter)' : 'sk_...'}" autocomplete="new-password"><label>CPF padrão</label><input name="cpf_padrao" value="${safeHtml(mist.cpfPadrao)}" placeholder="Somente números"><label>Endereço público do sistema</label><input name="public_base_url" value="${safeHtml(mist.publicBaseUrl)}" placeholder="https://pixgonovo.onrender.com"><p class="muted">Webhook enviado: <code>${safeHtml(mist.publicBaseUrl ? mist.publicBaseUrl + '/webhook/misticpay' : 'não configurado')}</code></p><br><button class="btn green">💾 Salvar MisticPay</button></form></div>
-  <div class="card"><h2>Gateway padrão</h2><p class="muted">Usado quando somente um gateway estiver disponível. Com mais de um ativo, o cliente escolhe.</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway"><option value="pixgo" ${cfg.padrao==='pixgo'?'selected':''}>PixGo</option><option value="mercadopago" ${cfg.padrao==='mercadopago'?'selected':''}>Mercado Pago</option><option value="misticpay" ${cfg.padrao==='misticpay'?'selected':''}>MisticPay</option></select><br><br><button class="btn green">Salvar padrão</button></form></div>
-  <div class="card"><h2>Variáveis no Render</h2><p><code>PIXGO_API_KEY</code></p><p><code>MERCADO_PAGO_ACCESS_TOKEN</code></p><p class="muted">MisticPay é configurada diretamente neste painel.</p></div>`));
+app.get('/admin/pagamentos-config', async (req,res)=>{
+  const cfg=await getPagamentoConfig();
+  const hasKey=!!(await getConfig('depixpay_api_key_encrypted',''));
+  const statusVerificado=(await getConfig('depixpay_status_verificado','0'))==='1';
+  const mp=!!process.env.MERCADO_PAGO_ACCESS_TOKEN;
+  const mist=await getMisticPayConfig();
+  const selected=await gatewayPrincipal();
+  res.send(page('Formas de pagamento',`<h1>💳 Formas de pagamento</h1>
+  <div class="card"><h2>DePix Pay</h2><p>Estado: ${cfg.depixpayAtivo?'ATIVO':'DESATIVADO'} • API Key: ${hasKey?'CADASTRADA':'AUSENTE'}</p>
+  <form method="post" action="/admin/pagamentos-config/depixpay"><label>API Key de produção</label><input type="password" name="api_key" placeholder="${hasKey?'Deixe vazio para manter a chave':'Cole sua chave'}" autocomplete="new-password"><p class="muted">Consulta automática: GET /api/v1/payment/{id}/status.</p><button class="btn green">Salvar configuração</button></form>
+  <p class="muted">Webhook: ${safeHtml(BASE_URL||'SEU-DOMINIO')}/webhook/depixpay. Configure o webhook na DePix Pay. Status verificado: ${statusVerificado?'SIM':'NÃO'}.</p><form method="post" action="/admin/pagamentos-config/depixpay/test"><button class="btn">Testar conexão DePix Pay</button></form>
+  <form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="depixpay"><input type="hidden" name="ativo" value="${cfg.depixpayAtivo?'0':'1'}"><button class="btn ${cfg.depixpayAtivo?'red':'green'}">${cfg.depixpayAtivo?'Desativar':'Ativar'} DePix Pay</button></form></div>
+  <div class="card"><h2>Mercado Pago</h2><p>${cfg.mercadoPagoAtivo?'Ativo':'Inativo'} • ${mp?'Credencial presente':'Sem credencial'}</p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="mercadopago"><input type="hidden" name="ativo" value="${cfg.mercadoPagoAtivo?'0':'1'}"><button class="btn">Alternar Mercado Pago</button></form></div>
+  <div class="card"><h2>MisticPay</h2><p>${cfg.misticpayAtivo?'Ativo':'Inativo'} • ${mist.clientId&&mist.clientSecret?'Configurada':'Não configurada'}</p><form method="post" action="/admin/pagamentos-config/toggle"><input type="hidden" name="gateway" value="misticpay"><input type="hidden" name="ativo" value="${cfg.misticpayAtivo?'0':'1'}"><button class="btn">Alternar MisticPay</button></form><form method="post" action="/admin/pagamentos-config/misticpay"><label>Client ID</label><input name="client_id" value="${safeHtml(mist.clientId)}"><label>Client Secret</label><input name="client_secret" type="password" autocomplete="new-password"><label>CPF padrão</label><input name="cpf_padrao" value="${safeHtml(mist.cpfPadrao)}"><label>URL pública</label><input name="public_base_url" value="${safeHtml(mist.publicBaseUrl)}"><button class="btn green">Salvar MisticPay</button></form></div>
+  <div class="card"><h2>Gateway principal</h2><p>Cliente não escolhe gateway: ${safeHtml(selected||'nenhum ativo')}</p><form method="post" action="/admin/pagamentos-config/padrao"><select name="gateway">${['depixpay','mercadopago','misticpay'].map(g=>`<option value="${g}" ${cfg.padrao===g?'selected':''}>${safeHtml(nomeGateway(g))}</option>`).join('')}</select><button class="btn green">Salvar</button></form></div>`));
+});
+app.post('/admin/pagamentos-config/depixpay',async(req,res)=>{
+  try{
+    const key=String(req.body.api_key||'').trim();
+    if(key)await setConfig('depixpay_api_key_encrypted',protegerApiKeyDepix(key));
+    await setConfig('depixpay_status_verificado','0');
+    await setConfig('pagamento_depixpay_ativo','0');
+    res.redirect('/admin/pagamentos-config');
+  }catch(e){res.status(400).send(page('Configuração',`<h1>Não foi possível salvar</h1><p>${safeHtml(e.message)}</p><a href="/admin/pagamentos-config">Voltar</a>`));}
+});
+app.post('/admin/pagamentos-config/depixpay/test',async(req,res)=>{
+  try{
+    const merchant=await testarConexaoDepixPay();
+    await setConfig('depixpay_status_verificado','1');
+    res.send(page('Teste DePix Pay',`<h1>Conexão autenticada OK</h1><p>Merchant ativo: ${safeHtml(merchant.name||merchant.id)}</p><p>A rota oficial de status está configurada automaticamente. Agora você pode ativar o gateway no painel.</p><a href="/admin/pagamentos-config">Voltar</a>`));
+  }catch(e){await setConfig('depixpay_status_verificado','0');res.status(400).send(page('Teste DePix Pay',`<h1>Falha na consulta</h1><p>${safeHtml(e.response?.status?'HTTP '+e.response.status:e.message)}</p><a href="/admin/pagamentos-config">Voltar</a>`));}
 });
 app.post('/admin/pagamentos-config/toggle', async (req, res) => {
   const gateway = String(req.body.gateway || '');
   const ativo = req.body.ativo === '1' ? '1' : '0';
-  if (gateway === 'pixgo') await setConfig('pagamento_pixgo_ativo', ativo);
+  if (gateway === 'depixpay') {
+    if(ativo==='1'&&(!(await getConfig('depixpay_api_key_encrypted',''))||(await getConfig('depixpay_status_verificado','0'))!=='1'))return res.status(400).send('Configure a chave e teste a consulta autenticada com um ID de cobrança antes de ativar.');
+    await setConfig('pagamento_depixpay_ativo',ativo);
+  }
   if (gateway === 'mercadopago') await setConfig('pagamento_mercadopago_ativo', ativo);
   if (gateway === 'misticpay') await setConfig('pagamento_misticpay_ativo', ativo);
   notificarPainel('config', '💳 Forma de pagamento atualizada', `${nomeGateway(gateway)}: ${ativo==='1'?'ATIVO':'DESATIVADO'}`);
@@ -15234,7 +15349,7 @@ app.post('/admin/pagamentos-config/misticpay', async (req, res) => {
   res.redirect('/admin/pagamentos-config');
 });
 app.post('/admin/pagamentos-config/padrao', async (req, res) => {
-  const gateway = ['pixgo','mercadopago','misticpay'].includes(req.body.gateway) ? req.body.gateway : 'pixgo';
+  const gateway = ['depixpay','mercadopago','misticpay'].includes(req.body.gateway) ? req.body.gateway : 'depixpay';
   await setConfig('pagamento_gateway_padrao', gateway);
   res.redirect('/admin/pagamentos-config');
 });
