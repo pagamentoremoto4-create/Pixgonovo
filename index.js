@@ -9127,7 +9127,7 @@ async function consultarStatusDepixPay(paymentId) {
     const d=body.data;
     if(String(d.payment_id||'')!==id){console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'id_divergente');return null;}
     const status=String(d.status||'').trim().toLowerCase();
-    if(!['pending','completed','expired','cancelled','refunded'].includes(status)){
+    if(!['pending','delayed','completed','expired','cancelled','refunded'].includes(status)){
       console.warn('⚠️ DEPIX VALIDAÇÃO:',id,origem,'status_invalido',JSON.stringify(status));return null;
     }
     const amount=Number(d.amount);
@@ -9582,6 +9582,17 @@ ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.
   return true;
 }
 
+// V250: entrega em 'delayed' somente para cobranças NOVAS. A documentação
+// DePix Pay descreve 'delayed' como PIX pago aguardando liberação financeira.
+// Não processar automaticamente testes antigos, conforme solicitado.
+const DEPIX_DELAYED_INICIO_UTC = '2026-10-14 20:10:00';
+async function depixDelayedElegivel(paymentId) {
+  const p=await get('SELECT criado_em, status FROM pix_pedidos WHERE payment_id=? AND gateway=?',[String(paymentId),'depixpay']);
+  if(!p || !['pending','expired'].includes(String(p.status||'').toLowerCase()))return false;
+  const criado=String(p.criado_em||'').replace('T',' ').replace('Z','').slice(0,19);
+  return criado >= DEPIX_DELAYED_INICIO_UTC;
+}
+
 const pagamentosEmVerificacao = new Set();
 
 async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagamento='SALDO', contextoJson=null, gateway='pixgo') {
@@ -9596,7 +9607,9 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
     let status;
     try { status = await consultarStatus(paymentId, gateway); }
     catch(e) { console.error('⚠️ PIX POLLING:',gateway,String(paymentId).slice(0,24),e.message); return; }
-    if (status?.success && status.data?.status === 'completed') {
+    if (status?.success && (status.data?.status === 'completed' ||
+       (gateway==='depixpay' && status.data?.status === 'delayed' && await depixDelayedElegivel(paymentId)))) {
+       if(gateway==='depixpay')console.log('✅ V250 DEPIX: pagamento confirmado para entrega:',String(paymentId).slice(0,24),status.data.status);
       clearInterval(interval);
       finalizarVerificacao();
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
@@ -15926,7 +15939,7 @@ async function conciliarPagamentosDepixPendentes(){
         if(!resultado){console.log('⚠️ DEPIX CONCILIAÇÃO: consulta sem status validado',id.slice(0,24));continue;}
         const estado=resultado.data.status;
         console.log('🔎 DEPIX CONCILIAÇÃO STATUS:',id.slice(0,24),estado);
-        if(estado==='completed'){
+        if(estado==='completed' || (estado==='delayed' && await depixDelayedElegivel(id))){
           console.log('✅ DEPIX CONCILIAÇÃO: cobrança paga identificada',id.slice(0,24));
           verificarPagamento(id,p.revenda_id,p.cliente_jid||p.revenda_jid,p.valor,p.tipo_pagamento||'SALDO',p.contexto_json,'depixpay');
         }else if(estado==='expired'||estado==='cancelled'||estado==='refunded'){
