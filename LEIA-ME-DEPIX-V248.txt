@@ -1,0 +1,3 @@
+V248 - diagnóstico e recuperação DePix Pay
+Consulta inicial imediata e depois a cada 30s; conciliação após reinício; webhook logado; rechecagem de cobranças expiradas com confirmação oficial.
+NÃO TESTADO COM PAGAMENTO REAL. Instale mantendo /data e verifique logs DEPIX CONCILIAÇÃO STATUS / DEPIX STATUS CONSULTA. Não realize novo pagamento até conciliar R$ 30 e R$ 15.

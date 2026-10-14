@@ -9355,7 +9355,10 @@ async function consultarStatus(paymentId, gateway='pixgo') {
     return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, {
       headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000
     })).data;
-  } catch (e) { return null; }
+  } catch (e) {
+    if(gateway==='depixpay') console.error('⚠️ DEPIX STATUS CONSULTA:',String(paymentId).slice(0,24),e.response?.status||'',e.response?.data?.error||e.message);
+    return null;
+  }
 }
 
 async function escolherGatewayParaSessao(chave, sessao, enviarMensagem) {
@@ -9564,14 +9567,16 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
 
   let tentativas = 0;
   const finalizarVerificacao = () => pagamentosEmVerificacao.delete(chaveVerificacao);
-  const interval = setInterval(async () => {
+  const executarConsultaPagamento = async () => {
     tentativas++;
-    const status = await consultarStatus(paymentId, gateway);
+    let status;
+    try { status = await consultarStatus(paymentId, gateway); }
+    catch(e) { console.error('⚠️ PIX POLLING:',gateway,String(paymentId).slice(0,24),e.message); return; }
     if (status?.success && status.data?.status === 'completed') {
       clearInterval(interval);
       finalizarVerificacao();
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
-      const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status="pending"', [paymentId]);
+      const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status IN ("pending","expired")', [paymentId]);
       if (!marcado?.changes) return;
 
       let novo = null;
@@ -9667,8 +9672,11 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
       }
     }
-    if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); }
-  }, 30000);
+    if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); } // Worker persistente DePix retoma cobranças após este período ou restart.
+  };
+  const interval = setInterval(executarConsultaPagamento, 30000);
+  setTimeout(() => executarConsultaPagamento().catch(e => console.error('⚠️ PIX CONSULTA IMEDIATA:', e.message)), 500);
+
 }
 
 async function finalizarPedido(pedido, opcoes = {}) {
@@ -12923,11 +12931,12 @@ app.post('/webhook/depixpay',(req,res)=>{
   res.status(200).json({ok:true});
   setImmediate(async()=>{try{
     const payload=req.body||{};
+    console.log('📨 DEPIX WEBHOOK EVENTO:',String(payload.event||''),String(payload?.data?.payment_id||'').slice(0,24));
     if(payload.event!=='payment.completed')return;
     const paymentId=String(payload?.data?.payment_id||payload?.payment_id||'').trim();
     if(!paymentId)return;
     const p=await get('SELECT * FROM pix_pedidos WHERE payment_id=? AND gateway=?',[paymentId,'depixpay']);
-    if(!p||p.status!=='pending')return;
+    if(!p||!['pending','expired'].includes(p.status))return;
     // O webhook não libera o pedido sozinho: consulta autenticada na API é obrigatória.
     const st=await consultarStatusDepixPay(paymentId);
     if(st?.success&&st.data?.status==='completed')verificarPagamento(paymentId,p.revenda_id,p.cliente_jid||p.revenda_jid,p.valor,p.tipo_pagamento||'SALDO',p.contexto_json,'depixpay');
@@ -15875,6 +15884,38 @@ iniciarTelegram()
     setTimeout(() => watchdogSessoesWhatsApp().catch(()=>{}), 8000);
   })
   .catch(e => console.log('❌ V93 START:', e.message));
+
+// V247: conciliação persistente DePix Pay, inclusive após reinícios do Render.
+// A API oficial é a única fonte de confirmação; a função de pagamento usa
+// UPDATE condicional (pending -> completed) para evitar processamento repetido.
+let conciliacaoDepixEmAndamento=false;
+async function conciliarPagamentosDepixPendentes(){
+  if(conciliacaoDepixEmAndamento)return;
+  conciliacaoDepixEmAndamento=true;
+  try{
+    const pendentes=await all(`SELECT * FROM pix_pedidos WHERE gateway='depixpay' AND status IN ('pending','expired') ORDER BY criado_em DESC LIMIT 100`);
+    for(const p of pendentes){
+      const id=String(p.payment_id||'');
+      if(!id)continue;
+      try{
+        const resultado=await consultarStatusDepixPay(id);
+        if(!resultado){console.log('⚠️ DEPIX CONCILIAÇÃO: consulta sem status validado',id.slice(0,24));continue;}
+        const estado=resultado.data.status;
+        console.log('🔎 DEPIX CONCILIAÇÃO STATUS:',id.slice(0,24),estado);
+        if(estado==='completed'){
+          console.log('✅ DEPIX CONCILIAÇÃO: cobrança paga identificada',id.slice(0,24));
+          verificarPagamento(id,p.revenda_id,p.cliente_jid||p.revenda_jid,p.valor,p.tipo_pagamento||'SALDO',p.contexto_json,'depixpay');
+        }else if(estado==='expired'||estado==='cancelled'||estado==='refunded'){
+          // Preserva cobrança para eventual conciliação tardia; não autoriza crédito sem completed.
+          if(estado!=='expired') await run('UPDATE pix_pedidos SET status=? WHERE payment_id=? AND gateway=? AND status=?',[estado,id,'depixpay','pending']);
+        }
+      }catch(e){console.error('⚠️ DEPIX CONCILIAÇÃO:',id.slice(0,24),e.response?.status||'',e.response?.data?.error||e.message);}
+    }
+  }catch(e){console.error('⚠️ DEPIX WORKER:',e.message);}
+  finally{conciliacaoDepixEmAndamento=false;}
+}
+setTimeout(()=>conciliarPagamentosDepixPendentes().catch(()=>{}),15000);
+setInterval(()=>conciliarPagamentosDepixPendentes().catch(()=>{}),60000);
 
 // Redeploy/restart do Render não deve exigir botão "Reconectar".
 // O watchdog recupera qualquer sessão registrada que cair ou não abrir no boot.
