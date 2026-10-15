@@ -5248,7 +5248,7 @@ Digite *menu* para voltar.`);
     return;
   }
 
-  if (sess?.etapa === 'esim_ddd' && (opcao==='0'||lower==='voltar')) {
+  if (sess?.etapa === 'esim_ddd' && (opcao==='0'||texto==='voltar')) {
     await salvarSessaoPedido(from,{etapa:'esim_escolha'});
     await enviarListaEsim(from);
     return;
@@ -5306,13 +5306,13 @@ Digite *menu* para voltar.`);
     const idx=Math.max(0,Number(sess.dhruIndice||0));
     const campo=campos[idx];
     if(!campo){await apagarSessaoPedido(from);await enviarTexto(from,'❌ Campos do serviço não encontrados. Sincronize novamente a API.');return;}
-    if(String(textoOriginal||'').trim()==='0'||lower==='voltar'){
+    if(String(textoOriginal||'').trim()==='0'||texto==='voltar'){
       const catNome=String(servico.categoria||'');
       const catLocal=await get('SELECT * FROM servicos_categorias WHERE ativo=1 AND nome=?',[catNome]).catch(()=>null);
       if(catLocal && ['BLOQUEIO TIM','DESBLOQUEIO TIM'].includes(String(catLocal.nome||'').toUpperCase())){
-        await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+        await enviarMenuTelegram(msg.chat.id,cliente);
       }else{
-        await abrirServicosDesbloqueiosWhatsApp(from,cliente);
+        await enviarMenuTelegram(msg.chat.id,cliente);
       }
       return;
     }
@@ -5335,18 +5335,18 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'entrada') {
     const servico = await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1', [sess.servicoId]);
     if (!servico) { await apagarSessaoPedido(from); await enviarTexto(from, '❌ Serviço indisponível.'); return; }
-    if(opcao==='0'||lower==='voltar'){
+    if(opcao==='0'||texto==='voltar'){
       const catNome=String(servico.categoria||'');
       const catLocal=await get('SELECT * FROM servicos_categorias WHERE ativo=1 AND nome=?',[catNome]).catch(()=>null);
       if(catLocal && ['BLOQUEIO TIM','DESBLOQUEIO TIM'].includes(String(catLocal.nome||'').toUpperCase())){
-        await abrirBlacklistBrazilCompactoWhatsApp(from,cliente);
+        await enviarMenuTelegram(msg.chat.id,cliente);
       }else{
-        await abrirServicosDesbloqueiosWhatsApp(from,cliente);
+        await enviarMenuTelegram(msg.chat.id,cliente);
       }
       return;
     }
     if(servico.api_provider==='GGSOMA'){await confirmarCompraGgsoma(from,cliente,servico,textoOriginal);return;}
-    if(opcao==='0'||lower==='voltar'){await voltarColetaServicoWhatsApp(from,cliente,sess);return;}
+    if(opcao==='0'||texto==='voltar'){await enviarMenuTelegram(msg.chat.id,cliente);return;}
     const validacao = validarEntradaServico(servico, textoOriginal);
     if (!validacao.ok) { await enviarTexto(from, validacao.erro); return; }
     const erroDhru=await dhruErroImeiAntesPedido(servico,validacao.entradas);

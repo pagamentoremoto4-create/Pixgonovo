@@ -1,0 +1,1 @@
+V251: Corrigido ReferenceError lower is not defined na coleta de servicos Telegram; substituido por texto. Retorno da coleta Telegram nao chama menus WhatsApp. Sem alteracoes na logica DePix V250.
