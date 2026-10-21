@@ -11468,6 +11468,7 @@ async function consultaGrupoWhatsAppLiberar(motivo='finalizada'){
 }
 async function consultaFalhar(id,erro){
   const msg=String(erro?.message||erro||'Erro desconhecido').slice(0,1000);
+  console.error('❌ V254 CONSULTA FALHOU:',{id,canal:consultaEmMemoria?.canal||'GRUPO',etapa:consultaEmMemoria?.etapaEntrega||'desconhecida',erro:msg,stack:String(erro?.stack||'').slice(0,1800)});
   try{ await run(`UPDATE consultas_assinatura SET status='ERRO',erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[msg,id]); }catch(_){}
   try{
     if(consultaEmMemoria?.canal==='WHATSAPP_PRIVADO'){
@@ -11699,7 +11700,7 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
       await consultaPrivadaApagarProcessando(ativo.statusProcessando);
       if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await enviarTexto(destino,`✅ *Consulta concluída*\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
       else if(semResultado){await enviarTexto(destino,consultaTextoNaoEncontrado(consultaNomeVisualPorComando(ativo.comando),ativo.dado_consulta));}
-      else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
+      else{try{ativo.etapaEntrega='PDF_WHATSAPP_PRIVADO';const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);try{const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(!sock)throw new Error('WhatsApp desconectado no momento da entrega.');await sock.sendMessage(destino,{document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,caption:'✅ Sua consulta foi concluída.'});}finally{try{fs.unlinkSync(pdf)}catch(_){}}}catch(erroPdf){console.error('⚠️ V254 PDF PRIVADO FALHOU; enviando texto:',erroPdf?.stack||erroPdf);ativo.etapaEntrega='TEXTO_WHATSAPP_PRIVADO';const partes=consultaLimparTextoYan(texto).match(/[\s\S]{1,3000}/g)||['Resultado recebido.'];for(const parte of partes)await enviarTexto(destino,parte);}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
       await avisarGrupoConsultaPrivadaConcluida(ativo);
       if(consultaTimeoutTimer){clearTimeout(consultaTimeoutTimer);consultaTimeoutTimer=null;}if(consultaPollingTimer){clearInterval(consultaPollingTimer);consultaPollingTimer=null;}consultaEmMemoria=null;return;
@@ -11708,7 +11709,7 @@ async function consultaTratarTextoRespostaTelegram(texto,messageId='',opcoes={})
       const destino=String(ativo.telegram_entrega_id||'');
       if(link){const linkTemporario=await consultaCriarLinkTemporario(ativo,link);await consultaVipBot.sendMessage(destino,`✅ Consulta concluída\n\n🔗 Resultado completo:\n${linkTemporario}\n\n⏳ Link disponível por 15 minutos.`);}
       else if(semResultado){await consultaVipBot.sendMessage(destino,consultaLimparTextoYan(texto)||'Nenhum resultado encontrado.');}
-      else{const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);await consultaVipBot.sendDocument(destino,pdf,{caption:'✅ Sua consulta foi concluída.'});try{fs.unlinkSync(pdf)}catch(_){}}
+      else{try{ativo.etapaEntrega='PDF_TELEGRAM';const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);try{await consultaVipBot.sendDocument(destino,pdf,{caption:'✅ Sua consulta foi concluída.'});}finally{try{fs.unlinkSync(pdf)}catch(_){}}}catch(erroPdf){console.error('⚠️ V254 PDF TELEGRAM FALHOU; enviando texto:',erroPdf?.stack||erroPdf);ativo.etapaEntrega='TEXTO_TELEGRAM';const partes=consultaLimparTextoYan(texto).match(/[\s\S]{1,3000}/g)||['Resultado recebido.'];for(const parte of partes)await consultaVipBot.sendMessage(destino,parte);}}
       await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
       await avisarGrupoConsultaPrivadaConcluida(ativo);
       if(ativo.telegram_origem_chat_id!==destino)await consultaVipBot.sendMessage(ativo.telegram_origem_chat_id,'✅ Consulta concluída e enviada no privado.').catch(()=>{});
@@ -11736,19 +11737,28 @@ ${linkTemporario}
     }else if(semResultado){
       await consultaEnviarTextoWhatsApp(ativo,texto,true);
     }else{
-      const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);
-      const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);
-      await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
-      const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
-      if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
-      const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
-      const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
-      await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
-        document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
-        caption:`✅ @${String(nomeMencao).replace(/^@+/,'')}, sua consulta foi concluída.\n📄 O resultado em texto foi convertido para PDF.\n\n🟢 Grupo liberado para a próxima consulta.`,
-        mentions:[ativo.cliente_jid]
-      });
-      try{fs.unlinkSync(pdf)}catch(_){}
+      // V254: resultado já recebido não pode ser perdido se PDF ou envio de documento falhar.
+      try{
+        ativo.etapaEntrega='PDF_GRUPO_WHATSAPP';
+        const linhasTexto=consultaLimparTextoYan(texto).split(/\n+/).map(x=>x.trim()).filter(Boolean);
+        const pdf=await consultaGerarPdf({titulo:'Resultado retornado em texto',linhas:linhasTexto.length?linhasTexto:['Resultado recebido.']},ativo);
+        try{
+          await run(`UPDATE consultas_assinatura SET status='PDF_GERADO',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
+          const sockEntrega=ativo.socket||await consultaObterSocketWhatsApp(ativo.grupo_whatsapp);
+          if(!sockEntrega) throw new Error('WhatsApp desconectado no momento da entrega.');
+          const numeroMencao=jidToNumber(ativo.cliente_jid)||String(ativo.cliente_jid||'').split('@')[0];
+          const nomeMencao=ativo.cliente_nome&&ativo.cliente_nome!=='Cliente'?ativo.cliente_nome:`@${numeroMencao}`;
+          await sockEntrega.sendMessage(ativo.grupo_whatsapp,{
+            document:fs.readFileSync(pdf),mimetype:'application/pdf',fileName:`consulta-${ativo.id}.pdf`,
+            caption:`✅ @${String(nomeMencao).replace(/^@+/,'')}, sua consulta foi concluída.\n📄 O resultado em texto foi convertido para PDF.\n\n🟢 Grupo liberado para a próxima consulta.`,
+            mentions:[ativo.cliente_jid]
+          });
+        }finally{try{fs.unlinkSync(pdf)}catch(_){}}
+      }catch(erroPdf){
+        console.error('⚠️ V254 PDF GRUPO FALHOU; entregando resultado em texto:',erroPdf?.stack||erroPdf);
+        ativo.etapaEntrega='TEXTO_GRUPO_WHATSAPP';
+        await consultaEnviarTextoWhatsApp(ativo,texto,false);
+      }
     }
     await run(`UPDATE consultas_assinatura SET status='FINALIZADA',atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[ativo.id]);
     await consultaGrupoWhatsAppLiberar('finalizada');
