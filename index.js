@@ -1431,10 +1431,36 @@ function timUnlockPedidoIdFromReference(ref){
   return Number.isInteger(id)&&id>0?id:0;
 }
 
+// V256: a identificação do serviço é persistida pelo ID do catálogo.
+// O nome só é usado para reconhecer registros legados e localizar o ID na primeira execução.
+let timUnlockServicoIdV256 = 0;
+function timUnlockNomeCompativelV256(nome){
+  const n=normalizarNomeServico(nome).replace(/^[^a-z0-9]+/, '');
+  return n === 'desbloqueio tim' || n.startsWith('desbloqueio tim ');
+}
+async function timUnlockCarregarServicoIdV256(){
+  const salvo=Number(await getConfig('tim_unlock_servico_id_v256','0'))||0;
+  if(salvo){
+    const existente=await get('SELECT id FROM servicos_catalogo WHERE id=?',[salvo]);
+    if(existente){timUnlockServicoIdV256=salvo;return salvo;}
+  }
+  const candidatos=await all('SELECT id,nome FROM servicos_catalogo ORDER BY id');
+  const atual=candidatos.find(x=>timUnlockNomeCompativelV256(x.nome));
+  if(atual){
+    timUnlockServicoIdV256=Number(atual.id);
+    await setConfig('tim_unlock_servico_id_v256',String(atual.id));
+    console.log('✅ V256 SERVIÇO TIM VINCULADO AO ID:',atual.id);
+  }else console.log('⚠️ V256: serviço Desbloqueio TIM não identificado; verificar catálogo.');
+  return timUnlockServicoIdV256;
+}
 function timUnlockIsDesbloqueioTim(pedido){
-  const nome = normalizarNomeServico(pedido?.servico_nome || '');
-  // Aceita o serviço base e variações do catálogo, ex.: "Desbloqueio TIM Premium".
-  return nome === 'desbloqueio tim' || nome.startsWith('desbloqueio tim ');
+  const id=Number(pedido?.servico_id || pedido?.catalogo_id || 0);
+  if(timUnlockServicoIdV256 && id) return id===timUnlockServicoIdV256;
+  return timUnlockNomeCompativelV256(pedido?.servico_nome || pedido?.nome || '');
+}
+async function timUnlockIsServicoV256(servico){
+  if(!timUnlockServicoIdV256) await timUnlockCarregarServicoIdV256();
+  return timUnlockIsDesbloqueioTim(servico);
 }
 function timUnlockImei(pedido){ const v=String(pedido?.imei||pedido?.entrada_valor||'').replace(/\D/g,''); return imeiLuhnValido(v)?v:''; }
 async function timUnlockDhruProduct(){
@@ -4411,7 +4437,7 @@ ${entrada}
 ${extra}` : ''}
 
 🏢 Centralunlocker`, String(pedido.servico_nome || '').toLowerCase().includes('esim') ? 'ESIM' : 'NOVO_SERVICO');
-  if (timUnlockIsDesbloqueioTim(pedido)) {
+  if (await timUnlockIsServicoV256(pedido)) {
     try { await avisarHistoricoInternoDesbloqueioTim(pedido); } catch(e) { console.log('⚠️ HISTÓRICO INTERNO TIM:',pedido.id,e.message); }
     try { await executarConsultaAutomaticaDesbloqueioTim(pedido.id); } catch(e) { console.log('⚠️ DHRU TIM AUTO HOOK:',pedido.id,e.message); }
   }
@@ -4461,7 +4487,7 @@ async function avisarEsimAutomaticoAdminTelegram(pedido, item) {
   }
 }
 
-async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
+async function avisarNovoLoteAdmins(revenda, servico, quantidade, total, criados=[]) {
   await enviarParaAdmins(`📦 *Novo lote recebido*
 
 🏪 Revenda: ${revenda.nome}
@@ -4471,6 +4497,28 @@ async function avisarNovoLoteAdmins(revenda, servico, quantidade, total) {
 📍 Status: PENDENTE
 
 🏢 Centralunlocker`, 'NOVO_SERVICO');
+  if (!criados.length || !(await timUnlockIsServicoV256(servico))) return;
+  const encontrados=[];
+  for (const item of criados){
+    try {
+      const pedido=await get('SELECT * FROM pedidos WHERE id=?',[item.id]);
+      if(!pedido)continue;
+      const imei=normalizarImeiHistorico(pedido.entrada_valor||pedido.imei);
+      const registros=await localizarDadosInternosPorImei(imei,pedido.id);
+      if(registros.length) encontrados.push({pedido,imei,registros});
+    }catch(e){console.log('⚠️ V256 HISTÓRICO LOTE IMEI:',item.id,e.stack||e.message);}
+  }
+  console.log(`🔎 V256 HISTÓRICO LOTE: ${criados.length} pedidos verificados, ${encontrados.length} IMEIs com histórico`);
+  if(!encontrados.length)return;
+  const cab=`🚨 *HISTÓRICO INTERNO LOCALIZADO — LOTE*\n\n📦 Pedidos: ${criados.length}\n🔎 IMEIs com histórico: ${encontrados.length}\n\n`;
+  let parte=cab;
+  for(const x of encontrados){
+    const bloco=`🔢 IMEI: ${x.imei}\n🆕 Pedido: #${x.pedido.id}\n${x.registros.slice(0,3).map((r,i)=>textoRegistroInterno(r,i+1)).join('\n────────\n')}\n${x.registros.length>3?'➕ Outros registros no painel\n':''}\n`;
+    if(parte.length+bloco.length>3000){await enviarParaAdmins(parte+'\n🔒 Somente administradores','NOVO_SERVICO');parte='🚨 *HISTÓRICO INTERNO — CONTINUAÇÃO*\n\n';}
+    parte+=bloco;
+  }
+  await enviarParaAdmins(parte+'\n🔒 Somente administradores','NOVO_SERVICO');
+  notificarPainel('pedido','🚨 Histórico localizado em lote',`${encontrados.length} IMEI(s) com registros internos em ${criados.length} pedidos`);
 }
 
 
@@ -5400,7 +5448,7 @@ Digite *menu* para voltar.`);
       return;
     }
     notificarPainel('pedido', '📦 Novo lote Telegram', `${cliente.nome} - ${criados.length} pedidos`);
-    await avisarNovoLoteAdmins(cliente, servico, criados.length, valor * criados.length);
+    await avisarNovoLoteAdmins(cliente, servico, criados.length, valor * criados.length, criados);
     await enviarParaCanaisCliente(cliente, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
     return;
   }
@@ -7131,7 +7179,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
     if (modalidadeServico === 'PRE_PAGO' && criados.length) await run('UPDATE revendas SET saldo=MAX(0, saldo-?), atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [valor * criados.length, cliente.id]);
     notificarPainel('pedido', '🔔 Novo pedido WhatsApp', `${cliente.nome} - ${servico.nome}`);
     if (criados.length === 1) await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?', [criados[0].id]));
-    else await avisarNovoLoteAdmins(cliente, servico, criados.length, totalPedido);
+    else await avisarNovoLoteAdmins(cliente, servico, criados.length, totalPedido, criados);
     const entradaLabel = labelEntradaServico(servico);
     const entradaIcone = iconeEntradaServico(servico);
     const detalhesEntradas = criados.length === 1
@@ -8222,10 +8270,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
     }
 
     notificarPainel('pedido', '📦 Novo lote recebido', `${revenda.nome} - ${criados.length} pedidos`);
-    await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length);
-    if (normalizarNomeServico(servico.nome) === 'desbloqueio tim') {
-      for (const c of criados) { try { const pp=await get('SELECT * FROM pedidos WHERE id=?',[c.id]); await avisarHistoricoInternoDesbloqueioTim(pp); } catch(e) { console.log('⚠️ HISTÓRICO INTERNO TIM LOTE:',c.id,e.message); } }
-    }
+    await avisarNovoLoteAdmins(revenda, servico, criados.length, valor * criados.length, criados);
     await enviarParaCanaisCliente(revenda, `✅ Lote recebido\n\n🛠 ${servico.nome}\n📦 Pedidos criados: ${criados.length}\n💰 Valor por item: ${brl(valor)}\n💰 Total: ${brl(valor * criados.length)}\n\nCada IMEI virou um pedido separado e será avisado de 1 em 1 quando finalizar.${duplicados.length ? `\n\n⚠️ Duplicados ignorados:\n${duplicados.join('\n')}` : ''}`, from);
     return;
   }
@@ -13113,7 +13158,7 @@ app.post('/cliente/servico/:id', clienteAuth, clienteCsrf, async (req,res)=>{
   for(const entrada of val.entradas){if(tipo==='IMEI'&&await get('SELECT id FROM pedidos WHERE imei=? AND servico_id=? AND status IN ("PENDENTE","EM PROCESSO")',[entrada,s.id])){duplicados.push(entrada);continue;}const ins=await run(`INSERT INTO pedidos (tipo,revenda_id,revenda_nome,revenda_jid,revenda_numero,servico_id,servico_nome,imei,entrada_valor,tipo_entrada,entrada_label,lote_id,valor,status,cobrado) VALUES ('REVENDA',?,?,?,?,?,?,?,?,?,?,?,?, 'PENDENTE',?)`,[atual.id,atual.nome,destino,normalizarNumeroWhatsApp(atual.whatsapp),s.id,s.nome,tipo==='IMEI'?entrada:null,entrada,tipo,labelEntradaServico(s),lote,preco,modalidade==='PRE_PAGO'?1:0]);criados.push({id:ins.lastID,entrada});}
   if(modalidade==='PRE_PAGO'&&criados.length)await run('UPDATE revendas SET saldo=MAX(0,saldo-?),atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[preco*criados.length,atual.id]);
   if(!criados.length)return clienteRedirect(res,`/cliente/servico/${s.id}`,'erro','Nenhum pedido novo foi criado; os itens já estão em andamento.');
-  notificarPainel('pedido','🌐 Novo pedido pelo site',`${atual.nome} - ${s.nome}`);if(criados.length===1)await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?',[criados[0].id]));else await avisarNovoLoteAdmins(atual,s,criados.length,preco*criados.length);
+  notificarPainel('pedido','🌐 Novo pedido pelo site',`${atual.nome} - ${s.nome}`);if(criados.length===1)await avisarNovoPedidoAdmins(await get('SELECT * FROM pedidos WHERE id=?',[criados[0].id]));else await avisarNovoLoteAdmins(atual,s,criados.length,preco*criados.length,criados);
   await enviarParaCanaisCliente(atual,`📦 Pedido recebido pelo site\n\n🛠 Serviço: ${s.nome}\n📦 Quantidade: ${criados.length}\n💰 Total: ${brl(preco*criados.length)}\n📍 Status: PENDENTE${duplicados.length?'\n\nDuplicados ignorados: '+duplicados.join(', '):''}${val.invalidos?.length?'\n\n'+avisoImeisInvalidos(val.invalidos):''}`,destino,{dhruPedidoId:s.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
   if(['DHRU','GGSOMA'].includes(s.api_provider))for(const p of criados){try{await executarPedidoDhru(p.id)}catch(e){console.log('❌ DHRU site',p.id,e.message)}}
   clienteRedirect(res,'/cliente/historico','ok',`${criados.length} pedido(s) criado(s) com sucesso.${val.invalidos?.length?' '+avisoImeisInvalidos(val.invalidos):''}`);
@@ -15098,7 +15143,7 @@ app.get('/admin/servico/:id/imeis', async (req, res) => {
     SUM(CASE WHEN status='FINALIZADO' THEN 1 ELSE 0 END) finalizados
     FROM pedidos WHERE servico_id=?`, [servicoId]);
 
-  const controleNota = normalizarNomeServico(s.nome) === 'desbloqueio tim';
+  const controleNota = await timUnlockIsServicoV256(s);
   const notaFiltro = controleNota && ['nao_enviadas', 'enviadas'].includes(String(req.query.notas || '')) ? String(req.query.notas) : '';
   const contagensNotas = controleNota ? await get(`SELECT
     SUM(CASE WHEN COALESCE(nota_enviada,0)=0 AND status IN ('PENDENTE','EM PROCESSO') THEN 1 ELSE 0 END) nao_enviadas,
@@ -15182,8 +15227,8 @@ app.get('/admin/pedido/:id/dhru-tim-original',async(req,res)=>{
 });
 
 app.post('/admin/pedido/:id/nota-toggle', async (req, res) => {
-  const p = await get(`SELECT p.id,p.nota_enviada,s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [req.params.id]);
-  if (!p || normalizarNomeServico(p.servico_nome) !== 'desbloqueio tim') return res.redirect(req.get('referer') || '/admin/servicos');
+  const p = await get(`SELECT p.id,p.servico_id,p.nota_enviada,s.nome AS servico_nome FROM pedidos p LEFT JOIN servicos_catalogo s ON s.id=p.servico_id WHERE p.id=?`, [req.params.id]);
+  if (!p || !(await timUnlockIsServicoV256(p))) return res.redirect(req.get('referer') || '/admin/servicos');
   const novo = Number(p.nota_enviada || 0) ? 0 : 1;
   await run(`UPDATE pedidos SET nota_enviada=?, nota_enviada_em=${novo ? 'CURRENT_TIMESTAMP' : 'NULL'}, atualizado_em=CURRENT_TIMESTAMP WHERE id=?`, [novo, p.id]);
   res.redirect(req.get('referer') || '/admin/servicos');
