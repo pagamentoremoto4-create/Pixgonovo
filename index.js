@@ -9361,7 +9361,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       const detalhe = planoNome
         ? `${planoNome}${ddd ? ` • DDD ${ddd}` : ''}${qtd > 1 ? ` • ${qtd} eSIMs` : ' • 1 eSIM'}`
         : (sess.tipo_pix === 'SALDO' ? 'Adicionar saldo' : 'Pagamento do pedido');
-      const caption = `💠 PIX\n\n💰 ${brl(valor)}\n\n${detalhe}\n\n📷 Aponte a câmera ou copie o PIX\n\n🟡 Aguardando pagamento${avisoTokenizacaoPix(gateway)}`;
+      const caption = `🏷️ CENTRAL UNLOCKER\n💳 PAGAMENTO VIA PIX\n\n💰 VALOR: *${brl(valor)}*\n📦 ${detalhe}\n\n📷 Escaneie o QR Code ou toque em COPIAR PIX.\n⏳ Aguardando pagamento.`;
       const teclado = [[{ text: '📋 COPIAR PIX', copy_text: { text: codigoPix } }]];
       if (sess?.tipo_compra === 'ESIM') teclado.push([{ text: '⬅️ VOLTAR AO MENU', callback_data: 'menu_voltar' }]);
       await botDestino.sendPhoto(idDestino, qrBuffer, { caption, reply_markup: { inline_keyboard: teclado } });
@@ -9372,13 +9372,13 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
     }
   }
 
-  await enviarMensagem(`✅ PIX GERADO\n\n💰 Valor: ${brl(valor)}${avisoTokenizacaoPix(gateway)}`);
+  await enviarMensagem(`🏷️ *CENTRAL UNLOCKER*\n💳 *PAGAMENTO VIA PIX*\n\n💰 *VALOR: ${brl(valor)}*\n⏳ Aguardando pagamento.`);
 
-  if (['mercadopago','misticpay'].includes(gateway) && pix?.qrCodeBase64) {
+  if (qrCode) {
     try {
       const base64Limpo = String(pix.qrCodeBase64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '').replace(/\s+/g, '');
-      const bufferQr = Buffer.from(base64Limpo, 'base64');
-      if (!bufferQr.length) throw new Error('QR Code Base64 vazio');
+      const bufferQr = pix?.qrCodeBase64 && ['mercadopago','misticpay'].includes(gateway) ? Buffer.from(base64Limpo, 'base64') : await QRCode.toBuffer(String(qrCode).replace(/[\r\n\t]/g, '').trim(), { width: 620, margin: 2 });
+      if (!bufferQr.length) throw new Error('QR Code vazio');
       if (ehTelegram) {
         const botDestino=String(chave).startsWith('cvtg:')?consultaVipBot:tgBot;
         if (!botDestino) throw new Error('Telegram não inicializado');
@@ -9392,13 +9392,6 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
     } catch (e) { console.log('⚠️ Não foi possível enviar a imagem do QR Code do Mercado Pago:', e.message); }
   }
 
-  if(gateway==='depixpay' && qrCode && !ehTelegram) {
-    try {
-      const qrBuffer=await QRCode.toBuffer(String(qrCode),{width:520,margin:2});
-      const numero=String(chave).startsWith('wa:')?String(chave).slice(3):String(chave);
-      if(whatsappSocket&&conectado) await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(numero)),{image:qrBuffer,mimetype:'image/png',caption:'📲 QR Code PIX'});
-    }catch(e){console.log('⚠️ QR DePix:',e.message);}
-  }
   await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
   await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
@@ -12440,8 +12433,7 @@ async function consultaAssinaturaGerarPixGrupo(sock,grupo,jid,nome,plano){
   const contexto={tipoCompra:'ASSINATURA_GRUPO',planoId:Number(plano.id),clienteNumero:cliente.numero,clienteJid:jid,clienteNome:cliente.nome,grupoWhatsapp:grupo,valorNormal:preco.normal,descontoPercentual:preco.percentual,promocao:preco.promo?1:0};
   await run(`INSERT OR REPLACE INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','ASSINATURA',?,?)`,[String(pix.paymentId),cliente.revenda?.id||null,jid,jid,preco.final,JSON.stringify(contexto),gateway]);
   await run(`INSERT OR REPLACE INTO consulta_assinatura_pagamentos(payment_id,cliente_numero,cliente_jid,cliente_nome,plano_id,valor_normal,desconto_percentual,valor_pago,gateway,status,promocao) VALUES(?,?,?,?,?,?,?,?,?,'PENDENTE',?)`,[String(pix.paymentId),cliente.numero,jid,cliente.nome,plano.id,preco.normal,preco.percentual,preco.final,gateway,preco.promo?1:0]);
-  let cab=`✅ *PIX GERADO*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n💰 Valor: *${brl(preco.final)}*`;
-  if(gateway==='depixpay') cab+=avisoTokenizacaoPix(gateway);
+  let cab=`🏷️ *CENTRAL UNLOCKER*\n💳 *PAGAMENTO VIA PIX*\n\n👤 @${cliente.numero}\n💎 Plano: ${plano.nome}\n💰 *VALOR: ${brl(preco.final)}*\n⏳ Aguardando pagamento.`;
   if(preco.promo) cab+=`\n🎁 Desconto: ${preco.percentual}% OFF`;
   await sock.sendMessage(grupo,{text:cab,mentions:[jid]});
   // Envia o QR Code. Se o Mercado Pago não devolver a imagem Base64, gera a imagem a partir do PIX Copia e Cola.
