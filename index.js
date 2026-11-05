@@ -7413,10 +7413,11 @@ async function menuEstoqueTG(chatId){
  return tgBot.sendMessage(chatId,'📥 *ESTOQUE*\n\nSelecione um produto ou adicione novos QR Codes.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}})
 }
 async function escolherProdutoEstoqueTG(chatId){
- const ops=await all('SELECT * FROM telegram_esim_operadoras WHERE ativo=1 ORDER BY ordem,id');
- const kb=ops.map(o=>[{text:`📡 ${String(o.nome).toUpperCase()}`,callback_data:`admstock_op_${o.id}`}]);
+ // Exibir todos os planos eSIM ativos diretamente, inclusive os que nao possuem operadora vinculada.
+ const ps=await all('SELECT id,nome_plano,operadora_slug FROM esim_planos WHERE ativo=1 ORDER BY nome_plano,id');
+ const kb=ps.map(p=>[{text:`📦 ${p.nome_plano}`,callback_data:`admstock_prod_${p.id}`}]);
  kb.push([{text:'⬅️ Estoque',callback_data:'admin_estoque'}]);
- return tgBot.sendMessage(chatId,'📥 *ADICIONAR ESTOQUE*\n\nEscolha a operadora:',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}})
+ return tgBot.sendMessage(chatId,ps.length?'📥 *ADICIONAR ESTOQUE*\n\nEscolha o produto que receberá os QR Codes:':'📥 *ADICIONAR ESTOQUE*\n\nNenhum plano eSIM ativo foi encontrado. Verifique se o produto foi cadastrado como plano eSIM e está ativo.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}})
 }
 async function escolherPlanoEstoqueTG(chatId,operadoraId){
  const o=await get('SELECT * FROM telegram_esim_operadoras WHERE id=? AND ativo=1',[operadoraId]);if(!o)return tgBot.sendMessage(chatId,'❌ Operadora indisponível.');
