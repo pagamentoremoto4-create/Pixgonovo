@@ -1,0 +1,7 @@
+V274 — ETAPA PARCIAL DE TESTES, NÃO PUBLICAR COMO CHECKOUT PRONTO
+- Catálogo de todos os aplicativos ativos da Hero SMS nos bots WhatsApp e Telegram.
+- WhatsApp: seleção de aplicativo, país, ordenação por menor preço, maior preço e estoque.
+- Telegram: seleção de aplicativo, ordenação e país.
+- Mantidos painel de sincronização, precificação e controles de ofertas existentes.
+- NÃO IMPLEMENTADO: compra por PIX/saldo, emissão de número, consulta OTP, cancelamento e estorno.
+- Nenhuma cobrança Hero SMS é feita nesta versão. Teste em ambiente isolado antes de produção.

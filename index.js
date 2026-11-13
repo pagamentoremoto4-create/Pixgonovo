@@ -3403,21 +3403,26 @@ async function heroSmsVitrine(){
     ORDER BY nome COLLATE NOCASE,pais COLLATE NOCASE LIMIT 10000`)
     .then(rows=>rows.map(r=>({...r,preco:Number((Number(r.cost)*rate+margin).toFixed(2))})));
 }
-function heroSmsApps(rows){return [...new Set(rows.map(x=>x.nome))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
+// V274: todos os aplicativos ativos sincronizados pela Hero SMS, sem lista fixa.
+function heroSmsApps(rows){return [...new Set(rows.map(x=>String(x.nome||x.service)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
 async function heroSmsWaApps(from){
-  const rows=await heroSmsVitrine();const apps=heroSmsApps(rows).slice(0,60);
+  const apps=heroSmsApps(await heroSmsVitrine());
   await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps});
-  await enviarTexto(from,`📩 *RECEBER SMS*\n\nSelecione o aplicativo:\n\n${apps.map((n,i)=>`${i+1}️⃣ ${n}`).join('\n')||'Nenhum aplicativo disponível no momento. Verifique se o catálogo foi importado e se os preços estão configurados.'}\n\n0️⃣ Voltar${apps.length>60?'\n\nUse a busca no painel para os demais aplicativos.':''}`);
+  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📲 Selecione o aplicativo:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço ativo com estoque no momento.'}\n\n0️⃣ Voltar`);
 }
-async function heroSmsWaPaises(from,appNome){
-  const rows=(await heroSmsVitrine()).filter(x=>x.nome===appNome);
-  await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:appNome,heroPaises:rows.slice(0,60).map(x=>({country:x.country,service:x.service}))});
-  await enviarTexto(from,`📩 *${appNome}*\n\nEscolha o país:\n\n${rows.slice(0,60).map((r,i)=>`${i+1}️⃣ ${r.pais} • ${brl(r.preco)}`).join('\n')||'Sem ofertas disponíveis.'}\n\n0️⃣ Voltar`);
+async function heroSmsWaPaises(from,app,sort='preco_asc'){
+  let rows=(await heroSmsVitrine()).filter(r=>String(r.nome||r.service)===String(app));
+  if(sort==='preco_desc')rows.sort((a,b)=>b.preco-a.preco);
+  else if(sort==='estoque')rows.sort((a,b)=>b.stock-a.stock);
+  else rows.sort((a,b)=>a.preco-b.preco);
+  rows=rows.slice(0,60);
+  await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:app,heroSort:sort,heroPaises:rows.map(x=>({country:x.country,service:x.service}))});
+  await enviarTexto(from,`💬 *WHATSAPP SMS*\n📲 Aplicativo: *${app}*\n\n🌎 Países disponíveis:\n\n${rows.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhuma oferta disponível.'}\n\nDigite *barato*, *caro* ou *quantidade* para ordenar.\n0️⃣ Voltar aos aplicativos`);
 }
 async function heroSmsWaOferta(from,key){
   const row=(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service);
   if(!row){await enviarTexto(from,'⚠️ Oferta indisponível. Volte e escolha outra.');return;}
-  await enviarTexto(from,`📩 *RECEBER SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível. Estamos concluindo a integração segura do pagamento e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
+  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível até a homologação da cobrança e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
 }
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
@@ -5609,6 +5614,7 @@ function extrairMensagemWhatsApp(body) {
 const MENU_WHATSAPP_PADRAO = Object.freeze([
   {id:'consultas',nome:'REALIZAR CONSULTA',emoji:'🔍',ordem:10,ativo:1},
   {id:'servicos',nome:'SERVIÇOS & DESBLOQUEIOS',emoji:'🛠️',ordem:20,ativo:1},
+  {id:'hero_whatsapp',nome:'WHATSAPP SMS',emoji:'💬',ordem:25,ativo:1},
   {id:'esim',nome:'COMPRAR ESIM',emoji:'📱',ordem:30,ativo:1},
   {id:'premium',nome:'ASSINATURAS PREMIUM',emoji:'⭐',ordem:40,ativo:1},
   {id:'conta',nome:'MINHA CONTA',emoji:'👤',ordem:50,ativo:1},
@@ -6667,6 +6673,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     const acaoMenu=/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null;
     if(acaoMenu==='consultas'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(acaoMenu==='servicos'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
+    if(acaoMenu==='hero_whatsapp'){ await heroSmsWaPaises(from); return; }
     if(acaoMenu==='esim'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
     if(acaoMenu==='premium'){ await premium.list(from,cliente); return; }
     if(acaoMenu==='conta'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
@@ -6978,12 +6985,13 @@ ${descricao}`);}catch(_){}
     return;
   }
   if(sess?.etapa==='hero_apps'){
-    if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'online_categorias'});await enviarTexto(from,await listarServicosOnlineTexto());return;}
+    if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     const app=(sess.heroApps||[])[Number(opcao)-1];if(app){await heroSmsWaPaises(from,app);return;}
     await enviarTexto(from,'Escolha um aplicativo da lista ou digite 0 para voltar.');return;
   }
   if(sess?.etapa==='hero_paises'){
     if(opcao==='0'||lower==='voltar'){await heroSmsWaApps(from);return;}
+    if(['barato','caro','quantidade'].includes(lower)){await heroSmsWaPaises(from,sess.heroApp,{barato:'preco_asc',caro:'preco_desc',quantidade:'estoque'}[lower]);return;}
     const key=(sess.heroPaises||[])[Number(opcao)-1];if(key){await heroSmsWaOferta(from,key);return;}
     await enviarTexto(from,'Escolha um país da lista ou digite 0 para voltar.');return;
   }
@@ -7825,27 +7833,32 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
         if(data==='hero_sms_apps'){
-          const apps=heroSmsApps(await heroSmsVitrine()).slice(0,40);
-          const kb=apps.map((name,i)=>[tgBtn(name.slice(0,45),`hero_sms_app_${i}`,'primary','','📱')]);
-          kb.push([tgBtn('Voltar','menu_voltar','danger','','⬅️')]);
+          const apps=heroSmsApps(await heroSmsVitrine()).slice(0,80);
           await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps});
-          return atualizarCardTelegram(chatId,q.message,apps.length?'📱 *WHATSAPP*\n\nEscolha o aplicativo para receber SMS:':'📱 *WHATSAPP*\n\nNenhum serviço disponível. Verifique o catálogo, estoque e preços em APIs → Hero SMS.',kb);
+          const kb=apps.map((app,i)=>[tgBtn(app.slice(0,55),`hero_sms_app_${i}`,'primary','','📲')]);
+          kb.push([tgBtn('Voltar','menu_voltar','danger','','⬅️')]);
+          return atualizarCardTelegram(chatId,q.message,'💬 *WHATSAPP SMS*\n\nSelecione o aplicativo ativado no painel:',kb);
         }
         if(/^hero_sms_app_\d+$/.test(data)){
-          const ss=await carregarSessaoPedido(from);const name=(ss?.heroApps||[])[Number(data.split('_').pop())];
-          if(!name)return atualizarCardTelegram(chatId,q.message,'Seleção expirada. Abra o catálogo novamente.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
-          const rows=(await heroSmsVitrine()).filter(x=>x.nome===name).slice(0,40);
-          await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:name,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
+          const ss=await carregarSessaoPedido(from);const app=(ss?.heroApps||[])[Number(data.split('_').pop())];
+          if(!app)return atualizarCardTelegram(chatId,q.message,'Aplicativo indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_sort',heroApp:app});
+          return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nOrdenar países por:`,[[tgBtn('💰 Mais barato','hero_sms_sort_asc','primary')],[tgBtn('💎 Mais caro','hero_sms_sort_desc','primary')],[tgBtn('📦 Quantidade','hero_sms_sort_stock','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
+        }
+        if(/^hero_sms_sort_(asc|desc|stock)$/.test(data)){
+          const ss=await carregarSessaoPedido(from);const app=ss?.heroApp;
+          let rows=(await heroSmsVitrine()).filter(r=>r.nome===app);
+          const mode=data.split('_').pop();rows.sort(mode==='stock'?(a,b)=>b.stock-a.stock:mode==='desc'?(a,b)=>b.preco-a.preco:(a,b)=>a.preco-b.preco);rows=rows.slice(0,40);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:app,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
           const kb=rows.map((r,i)=>[tgBtn(`${r.pais} • ${brl(r.preco)}`.slice(0,60),`hero_sms_offer_${i}`,'primary','','🌎')]);
-          kb.push([tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]);
-          return atualizarCardTelegram(chatId,q.message,`📩 *${name.replace(/[\*_\[\]()~`>#+=|{}.!-]/g,' ')}*\n\nEscolha o país:`,kb);
+          kb.push([tgBtn('Alterar filtro',`hero_sms_app_${(ss.heroApps||[]).indexOf(app)}`,'danger')]);
+          return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nEscolha o país:`,kb);
         }
         if(/^hero_sms_offer_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const key=(ss?.heroKeys||[])[Number(data.split('_').pop())];
           const row=key?(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service):null;
-          if(!row)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível. Abra o catálogo novamente.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
-          const txt=`📩 *RECEBER SMS*\n\n📱 Aplicativo: ${row.nome}\n🌎 País: ${row.pais}\n💰 Valor: ${brl(row.preco)}\n\n⚠️ Compra temporariamente indisponível até homologação do pagamento e entrega. Nenhum saldo foi debitado.`;
-          return atualizarCardTelegram(chatId,q.message,txt.replace(/[\*_\[\]()~`>#+=|{}.!-]/g,' '),[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          if(!row)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
+          return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(row.preco)}\n\n⚠️ Compra ainda indisponível: aguardando homologação de PIX, saldo e entrega. Nenhum saldo foi debitado.`,[[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });
@@ -16061,6 +16074,30 @@ async function heroSmsApi(acao,parametros={}){
 }
 
 // V263: catalogo persistente de ofertas Hero SMS. Nao habilita vendas sem checkout validado.
+// V275: trilha persistente de pedidos Hero SMS, isolada dos pedidos eSIM/DHRU.
+// Nenhuma compra deve ocorrer sem a confirmacao financeira e uma transicao de estado exclusiva.
+async function heroPedidosInit(){
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER NOT NULL,
+    customer_jid TEXT NOT NULL,
+    service TEXT NOT NULL,
+    country TEXT NOT NULL,
+    price_brl REAL NOT NULL,
+    cost_at_quote REAL NOT NULL,
+    payment_method TEXT NOT NULL,
+    payment_id TEXT,
+    activation_id TEXT UNIQUE,
+    phone TEXT,
+    sms_code TEXT,
+    status TEXT NOT NULL DEFAULT 'awaiting_payment',
+    refund_status TEXT NOT NULL DEFAULT 'none',
+    last_error TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_hero_order_payment ON hero_sms_orders(payment_id) WHERE payment_id IS NOT NULL`);
+}
 async function heroCatalogInit(){
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_catalog (country TEXT NOT NULL, service TEXT NOT NULL, service_name TEXT, cost REAL NOT NULL DEFAULT 0, stock INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(country,service))`);
 }
@@ -16083,13 +16120,27 @@ async function heroSmsNames(){
   const names={services:{},countries:{}};
   try{
     const obj=JSON.parse(await heroSmsApi('getServicesList',{lang:'en'}));
-    const arr=Array.isArray(obj)?obj:(Array.isArray(obj.services)?obj.services:[]);
-    for(const x of arr){const code=String(x.code||'');if(code&&x.name)names.services[code]=String(x.name).slice(0,120);}
+    const data=Array.isArray(obj)?obj:(obj.services??obj);
+    if(Array.isArray(data)){
+      for(const x of data){const code=String(x.code??x.id??x.service??'');const name=String(x.name??x.title??'');if(code&&name)names.services[code]=name.slice(0,120);}
+    }else if(data&&typeof data==='object'){
+      for(const [code,value] of Object.entries(data)){
+        const name=typeof value==='string'?value:String(value?.name??value?.title??'');
+        if(name)names.services[code]=name.slice(0,120);
+      }
+    }
   }catch(e){console.warn('Hero SMS: nomes de serviços indisponíveis:',String(e.message).slice(0,120));}
   try{
     const obj=JSON.parse(await heroSmsApi('getCountries'));
-    const arr=Array.isArray(obj)?obj:(Array.isArray(obj.countries)?obj.countries:[]);
-    for(const x of arr){if(x.id!==undefined)names.countries[String(x.id)]=String(x.eng||x.rus||x.id).slice(0,120);}
+    const data=Array.isArray(obj)?obj:(obj.countries??obj);
+    if(Array.isArray(data)){
+      for(const x of data){if(x.id!==undefined)names.countries[String(x.id)]=String(x.eng??x.name??x.rus??x.id).slice(0,120);}
+    }else if(data&&typeof data==='object'){
+      for(const [id,value] of Object.entries(data)){
+        const name=typeof value==='string'?value:String(value?.eng??value?.name??value?.rus??'');
+        if(name)names.countries[id]=name.slice(0,120);
+      }
+    }
   }catch(e){console.warn('Hero SMS: nomes de países indisponíveis:',String(e.message).slice(0,120));}
   return names;
 }
@@ -16127,12 +16178,20 @@ app.post('/admin/herosms/ativar',async(req,res)=>{
   try{await heroCatalogInit();await run(`UPDATE hero_sms_catalog SET active=? WHERE country=? AND service=?`,[String(req.body.active)==='1'?1:0,String(req.body.country||''),String(req.body.service||'')]);res.redirect('/admin/herosms/catalogo?ok=Status+atualizado');}catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
 });
 
+app.get('/admin/herosms/pedidos',async(req,res)=>{
+  try{
+    await heroPedidosInit();
+    const pedidos=await all('SELECT id,service,country,price_brl,payment_method,status,refund_status,created_at FROM hero_sms_orders ORDER BY id DESC LIMIT 100');
+    const linhas=pedidos.map(x=>`<tr><td>${x.id}</td><td>${safeHtml(x.service)}</td><td>${safeHtml(x.country)}</td><td>${brl(x.price_brl)}</td><td>${safeHtml(x.payment_method)}</td><td>${safeHtml(x.status)}</td><td>${safeHtml(x.refund_status)}</td><td>${safeHtml(x.created_at)}</td></tr>`).join('');
+    res.send(page('Hero SMS — Pedidos',`<div class="hero"><h1>📋 Pedidos Hero SMS</h1></div><div class="card"><a href="/admin/herosms">Voltar</a><p>Registro de pedidos em preparação. Vendas permanecem bloqueadas até homologação.</p><table><tr><th>ID</th><th>Aplicativo</th><th>País</th><th>Preço</th><th>Pagamento</th><th>Estado</th><th>Reembolso</th><th>Data</th></tr>${linhas}</table></div>`));
+  }catch(e){res.status(500).send('Erro ao listar pedidos Hero SMS');}
+});
 app.get('/admin/herosms',async(req,res)=>{
   try{
     const configurada=!!(await heroSmsChave());
     const aviso=req.query.ok?`<p style="color:#22c55e">${safeHtml(String(req.query.ok))}</p>`:'';
     const erro=req.query.erro?`<p style="color:#ef4444">${safeHtml(String(req.query.erro))}</p>`:'';
-    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRAL UNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/catalogo">📦 Gerenciar aplicativos e países</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Compras, PIX e entrega automatica ainda nao estao habilitados.</p></div>`));
+    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRAL UNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/catalogo">📦 Gerenciar aplicativos e países</a></p><p><a href="/admin/herosms/pedidos">📋 Pedidos Hero SMS</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Compras, PIX e entrega automatica ainda nao estao habilitados.</p></div>`));
   }catch(e){res.status(500).send('Erro ao abrir configuração Hero SMS');}
 });
 app.post('/admin/herosms/config',async(req,res)=>{
