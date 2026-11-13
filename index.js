@@ -3388,15 +3388,45 @@ async function abrirBlacklistBrazilCompactoWhatsApp(from,cliente){
   texto+='0️⃣ ⬅️ *VOLTAR*';
   await enviarTexto(from,texto);
 }
+// V268: catalogo Hero SMS compartilhado pelos dois canais; sem cobranca antes do checkout homologado.
+async function heroSmsVitrine(){
+  await heroCatalogInit();
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_country_names (id TEXT PRIMARY KEY, name TEXT NOT NULL)`);
+  const currency=String(await getConfig('hero_sms_cost_currency','BRL')).toUpperCase();
+  const rate=currency==='BRL'?1:Number(await getConfig('hero_sms_brl_per_unit','0'));
+  const margin=Number(await getConfig('hero_sms_margin_brl','25'));
+  if(!(rate>0)||!Number.isFinite(margin)||margin<0)return [];
+  return await all(`SELECT h.country,h.service,COALESCE(NULLIF(h.service_name,''),h.service) AS nome,
+    COALESCE(NULLIF(c.name,''),h.country) AS pais,h.cost,h.stock
+    FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country
+    WHERE h.active=1 AND h.stock>0 AND h.cost>=0
+    ORDER BY nome COLLATE NOCASE,pais COLLATE NOCASE LIMIT 10000`)
+    .then(rows=>rows.map(r=>({...r,preco:Number((Number(r.cost)*rate+margin).toFixed(2))})));
+}
+function heroSmsApps(rows){return [...new Set(rows.map(x=>x.nome))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
+async function heroSmsWaApps(from){
+  const rows=await heroSmsVitrine();const apps=heroSmsApps(rows);
+  await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps});
+  await enviarTexto(from,`📩 *RECEBER SMS*\n\nSelecione o aplicativo:\n\n${apps.slice(0,60).map((n,i)=>`${i+1}️⃣ ${n}`).join('\n')||'Nenhum aplicativo disponível no momento.'}\n\n0️⃣ Voltar${apps.length>60?'\n\nUse a busca no painel para os demais aplicativos.':''}`);
+}
+async function heroSmsWaPaises(from,appNome){
+  const rows=(await heroSmsVitrine()).filter(x=>x.nome===appNome);
+  await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:appNome,heroPaises:rows.slice(0,60).map(x=>({country:x.country,service:x.service}))});
+  await enviarTexto(from,`📩 *${appNome}*\n\nEscolha o país:\n\n${rows.slice(0,60).map((r,i)=>`${i+1}️⃣ ${r.pais} • ${brl(r.preco)}`).join('\n')||'Sem ofertas disponíveis.'}\n\n0️⃣ Voltar`);
+}
+async function heroSmsWaOferta(from,key){
+  const row=(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service);
+  if(!row){await enviarTexto(from,'⚠️ Oferta indisponível. Volte e escolha outra.');return;}
+  await enviarTexto(from,`📩 *RECEBER SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível. Estamos concluindo a integração segura do pagamento e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
+}
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
   let texto=`🌐 *Serviços Online*\n\n`;
   if(!cats.length){
-    texto+=`Nenhum serviço online ativo no momento.\n\n0️⃣ ⬅️ Voltar`;
-    return texto;
+    texto+=`Nenhum serviço DHRU ativo no momento.\n`;
   }
   for(let i=0;i<cats.length;i++)texto+=`${i+1}️⃣ ${cats[i].nome}\n`;
-  texto+=`\n🔍 Para buscar um serviço, digite *buscar* seguido do nome.\nExemplo: *buscar xiaomi*\n\n0️⃣ ⬅️ Voltar`;
+  texto+=`\n📩 Digite *sms* para acessar RECEBER SMS.\n\n🔍 Para buscar um serviço, digite *buscar* seguido do nome.\nExemplo: *buscar xiaomi*\n\n0️⃣ ⬅️ Voltar`;
   return texto;
 }
 async function buscarServicosOnlineWhatsApp(termo){
@@ -4976,8 +5006,9 @@ async function voltarHomeNoMesmoCard(chatId, cliente, message) {
 async function enviarServicosBotoesTelegram(chatId, cliente, message=null) {
   const cats=await all(`SELECT c.*,COUNT(s.id) qtd FROM servicos_categorias c LEFT JOIN servicos_catalogo s ON s.categoria_id=c.id AND s.ativo=1 AND COALESCE(s.api_provider,'') NOT IN ('PREMIUM','GGSOMA') WHERE c.ativo=1 GROUP BY c.id ORDER BY c.ordem,c.id`);
   const visiveis=cats.filter(c=>Number(c.qtd||0)>0);
-  if(!visiveis.length) return enviarCardVisual(chatId,message,'cat_servicos','🛠️ *SERVIÇOS*\n\nNenhuma categoria possui serviços ativos no momento.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
+  if(!visiveis.length && !(await heroSmsVitrine()).length) return enviarCardVisual(chatId,message,'cat_servicos','🛠️ *SERVIÇOS*\n\nNenhuma categoria possui serviços ativos no momento.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
   const kb=[];
+  if((await heroSmsVitrine()).length)kb.push([tgBtn('📩 RECEBER SMS','hero_sms_apps','primary','','📩')]);
   for(const c of visiveis) kb.push([tgBtn(String(c.nome).toUpperCase().slice(0,48),`svc_cat_${c.id}`,'primary',c.icon_key||'',c.emoji||'🛠️')]);
   kb.push([tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]);
   return enviarCardVisual(chatId,message,'cat_servicos','🛠️ *SERVIÇOS*\n\nEscolha uma categoria:',kb);
@@ -6948,7 +6979,18 @@ ${descricao}`);}catch(_){}
     if(/^\d+$/.test(opcao||'')){const ids=Array.isArray(sess.blacklistServicoIds)?sess.blacklistServicoIds:[];const id=Number(ids[Number(opcao)-1]||0);if(id){const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[id]);if(servico){await iniciarServicoWhatsApp(from,cliente,servico);return;}}}
     return;
   }
+  if(sess?.etapa==='hero_apps'){
+    if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'online_categorias'});await enviarTexto(from,await listarServicosOnlineTexto());return;}
+    const app=(sess.heroApps||[])[Number(opcao)-1];if(app){await heroSmsWaPaises(from,app);return;}
+    await enviarTexto(from,'Escolha um aplicativo da lista ou digite 0 para voltar.');return;
+  }
+  if(sess?.etapa==='hero_paises'){
+    if(opcao==='0'||lower==='voltar'){await heroSmsWaApps(from);return;}
+    const key=(sess.heroPaises||[])[Number(opcao)-1];if(key){await heroSmsWaOferta(from,key);return;}
+    await enviarTexto(from,'Escolha um país da lista ou digite 0 para voltar.');return;
+  }
   if (sess?.etapa === 'online_categorias') {
+    if(lower==='sms'||lower==='receber sms'){await heroSmsWaApps(from);return;}
     if(opcao==='0'||lower==='voltar'){
       await salvarSessaoPedido(from,{etapa:'menu'});
       await enviarMenuServicosWhatsApp(from,cliente);
@@ -7784,6 +7826,29 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           return atualizarCardTelegram(chatId,q.message,'📂 *CATEGORIA*\n\nNenhum produto foi vinculado a esta categoria ainda.',[[tgBtn('Voltar','menu_voltar','danger','TG_ICON_VOLTAR','⬅️')]]);
         }
         if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
+        if(data==='hero_sms_apps'){
+          const apps=heroSmsApps(await heroSmsVitrine()).slice(0,40);
+          const kb=apps.map((name,i)=>[tgBtn(name.slice(0,45),`hero_sms_app_${i}`,'primary','','📱')]);
+          kb.push([tgBtn('Voltar','menu_servicos','danger','','⬅️')]);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps});
+          return atualizarCardTelegram(chatId,q.message,'📩 *RECEBER SMS*\n\nEscolha o aplicativo:',kb);
+        }
+        if(/^hero_sms_app_\d+$/.test(data)){
+          const ss=await carregarSessaoPedido(from);const name=(ss?.heroApps||[])[Number(data.split('_').pop())];
+          if(!name)return atualizarCardTelegram(chatId,q.message,'Seleção expirada. Abra o catálogo novamente.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          const rows=(await heroSmsVitrine()).filter(x=>x.nome===name).slice(0,40);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:name,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
+          const kb=rows.map((r,i)=>[tgBtn(`${r.pais} • ${brl(r.preco)}`.slice(0,60),`hero_sms_offer_${i}`,'primary','','🌎')]);
+          kb.push([tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]);
+          return atualizarCardTelegram(chatId,q.message,`📩 *${name.replace(/[\*_\[\]()~`>#+=|{}.!-]/g,' ')}*\n\nEscolha o país:`,kb);
+        }
+        if(/^hero_sms_offer_\d+$/.test(data)){
+          const ss=await carregarSessaoPedido(from);const key=(ss?.heroKeys||[])[Number(data.split('_').pop())];
+          const row=key?(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service):null;
+          if(!row)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível. Abra o catálogo novamente.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          const txt=`📩 *RECEBER SMS*\n\n📱 Aplicativo: ${row.nome}\n🌎 País: ${row.pais}\n💰 Valor: ${brl(row.preco)}\n\n⚠️ Compra temporariamente indisponível até homologação do pagamento e entrega. Nenhum saldo foi debitado.`;
+          return atualizarCardTelegram(chatId,q.message,txt.replace(/[\*_\[\]()~`>#+=|{}.!-]/g,' '),[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+        }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });
           return enviarServicosBotoesTelegram(chatId, cliente, q.message);
