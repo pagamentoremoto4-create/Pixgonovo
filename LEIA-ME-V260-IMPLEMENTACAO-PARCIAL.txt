@@ -1,0 +1,16 @@
+CENTRAL UNLOCKER — V260 EM DESENVOLVIMENTO (NÃO PUBLICAR EM PRODUÇÃO)
+
+Implementado neste pacote de revisão:
+- Padronização de mensagens dos pedidos DHRU com marca CENTRAL UNLOCKER, status coloridos e dados informados pelo cliente.
+- Ajustes de mensagem de acompanhamento e resultado/rejeição dos pedidos comerciais DHRU.
+- Alteração do cabeçalho do cartão de acompanhamento de consultas privadas DHRU.
+- Painel /admin/herosms com chave API criptografada, botão de teste e consulta de saldo.
+
+AINDA NÃO IMPLEMENTADO / NÃO VALIDADO:
+- Compra e entrega automática de números Hero SMS no Telegram e WhatsApp.
+- Catálogo, precificação, cobrança, acompanhamento OTP e cancelamento Hero SMS.
+- Edição persistente de uma única mensagem em todas as situações e canais.
+- Padronização completa dos resultados de ConsultaVIP DHRU e eliminação total das notificações duplicadas.
+- Testes de ponta a ponta com credenciais reais, PIX e ambientes de produção.
+
+Este pacote é para REVISÃO TÉCNICA, não é uma versão pronta para substituir o serviço ativo.

@@ -1,0 +1,7 @@
+CENTRAL UNLOCKER V261 — TESTES DE API (NAO E VERSAO FINAL DE VENDAS)
+
+Incluido: painel Hero SMS com consultas somente-leitura de saldo, paises, servicos e precos.
+Nao incluido: compra de numeros, pagamentos, entrega SMS, cancelamentos e garantia de edicao unica DHRU.
+NAO LIBERAR VENDAS HERO SMS A CLIENTES.
+Antes de instalar: fazer backup do banco e da versao atual.
+Acesse /admin/herosms para testar com a chave cadastrada.

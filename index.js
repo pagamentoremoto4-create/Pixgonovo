@@ -1580,6 +1580,18 @@ async function avisarGrupoConsultaPrivadaConcluida(ctx){
 }
 
 // V238: sincronização de status DHRU com notificações persistentes por canal.
+// CENTRAL UNLOCKER — padrão único para notificações dos serviços DHRU.
+function centralUnlockerMensagem(pedido,servico,dados,fase,detalhe=''){
+  const status={PENDENTE:'🟡 PENDENTE','EM PROCESSO':'🔵 EM PROCESSO',FINALIZADO:'🟢 CONCLUÍDO',CANCELADO:'🔴 REJEITADO'}[fase]||'🟡 PENDENTE';
+  const descricao={PENDENTE:'Sua solicitação foi recebida e aguarda processamento.','EM PROCESSO':'Sua solicitação está sendo processada.',FINALIZADO:'Seu pedido foi finalizado.',CANCELADO:'Não foi possível concluir sua solicitação.'}[fase]||'';
+  const extra=detalhe?`\n\n📄 *${fase==='CANCELADO'?'Motivo':'Resultado'}:*\n${String(detalhe).slice(0,3000)}`:'';
+  return `🛡️ *CENTRAL UNLOCKER*\n_SERVIÇOS ONLINE_\n\n📋 *PEDIDO #${pedido.id}*\n🔐 *Serviço:* ${servico||'-'}${dados?'\n'+dados:''}\n\n${status}\n${descricao}${extra}\n\n_CENTRAL UNLOCKER • Sistema automatizado_`;
+}
+function centralUnlockerMotivoPt(valor){
+  const texto=traduzirResultadoDhruPt(valor||'').trim();
+  const termos={'order rejected':'Pedido rejeitado','invalid imei':'IMEI inválido','invalid serial':'Número de série inválido','not found':'Não encontrado','service unavailable':'Serviço indisponível','insufficient balance':'Saldo insuficiente','request cancelled':'Solicitação cancelada','timeout':'Tempo de processamento excedido'};
+  return texto.replace(/order rejected|invalid imei|invalid serial|not found|service unavailable|insufficient balance|request cancelled|timeout/gi,m=>termos[m.toLowerCase()]||m)||'Não foi possível concluir esta solicitação.';
+}
 function dhruStatusNormalizado(valor){
   const st=String(valor||'').trim().toLowerCase().replace(/[\s-]+/g,'_');
   if(['success','completed','complete','done','concluido','finalizado'].includes(st)) return 'FINALIZADO';
@@ -1624,7 +1636,8 @@ async function dhruAvisarProcesso(pedido,cliente){
   if(wa)destinos.add(`wa:${wa}`);
   if(!destinos.size&&pedido.revenda_jid)destinos.add(pedido.revenda_jid);
   const servico=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
-  const mensagem=`🟡 *SERVIÇO EM PROCESSO*\n\n📋 Pedido: #${pedido.id}\n🛠 Serviço: ${servico?nomeServicoWhatsApp(servico):dhruNomeServicoPt(pedido.servico_nome)}\n\nO fornecedor iniciou seu serviço. Avisaremos quando finalizar.`;
+  const dados=servico?await dhruEntradaPedidoPt(servico,pedido):`🔎 ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
+  const mensagem=centralUnlockerMensagem(pedido,servico?nomeServicoWhatsApp(servico):dhruNomeServicoPt(pedido.servico_nome),dados,'EM PROCESSO');
   for(const destino of destinos){
     const key=`dhru_v238_processo_${pedido.id}_${destino}`;
     if((await getConfig(key,'0'))==='1')continue;
@@ -1710,8 +1723,8 @@ async function processarFeedbackDhruInterno(body){
       const resultadoLimpo=traduzirResultadoDhruPt(replay);
       const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
       const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
-      const saldoLinha=clienteAtual?`\n\n💳 Saldo: ${brl(clienteAtual.saldo||0)}`:'';
-      await enviarParaCanaisCliente(clienteAtual||cliente,`✅ *SERVIÇO CONCLUÍDO*\n\n📋 Pedido: #${pedido.id}\n🛠 Serviço: ${servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome)}\n${dadosPt}\n💰 Valor: ${brl(pedido.valor)}${resultadoLimpo?`\n\n📄 *RESULTADO*\n${resultadoLimpo}`:''}${saldoLinha}`,pedido.revenda_jid||'');
+      const texto=centralUnlockerMensagem(pedido,servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome),dadosPt,'FINALIZADO',resultadoLimpo);
+      await enviarParaCanaisCliente(clienteAtual||cliente,texto+`\n💳 Saldo: ${brl(clienteAtual?.saldo||0)}`,pedido.revenda_jid||'');
     }
   } else if(fase==='CANCELADO'){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
@@ -1722,7 +1735,11 @@ async function processarFeedbackDhruInterno(body){
       estornoRealizado=true;
     } else await run(`UPDATE pedidos SET status='CANCELADO',motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[`Dhru: ${status}${replay?' - '+replay:''}`,pedidoId]);
     const servicoRejeitado=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
-    if(cliente) await enviarParaCanaisCliente(cliente,`❌ *Serviço rejeitado*\n\n📋 Pedido: #${pedido.id}\n🛠 ${servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome)}${replay?`\n📄 Motivo: ${traduzirResultadoDhruPt(replay)}`:''}\n\n${estornoRealizado?'💰 Valor estornado ao seu saldo.':'💰 Este pedido não teve valor a estornar.'}`,pedido.revenda_jid||'');
+    if(cliente){
+      const dados=servicoRejeitado?await dhruEntradaPedidoPt(servicoRejeitado,pedido):`🔎 ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
+      const texto=centralUnlockerMensagem(pedido,servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome),dados,'CANCELADO',centralUnlockerMotivoPt(replay));
+      await enviarParaCanaisCliente(cliente,texto+`\n${estornoRealizado?'💰 Valor estornado ao saldo.':'💰 Nenhum valor a estornar.'}`,pedido.revenda_jid||'');
+    }
   } else if(fase==='EM PROCESSO'){
     await setConfig(`dhru_v238_iniciado_${pedidoId}`,'1');
     await run(`UPDATE pedidos SET status='EM PROCESSO',atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('FINALIZADO','CANCELADO','CONCLUIDO')`,[pedidoId]);
@@ -5696,12 +5713,15 @@ async function consultaPrivadaApagarProcessando(status){
   try{if(status?.jid&&status?.key){const sock=whatsappSocket||await consultaObterSocketWhatsApp();if(sock)await sock.sendMessage(status.jid,{delete:status.key});}}catch(e){console.log('⚠️ APAGAR PROCESSANDO:',e.message)}
 }
 // V240: cartão de status editável, com fallback quando WhatsApp não aceita edição.
-function consultaDhruTextoStatus(row,fase){
-  const nome=String(row?.nome_exibicao||row?.comando||'Consulta DHRU');
+function consultaDhruTextoStatus(row,fase,detalhe=''){
+  const nome=String(row?.nome_exibicao||row?.comando||'Consulta').replace(/\bDHRU\b/gi,'').trim();
   const id=Number(row?.id||0);
-  const label=fase==='EM PROCESSO'?'🔵 *EM PROCESSO*':'🟡 *PENDENTE*';
-  const info=fase==='EM PROCESSO'?'O fornecedor iniciou sua consulta.':'Pedido recebido. Aguardando o fornecedor iniciar.';
-  return `🔎 *CONSULTA DHRU #${id}*\n📋 ${nome}\n\n${label}\n${info}`;
+  const status={PENDENTE:'🟡 *PENDENTE*','EM PROCESSO':'🔵 *EM PROCESSO*',FINALIZADO:'🟢 *CONCLUÍDO*',CANCELADO:'🔴 *REJEITADO*'}[fase]||'🟡 *PENDENTE*';
+  const info={PENDENTE:'Sua solicitação foi recebida e aguarda processamento.','EM PROCESSO':'Sua consulta está sendo processada.',FINALIZADO:'Sua consulta foi concluída.',CANCELADO:'Não foi possível concluir sua consulta.'}[fase]||'';
+  const entrada=String(row?.entrada||'').trim().slice(0,300);
+  const identificador=entrada?`\n🔎 *Dado informado:* ${entrada}`:'';
+  const resposta=detalhe?`\n\n📄 *${fase==='CANCELADO'?'Motivo':'Resultado'}:*\n${fase==='CANCELADO'?centralUnlockerMotivoPt(detalhe):String(detalhe).slice(0,3000)}`:'';
+  return `🛡️ *CENTRAL UNLOCKER*\n_SERVIÇOS ONLINE_\n\n📋 *PEDIDO #${id}*\n🔐 *Serviço:* ${nome||'Consulta'}${identificador}\n\n${status}\n${info}${resposta}\n\n_CENTRAL UNLOCKER • Sistema automatizado_`;
 }
 async function consultaDhruAtualizarCartao(execId,fase){
   const row=await get(`SELECT e.*,c.comando,c.nome_exibicao FROM consulta_dhru_execucoes e LEFT JOIN consulta_dhru_comandos c ON c.id=e.comando_id WHERE e.id=?`,[execId]);
@@ -15910,6 +15930,46 @@ const novaFoto=req.file?path.basename(req.file.path):(req.body.remover_foto==='1
 if(ativo&&!categoriaId)throw new Error('Escolha ou crie uma categoria antes de ativar o serviço.');await run(`UPDATE servicos_catalogo SET ativo=?,api_price_mode=?,api_margin_pct=?,api_manual_price=?,nome_exibicao=?,descricao_exibicao=?,categoria_id=?,foto_whatsapp=? WHERE id=? AND api_provider='DHRU'`,[ativo,modo,margem,manual,nomeExibicao,descricaoExibicao,categoriaId,novaFoto,id]);if(modo==='MANUAL')await run(`UPDATE servicos_catalogo SET preco_padrao=? WHERE id=? AND api_provider='DHRU'`,[manual,id]);else{const r=await dhruRecalcularPrecoServico(id);if(!r)throw new Error('Não foi possível calcular o preço automático. Configure a cotação.');}res.redirect('/admin/dhru/buscar');}catch(e){res.redirect('/admin/dhru/buscar?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/limpar-api',async(req,res)=>{try{if(String(req.body.confirmacao||'').trim().toUpperCase()!=='APAGAR API')throw new Error('Confirmação inválida. Digite APAGAR API.');const r=await limparCatalogoApis();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Limpeza concluída: ${r.removidos} serviço(s) importado(s) removido(s). Agora sincronize novamente.`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 
+// HERO SMS — configuração pelo painel, sem expor a chave em HTML ou logs.
+async function heroSmsChave(){return dhruDecrypt(await getConfig('herosms_api_key_enc',''));}
+async function heroSmsApi(acao,parametros={}){
+  const chave=await heroSmsChave();if(!chave)throw new Error('Cadastre a chave API da Hero SMS no painel.');
+  const url=new URL('https://hero-sms.com/stubs/handler_api.php');
+  url.searchParams.set('api_key',chave);url.searchParams.set('action',acao);
+  for(const [k,v] of Object.entries(parametros))if(v!==undefined&&v!==null)url.searchParams.set(k,String(v));
+  const resp=await axios.get(url.toString(),{timeout:18000,responseType:'text'});
+  const data=String(resp.data||'').trim();
+  if(!data||/^(BAD_KEY|ERROR_SQL|NO_API_KEY|BAD_ACTION)/i.test(data))throw new Error('Hero SMS recusou a solicitação. Verifique a chave API.');
+  return data;
+}
+app.get('/admin/herosms',async(req,res)=>{
+  try{
+    const configurada=!!(await heroSmsChave());
+    const aviso=req.query.ok?`<p style="color:#22c55e">${safeHtml(String(req.query.ok))}</p>`:'';
+    const erro=req.query.erro?`<p style="color:#ef4444">${safeHtml(String(req.query.erro))}</p>`:'';
+    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRAL UNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Compras, PIX e entrega automatica ainda nao estao habilitados.</p></div>`));
+  }catch(e){res.status(500).send('Erro ao abrir configuração Hero SMS');}
+});
+app.post('/admin/herosms/config',async(req,res)=>{
+  try{const key=String(req.body.api_key||'').trim();if(key.length<8||key.length>500)throw new Error('Chave API inválida.');await setConfig('herosms_api_key_enc',dhruEncrypt(key));res.redirect('/admin/herosms?ok='+encodeURIComponent('Chave salva com segurança.'));}
+  catch(e){res.redirect('/admin/herosms?erro='+encodeURIComponent(e.message));}
+});
+// V261 TESTES: consultas somente-leitura para validar catalogo sem comprar numeros.
+app.post('/admin/herosms/diagnostico',async(req,res)=>{
+  try{
+    const permitido=new Set(['getBalance','getCountries','getServicesList','getPrices']);
+    const acao=String(req.body.acao||'');
+    if(!permitido.has(acao))throw new Error('Acao nao permitida.');
+    const raw=await heroSmsApi(acao);
+    const amostra=raw.length>16000?raw.slice(0,16000)+'\n[RESPOSTA TRUNCADA]':raw;
+    // Evita que respostas do fornecedor sejam interpretadas como HTML.
+    res.send(page('Hero SMS — diagnostico',`<div class="hero"><h1>Hero SMS — Diagnostico</h1></div><div class="card"><p><a href="/admin/herosms">Voltar</a></p><h3>${safeHtml(acao)}</h3><pre style="white-space:pre-wrap;word-break:break-word">${safeHtml(amostra)}</pre></div>`));
+  }catch(e){res.redirect('/admin/herosms?erro='+encodeURIComponent('Diagnostico: '+String(e.message||'Falha')));}
+});
+app.post('/admin/herosms/testar',async(req,res)=>{
+  try{const saldo=await heroSmsApi('getBalance');if(!/^ACCESS_BALANCE:/i.test(saldo))throw new Error('Resposta de saldo inesperada.');res.redirect('/admin/herosms?ok='+encodeURIComponent('Conexão confirmada — '+saldo.replace('ACCESS_BALANCE:','Saldo: ')));}
+  catch(e){res.redirect('/admin/herosms?erro='+encodeURIComponent(e.message));}
+});
 app.post('/admin/dhru/config',async(req,res)=>{try{const base=dhruNormalizeBaseUrl(req.body.base_url);const pub=dhruNormalizeBaseUrl(req.body.public_base_url);if(!/^https?:\/\//i.test(base))throw new Error('URL base inválida');const oldBase=await dhruBaseUrl();await setConfig('dhru_base_url',base);await setConfig('dhru_public_base_url',pub);const token=String(req.body.token||'').trim();if(token)await setConfig('dhru_token_enc',dhruEncrypt(token));if(oldBase!==base||token){await setConfig('dhru_api_prefix','api/reseller/v1');await setConfig('dhru_force_trailing_slash','0');}await dhruCallbackSecret();res.redirect('/admin/dhru?ok='+encodeURIComponent('Configuração salva'));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/dhru/testar',async(req,res)=>{try{const t=await dhruTestOfficialApi();const d=t.account?.data||t.account||{};res.redirect('/admin/dhru?ok='+encodeURIComponent(`Conexão API oficial OK — /api/reseller/v1${d.name?' — '+d.name:''}${d.balance!==undefined?' — Saldo '+(d.currency||'')+' '+d.balance:''}`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha na API oficial: ${e?.response?.status||''} ${e?.response?.data?.message||e?.response?.data?.error||e.message}`));}});
 app.post('/admin/dhru/sincronizar',async(req,res)=>{try{const r=await sincronizarProdutosDhru();res.redirect('/admin/dhru?ok='+encodeURIComponent(`Sincronizados ${r.sincronizados} produto(s); ${r.novos} novo(s)`));}catch(e){res.redirect('/admin/dhru?erro='+encodeURIComponent(`Falha: ${e?.response?.status||''} ${e?.response?.data?.message||e.message}`));}});
