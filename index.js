@@ -1125,6 +1125,40 @@ function traduzirResultadoDhruPt(v){
     return `${dhruChaveResultadoPt(m[1])}: ${dhruValorPt(m[2])}`;
   }).join('\n').replace(/\bBlacklisted\b/gi,'BLOQUEADO').replace(/\bClean\b/gi,'LIMPO');
 }
+// V267: formatador universal do campo Result, sem depender de frases fixas.
+function centralUnlockerFormatarResult(valor){
+  let raw=valor;
+  if(raw && typeof raw==='object') raw=JSON.stringify(raw);
+  raw=dhruDecodeReplay(raw);
+  const original=limparResultadoDhru(raw);
+  if(!original)return '';
+  // Alguns fornecedores retornam vários campos na mesma linha.
+  const chaves='Serial Number|Serial|IMEI(?:\\s*Number)?|Model Name|Model|Manufacturer|Find My iPhone|Find My|FMI|iCloud Status|iCloud|Carrier|Network|SIM Lock|Blacklist Status|Activation Status|Warranty Status|Country|Result|Message';
+  const separado=original.replace(new RegExp('([^\\n])\\s+(?=('+chaves+')\\s*:)','gi'),'$1\\n').replace(/\\n/g,'\n');
+  const linhas=separado.split(/\r?\n/);
+  const labels={
+    'find my iphone':'🔒 Buscar iPhone (FMI)','find my':'🔒 Buscar iPhone (FMI)','fmi':'🔒 Buscar iPhone (FMI)',
+    'icloud status':'☁️ Situação do iCloud','icloud':'☁️ iCloud',
+    'serial':'📱 Número de série','serial number':'📱 Número de série','imei':'📱 IMEI','imei number':'📱 IMEI',
+    'model':'📱 Modelo','model name':'📱 Modelo','manufacturer':'🏭 Fabricante',
+    'carrier':'📡 Operadora','network':'📡 Rede','sim lock':'🔐 Bloqueio de operadora',
+    'blacklist status':'🚫 Situação da blacklist','activation status':'⚙️ Situação da ativação',
+    'warranty status':'🛡️ Garantia','country':'🌎 País','result':'📋 Resultado','message':'📝 Mensagem'
+  };
+  const valores={'on':'ATIVADO (ON)','off':'DESATIVADO (OFF)','lost':'PERDIDO','clean':'LIMPO',
+    'blacklisted':'BLOQUEADO','yes':'SIM','no':'NÃO','active':'ATIVO','inactive':'INATIVO',
+    'mac not supported':'Mac não suportado','device not supported':'Dispositivo não suportado',
+    'imei not found':'IMEI não encontrado','invalid serial number':'Número de série inválido',
+    'service unavailable':'Serviço indisponível','already unlocked':'Aparelho já desbloqueado'};
+  return linhas.map(linha=>{
+    const m=linha.match(/^\s*([^:\n]{1,100})\s*:\s*(.*)$/);
+    if(!m){const txt=linha.trim();return valores[txt.toLowerCase()]||txt;}
+    const k=m[1].trim().toLowerCase().replace(/[_-]+/g,' ');
+    const v=m[2].trim();
+    const label=labels[k]||dhruChaveResultadoPt(m[1]);
+    return `${label}: ${valores[v.toLowerCase()]||dhruValorPt(v)}`;
+  }).filter(Boolean).join('\n');
+}
 function dhruFieldsUsuario(product){
   return (product?.fields||[]).filter(f=>!['feedback_url','reference_id','quantity'].includes(String(f?.name||'').toLowerCase()));
 }
@@ -1506,7 +1540,7 @@ async function processarFeedbackTimUnlock(body){
   const pedidoId=timUnlockPedidoIdFromReference(body?.reference_id); if(!pedidoId) throw new Error('reference_id TIM inválido');
   const status=String(body?.status||'').toLowerCase();
   const orderId=String(body?.order_id||body?.order_uuid||'');
-  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+  const replay=dhruExtrairRetorno(body);
   const falha=['rejected','reject','failed','failure','cancelled','canceled'].includes(status);
   const concluido=['success','completed','complete','done'].includes(status);
   await run(`UPDATE tim_unlock_dhru_checks SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,feedback_json=?,resultado_original=CASE WHEN ?<>'' THEN ? ELSE resultado_original END,erro=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,falha?'REJEITADO':concluido?'CONCLUIDO':(status.toUpperCase()||'PROCESSANDO'),JSON.stringify(body),replay,replay,falha?replay:'',pedidoId]);
@@ -1588,9 +1622,24 @@ function centralUnlockerMensagem(pedido,servico,dados,fase,detalhe=''){
   return `🛡️ *CENTRAL UNLOCKER*\n_SERVIÇOS ONLINE_\n\n📋 *PEDIDO #${pedido.id}*\n🔐 *Serviço:* ${servico||'-'}${dados?'\n'+dados:''}\n\n${status}\n${descricao}${extra}\n\n_CENTRAL UNLOCKER • Sistema automatizado_`;
 }
 function centralUnlockerMotivoPt(valor){
-  const texto=traduzirResultadoDhruPt(valor||'').trim();
+  const texto=centralUnlockerFormatarResult(valor||'').trim();
   const termos={'order rejected':'Pedido rejeitado','invalid imei':'IMEI inválido','invalid serial':'Número de série inválido','not found':'Não encontrado','service unavailable':'Serviço indisponível','insufficient balance':'Saldo insuficiente','request cancelled':'Solicitação cancelada','timeout':'Tempo de processamento excedido'};
   return texto.replace(/order rejected|invalid imei|invalid serial|not found|service unavailable|insufficient balance|request cancelled|timeout/gi,m=>termos[m.toLowerCase()]||m)||'Não foi possível concluir esta solicitação.';
+}
+// V265: extrai o motivo sem confundir o status com a justificativa da rejeição.
+function dhruExtrairRetorno(body){
+  const d=body&&typeof body==='object'?body:{};
+  const fontes=[d,d.data,d.order,d.data?.order,d.response,d.data?.response].filter(x=>x&&typeof x==='object'&&!Array.isArray(x));
+  const campos=['result','replay','reply','reason','rejection_reason','reject_reason','failure_reason','error_message','error','remarks','remark','details','message'];
+  for(const obj of fontes){for(const k of campos){const v=obj[k];if(v===null||v===undefined||v==='')continue;
+    const txt=typeof v==='string'?v:(typeof v==='object'?JSON.stringify(v):String(v));
+    if(txt.trim() && !['success','pending','processing','rejected','failed','cancelled'].includes(txt.trim().toLowerCase())) return dhruDecodeReplay(txt);
+  }}
+  return '';
+}
+function dhruExtrairStatus(body){
+  const d=body&&typeof body==='object'?body:{};
+  return String(d.status||d.order_status||d.data?.status||d.data?.order_status||d.data?.order?.status||'').trim().toLowerCase();
 }
 function dhruStatusNormalizado(valor){
   const st=String(valor||'').trim().toLowerCase().replace(/[\s-]+/g,'_');
@@ -1654,8 +1703,8 @@ async function processarFeedbackDhruInterno(body){
   if(pm){
     const execId=Number(pm[1]),row=await get('SELECT * FROM consulta_dhru_execucoes WHERE id=?',[execId]);
     if(!row) throw new Error('consulta privada não encontrada');
-    const status=String(body?.status||'').toLowerCase(),orderId=String(body?.order_id||body?.order_uuid||'').trim();
-    const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+    const status=dhruExtrairStatus(body),orderId=String(body?.order_id||body?.order_uuid||'').trim();
+    const replay=dhruExtrairRetorno(body);
     const ok=['success','completed','complete','done'].includes(status),fail=['rejected','reject','failed','failure','cancelled','canceled'].includes(status);
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,erro=?,atualizado_em=CURRENT_TIMESTAMP,finalizado_em=CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE finalizado_em END WHERE id=?`,[orderId,ok?'CONCLUIDA':fail?'ERRO':(status.toUpperCase()||'PROCESSANDO'),replay,replay,fail?replay:'',ok||fail,execId]);
     if(ok&&replay&&!Number(row.resultado_entregue)){
@@ -1664,7 +1713,7 @@ async function processarFeedbackDhruInterno(body){
       try{await avisarGrupoMovimentacao('consulta',row.cliente_nome||'Cliente',await nomeConsultaExecucao(row));}catch(_){}
     }else if(['in-process','in_process','processing','processando'].includes(status)){
       await consultaDhruAtualizarCartao(execId,'EM PROCESSO');
-    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId));consultaDhruStatusPrivado.delete(execId);if(numero)await enviarTexto(`wa:${numero}`,'❌ Não foi possível concluir esta consulta.');}
+    }else if(fail){const numero=normalizarNumeroWhatsApp(jidToNumber(row.cliente_jid)||'');await consultaPrivadaApagarProcessando(consultaDhruStatusPrivado.get(execId));consultaDhruStatusPrivado.delete(execId);if(numero)await enviarTexto(`wa:${numero}`,`🛡️ *CENTRAL UNLOCKER*\n\n🔴 *CONSULTA NÃO ATENDIDA*\n\n📋 *Resposta do serviço:*\n${centralUnlockerMotivoPt(replay)||'Não foi possível concluir esta consulta.'}`);}
     return {consultaPrivadaId:execId,status,replay};
   }
   const gm=reference.match(/^group-(\d+)$/i);
@@ -1672,7 +1721,7 @@ async function processarFeedbackDhruInterno(body){
     const execId=Number(gm[1]);
     const row=await get('SELECT * FROM consulta_dhru_execucoes WHERE id=?',[execId]);
     if(!row) throw new Error('consulta do grupo não encontrada');
-    const status=String(body?.status||'').toLowerCase();
+    const status=dhruExtrairStatus(body);
     const orderId=String(body?.order_id||body?.order_uuid||'').trim();
     const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
     await run(`UPDATE consulta_dhru_execucoes SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status=?,resultado=CASE WHEN ?<>'' THEN ? ELSE resultado END,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[orderId,(status||'PROCESSANDO').toUpperCase(),replay,replay,execId]);
@@ -1693,7 +1742,7 @@ async function processarFeedbackDhruInterno(body){
       await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(replay||`Dhru: ${status}`).slice(0,800),execId]);
       if(consultaDhruEmMemoria?.id===execId){
         const ctx=consultaDhruEmMemoria;
-        try{await ctx.socket.sendMessage(ctx.grupo,{text:'❌ Não foi possível concluir esta consulta.',mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
+        try{await ctx.socket.sendMessage(ctx.grupo,{text:`❌ Não foi possível concluir esta consulta.\n\n📋 Resposta do serviço: ${centralUnlockerMotivoPt(e.message)||'Motivo não informado.'}`,mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
         await consultaDhruLiberarGrupo(ctx); consultaDhruEmMemoria=null;
       }
     }
@@ -1705,10 +1754,10 @@ async function processarFeedbackDhruInterno(body){
   const pedido=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
   if(!pedido) throw new Error('pedido não encontrado');
   if(['FINALIZADO','CANCELADO','CONCLUIDO'].includes(String(pedido.status||'').toUpperCase()))return {pedidoId,ignorado:true};
-  const status=String(body?.status||'').toLowerCase();
+  const status=dhruExtrairStatus(body);
   const fase=dhruStatusNormalizado(status);
   const orderId=String(body?.order_id||body?.order_uuid||'');
-  const replay=dhruDecodeReplay(body?.replay||body?.reply||body?.result||body?.message||'');
+  const replay=dhruExtrairRetorno(body);
   if(fase==='FINALIZADO'&&!replay){
     await run(`UPDATE dhru_orders SET order_uuid=COALESCE(NULLIF(?,''),order_uuid),status='AGUARDANDO_FEEDBACK',feedback_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE pedido_id=?`,[orderId,JSON.stringify(body),pedidoId]);
     return {pedidoId,status,aguardandoResultado:true};
@@ -1720,7 +1769,7 @@ async function processarFeedbackDhruInterno(body){
     if(!jaFinalizado) await finalizarPedido(pedido,{notificarCliente:false});
     if(cliente && !jaFinalizado){
       const clienteAtual=await get('SELECT * FROM revendas WHERE id=?',[pedido.revenda_id]);
-      const resultadoLimpo=traduzirResultadoDhruPt(replay);
+      const resultadoLimpo=centralUnlockerFormatarResult(replay);
       const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
       const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const texto=centralUnlockerMensagem(pedido,servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome),dadosPt,'FINALIZADO',resultadoLimpo);
@@ -1768,9 +1817,9 @@ async function acompanharPedidosDhru(){
       try{
         const resp=await consultarPedidoDhru(row.order_uuid);
         const d=resp?.data||{};
-        const st=String(d?.status||'').toLowerCase();
+        const st=dhruExtrairStatus(d)||dhruExtrairStatus(resp);
         await run(`UPDATE dhru_orders SET response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[JSON.stringify(resp),row.id]);
-        const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+        const replay=dhruExtrairRetorno(d)||dhruExtrairRetorno(resp);
         if(dhruStatusNormalizado(st)==='FINALIZADO'&&!replay){
           // Aguarda o resultado completo antes de entregar a conclusão ao cliente.
           await run(`UPDATE dhru_orders SET status='AGUARDANDO_FEEDBACK',atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[row.id]);
@@ -1785,7 +1834,7 @@ async function acompanharPedidosDhru(){
         const resp=await consultarPedidoDhru(row.order_uuid),d=resp?.data||{},st=String(d?.status||'').toLowerCase();
         await run(`UPDATE tim_unlock_dhru_checks SET status=?,response_json=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),JSON.stringify(resp),row.id]);
         if(['rejected','reject','failed','failure','cancelled','canceled','success','completed','complete','done'].includes(st)){
-          const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+          const replay=dhruExtrairRetorno(resp)||dhruExtrairRetorno(d);
           if(replay||['rejected','reject','failed','failure','cancelled','canceled'].includes(st)) await processarFeedbackTimUnlock({reference_id:timUnlockReference(row.pedido_id),order_id:row.order_uuid,status:st,replay});
         }
       }catch(e){ console.log('⚠️ DHRU TIM STATUS',row.order_uuid,e?.response?.status||'',e?.response?.data?.message||e.message); }
@@ -5816,7 +5865,7 @@ function consultaFormatarDhruPrivado(bruto){
   }).join('\n');
 }
 async function consultaEnviarDhruCompletoPrivado(destino,bruto){
-  const texto=consultaFormatarDhruPrivado(bruto);
+  const texto=centralUnlockerFormatarResult(bruto);
   if(!texto)return false;
   // Fragmenta por linhas, mantendo a ordem; não descarta dados após 1ª mensagem.
   const limite=3500;
@@ -12181,7 +12230,7 @@ async function consultaDhruEntregar(ctx,resultado){
   // V207: usa exatamente o mesmo tratamento de resultado dos pedidos Dhru normais.
   // A entrada do grupo muda; a leitura/limpeza do Order reply é a rotina já usada pelo bot de serviços.
   const bruto=String(resultado??'');
-  const resultadoCliente=traduzirResultadoDhruPt(bruto).trim();
+  const resultadoCliente=centralUnlockerFormatarResult(bruto).trim();
   if(!resultadoCliente) throw new Error('Dhru concluiu a consulta sem conteúdo de resultado');
 
   const nomeCliente=String(ctx.cliente_nome||'Cliente').replace(/^@+/,'').trim()||'Cliente';
@@ -12204,14 +12253,14 @@ async function consultaDhruAcompanhar(ctx){
     await new Promise(r=>setTimeout(r,5000));
     try{
       const resp=await consultarPedidoDhru(ctx.order_uuid), d=resp?.data||{}, st=String(d?.status||'').toLowerCase();
-      const replay=d?.replay||d?.reply||d?.result||d?.message||'';
+      const replay=dhruExtrairRetorno(resp)||dhruExtrairRetorno(d);
       await run(`UPDATE consulta_dhru_execucoes SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[(st||'PROCESSANDO').toUpperCase(),ctx.id]);
       if(['success','completed','complete','done'].includes(st) && replay){ await consultaDhruEntregar(ctx,dhruDecodeReplay(replay)); return; }
       if(['rejected','reject','failed','failure','cancelled','canceled'].includes(st)) throw new Error(dhruDecodeReplay(replay)||`Dhru: ${st}`);
     }catch(e){
       if(/Dhru:|rejected|failed|cancel/i.test(String(e.message||''))){
         await run(`UPDATE consulta_dhru_execucoes SET status='ERRO',erro=?,finalizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(e.message).slice(0,800),ctx.id]);
-        try{await ctx.socket.sendMessage(ctx.grupo,{text:'❌ Não foi possível concluir esta consulta.',mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
+        try{await ctx.socket.sendMessage(ctx.grupo,{text:`❌ Não foi possível concluir esta consulta.\n\n📋 Resposta do serviço: ${centralUnlockerMotivoPt(e.message)||'Motivo não informado.'}`,mentions:ctx.cliente_jid?[ctx.cliente_jid]:[]})}catch(_){}
         await consultaDhruLiberarGrupo(ctx); if(consultaDhruEmMemoria?.id===ctx.id) consultaDhruEmMemoria=null; return;
       }
     }
