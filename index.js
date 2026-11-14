@@ -5086,6 +5086,17 @@ function normalizarOpcaoTelegram(texto) {
   if (t.includes('suporte')) return '6';
   return t.replace(/[️⃣\s]/g, '').slice(0, 20);
 }
+// Hero SMS Telegram: resultados limitados e filtrados por termo, sem catálogo gigante.
+async function heroSmsTelegramResultados(chatId,mensagem,from,termo){
+  const busca=String(termo||'').trim().toLocaleLowerCase('pt-BR');
+  const apps=heroSmsApps(await heroSmsVitrine()).filter(a=>a.toLocaleLowerCase('pt-BR').includes(busca)).slice(0,20);
+  await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps,heroApp:null,heroKeys:[]});
+  const kb=apps.map((app,i)=>[tgBtn(app.slice(0,55),`hero_sms_app_${i}`,'primary','','📲')]);
+  if(!apps.length)kb.push([tgBtn('🔎 Nova busca','hero_sms_search','primary')]);
+  kb.push([tgBtn('⬅️ Voltar','hero_sms_apps','danger')]);
+  return atualizarCardTelegram(chatId,mensagem,`💎 *CENTRAL SMS PREMIUM*\n\n🔎 Resultados para: ${termo}\n\n${apps.length?'Selecione o aplicativo:':'Nenhum aplicativo com estoque encontrado.'}`,kb);
+}
+
 async function processarMensagemTelegram(msg) {
   if(await premium.adminMessage(msg))return;
   if (!msg?.from?.id || !msg?.chat?.id) return;
@@ -5278,6 +5289,12 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
+  const sessHeroTelegram=await carregarSessaoPedido(from);
+  if(sessHeroTelegram?.etapa==='hero_tg_search'){
+    const busca=String(textoOriginal||'').trim().slice(0,60);
+    if(busca.length<2)return tgBot.sendMessage(msg.chat.id,'🔎 Digite pelo menos 2 caracteres para pesquisar.');
+    return heroSmsTelegramResultados(msg.chat.id,null,from,busca);
+  }
   const sessPremiumTelegram=await carregarSessaoPedido(from);
   if(['premium_list','premium_product'].includes(sessPremiumTelegram?.etapa)){if(texto==='0'){await apagarSessaoPedido(from);await enviarMenuTelegram(msg.chat.id,cliente);return;}if(sessPremiumTelegram.etapa==='premium_product'&&texto==='1'){await premium.confirm(from,cliente,sessPremiumTelegram.productId,sessPremiumTelegram.token);return;}await enviarTexto(from,'Use os botões Comprar e Voltar.');return;}
   const sessPixDocumentoTelegram = await carregarSessaoPedido(from);
@@ -7866,11 +7883,26 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
         if(data==='hero_sms_apps'){
-          const apps=heroSmsApps(await heroSmsVitrine()).slice(0,80);
-          await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps,heroApp:null,heroKeys:[]});
-          const kb=apps.map((app,i)=>[tgBtn(app.slice(0,55),`hero_sms_app_${i}`,'primary','','📲')]);
-          kb.push([tgBtn('Voltar','menu_voltar','danger','','⬅️')]);
-          return atualizarCardTelegram(chatId,q.message,'💬 *WHATSAPP SMS*\n\nSelecione o aplicativo ativado no painel:',kb);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_menu',heroApps:[],heroApp:null,heroKeys:[]});
+          return atualizarCardTelegram(chatId,q.message,'💎 *CENTRAL SMS PREMIUM*\n\n📲 Selecione o aplicativo:',[
+            [tgBtn('💬 WhatsApp','hero_sms_cat_whatsapp','primary'),tgBtn('✈️ Telegram','hero_sms_cat_telegram','primary')],
+            [tgBtn('📸 Instagram','hero_sms_cat_instagram','primary'),tgBtn('🌐 Google / Gmail','hero_sms_cat_google','primary')],
+            [tgBtn('🔎 Buscar aplicativo','hero_sms_search','primary')],
+            [tgBtn('📋 Meus pedidos','hero_sms_orders','primary')],
+            [tgBtn('⬅️ Voltar','menu_voltar','danger')]
+          ]);
+        }
+        if(data==='hero_sms_orders'){
+          return atualizarCardTelegram(chatId,q.message,'📋 Histórico Hero SMS ainda não disponível. Nenhuma compra foi realizada por este fluxo.',[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
+        }
+        if(data==='hero_sms_search'){
+          await salvarSessaoPedido(from,{etapa:'hero_tg_search',heroApps:[],heroApp:null,heroKeys:[]});
+          return atualizarCardTelegram(chatId,q.message,'🔎 *BUSCAR APLICATIVO*\n\nDigite o nome do aplicativo nesta conversa (mínimo 2 caracteres).',[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
+        }
+        const heroCategoria=data.match(/^hero_sms_cat_(whatsapp|telegram|instagram|google)$/);
+        if(heroCategoria){
+          const termos={whatsapp:'WhatsApp',telegram:'Telegram',instagram:'Instagram',google:'Google'};
+          return heroSmsTelegramResultados(chatId,q.message,from,termos[heroCategoria[1]]);
         }
         if(/^hero_sms_app_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const app=(ss?.heroApps||[])[Number(data.split('_').pop())];
@@ -7886,7 +7918,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:app,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
           const kb=rows.map((r,i)=>[tgBtn(`${r.pais} • ${brl(r.preco)}`.slice(0,60),`hero_sms_offer_${i}`,'primary','','🌎')]);
           if(!rows.length)kb.push([tgBtn('Escolher outro aplicativo','hero_sms_apps','primary')]);
-          kb.push([tgBtn('Alterar filtro',`hero_sms_app_${(ss.heroApps||[]).indexOf(app)}`,'danger')]);
+          kb.push([tgBtn('⬅️ Aplicativos','hero_sms_apps','danger')]);
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nEscolha o país:`,kb);
         }
         if(/^hero_sms_offer_\d+$/.test(data)){
