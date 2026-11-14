@@ -3569,6 +3569,7 @@ async function heroCancelOrder(jid,orderId){
   if(o.status==='sms_received'||o.sms_code)throw new Error('O código já foi recebido; cancelamento indisponível.');
   if(o.status==='cancel_pending')return '⏳ Cancelamento do pedido #'+o.id+' em conferência. Aguarde o suporte.';
   if(o.status!=='number_received'||!o.activation_id)throw new Error('Este pedido não está elegível para cancelamento automático.');
+  if(heroWaitSeconds(o)>0)throw new Error('Aguarde '+Math.ceil(heroWaitSeconds(o))+' segundos para solicitar cancelamento.');
   const lock=await run("UPDATE hero_sms_orders SET status='cancel_pending',last_error=NULL WHERE id=? AND status='number_received' AND sms_code IS NULL",[o.id]);
   if(!lock?.changes)return '⏳ O pedido está sendo atualizado. Consulte novamente.';
   let raw;
@@ -3591,6 +3592,21 @@ async function heroCancelOrder(jid,orderId){
   }catch(e){await run('ROLLBACK');await run("UPDATE hero_sms_orders SET last_error=? WHERE id=?",['Cancelamento confirmado; estorno pendente: '+String(e.message).slice(0,180),o.id]);return '⚠️ Hero SMS confirmou o cancelamento, mas o crédito ainda precisa de conferência administrativa.';}
   return '✅ CENTRALUNLOCKER\nPedido #'+o.id+' cancelado pela Hero SMS.\n💰 '+brl(o.price_brl)+' devolvidos à sua carteira.';
 }
+function heroWaitSeconds(o){
+  const started=Date.parse(String(o.created_at||'').replace(' ','T')+'Z');
+  return Number.isFinite(started)?Math.max(0,120-(Date.now()-started)/1000):120;
+}
+async function heroShowOrder(jid,id){
+  await heroPedidosInit();
+  const o=await get('SELECT * FROM hero_sms_orders WHERE id=? AND customer_jid=?',[id,jid]);
+  if(!o)throw new Error('Pedido não encontrado.');
+  const wait=heroWaitSeconds(o);
+  return '🔓 CENTRALUNLOCKER — HERO SMS\\n📦 Pedido #'+o.id+
+    '\\n🇧🇷 WhatsApp Brasil'+(o.phone?'\\n📱 Número: +'+String(o.phone).replace(/^\\+/,''):'')+
+    '\\n📍 Status: '+o.status+(o.sms_code?'\\n🔐 Código: '+o.sms_code:'')+
+    (o.status==='number_received'?(wait>0?'\\n🔒 Troca e cancelamento em '+Math.ceil(wait)+' segundos':
+      '\\n🔄 Trocar: trocar número '+o.id+'\\n❌ Cancelar: cancelar número '+o.id):'');
+}
 // API v1: troca de número sem criar outra compra e sem alterar o pagamento.
 async function heroSmsV1(method,path){
   const key=await heroSmsChave();
@@ -3611,6 +3627,7 @@ async function heroReplaceOrder(jid,orderId){
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=? AND customer_jid=?',[Number(orderId),jid]);
   if(!o||!o.activation_id)throw new Error('Ativação não encontrada.');
   if(o.status!=='number_received'||o.sms_code)throw new Error('Troca indisponível para este pedido.');
+  if(heroWaitSeconds(o)>0)throw new Error('Aguarde '+Math.ceil(heroWaitSeconds(o))+' segundos para solicitar troca.');
   const claimed=await run("UPDATE hero_sms_orders SET status='replace_pending' WHERE id=? AND status='number_received' AND sms_code IS NULL",[o.id]);
   if(!claimed?.changes)throw new Error('Operação em andamento.');
   try{
@@ -3642,6 +3659,28 @@ async function heroPixConfirmed(paymentId,ctx){
   const claim=await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status='awaiting_payment'",[id]);
   if(claim?.changes)await heroBuyPaid(id);
 }
+async function heroStatusUpdates(){
+  await heroPedidosInit();
+  const orders=await all("SELECT * FROM hero_sms_orders WHERE status IN ('number_received','sms_received','canceled','replace_uncertain','uncertain','cancel_pending','replace_pending') ORDER BY id DESC LIMIT 300");
+  for(const o of orders){
+    const wait=o.status==='number_received'?heroWaitSeconds(o):0;
+    const state=o.status+(wait>0?':locked':':ready')+':'+(o.phone||'')+':'+(o.sms_code||'')+':'+(o.refund_status||'');
+    const old=await get('SELECT last_status,pending_status FROM hero_sms_status_outbox WHERE order_id=?',[o.id]);
+    if(!old){
+      // Existing orders are initialized silently, avoiding a flood on first deployment.
+      await run('INSERT OR IGNORE INTO hero_sms_status_outbox(order_id,last_status) VALUES(?,?)',[o.id,state]);
+      continue;
+    }
+    if(old.last_status===state&&!old.pending_status)continue;
+    await run("UPDATE hero_sms_status_outbox SET pending_status=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",[state,o.id]);
+    const text=await heroShowOrder(o.customer_jid,o.id);
+    try{
+      // WhatsApp message editing is not consistently supported; send one status update per transition.
+      await enviarTexto(o.customer_jid,text);
+      await run("UPDATE hero_sms_status_outbox SET last_status=?,pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",[state,o.id]);
+    }catch(e){console.log('Hero status outbox #'+o.id,String(e.message).slice(0,120));}
+  }
+}
 async function heroPollSms(){
   await heroPedidosInit();
   const orders=await all("SELECT * FROM hero_sms_orders WHERE status='number_received' AND activation_id IS NOT NULL ORDER BY id ASC LIMIT 200");
@@ -3662,6 +3701,7 @@ async function heroPollSms(){
   }
 }
 setInterval(()=>heroPollSms().catch(e=>console.log('Hero SMS polling',e.message)),20000).unref?.();
+setInterval(()=>heroStatusUpdates().catch(e=>console.log('Hero SMS status updates',e.message)),30000).unref?.();
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
   let texto=`🌐 *SERVIÇOS ONLINE*\n\n1️⃣ 📩 *RECEBER SMS*\n`;
@@ -7239,17 +7279,31 @@ ${descricao}`);}catch(_){}
     if(/^\d+$/.test(opcao||'')){const ids=Array.isArray(sess.blacklistServicoIds)?sess.blacklistServicoIds:[];const id=Number(ids[Number(opcao)-1]||0);if(id){const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[id]);if(servico){await iniciarServicoWhatsApp(from,cliente,servico);return;}}}
     return;
   }
-  if(/^trocar (?:número|numero|hero) \\d+$/i.test(lower)){
-    const id=Number(lower.match(/\\d+$/)[0]);
+  if(/^trocar (?:número|numero|hero) \d+$/i.test(lower)){
+    const id=Number(lower.match(/\d+$/)[0]);
     try{await enviarTexto(from,await heroReplaceOrder(from,id));}
     catch(e){await enviarTexto(from,'⚠️ '+e.message);}
     return;
   }
-  if(/^cancelar (?:número|numero|hero) \d+$/i.test(lower)){const id=Number(lower.match(/\d+$/)[0]);try{await enviarTexto(from,await heroCancelOrder(from,id));}catch(e){await enviarTexto(from,'⚠️ '+e.message);}return;}
+  if(/^status (?:número|numero|hero) \d+$/i.test(lower)){
+    const id=Number(lower.match(/\d+$/)[0]);
+    try{await enviarTexto(from,await heroShowOrder(from,id));}catch(e){await enviarTexto(from,'⚠️ '+e.message);}
+    return;
+  }
+  if(/^confirmar cancelamento \d+$/i.test(lower)){
+    const id=Number(lower.match(/\d+$/)[0]);
+    try{await enviarTexto(from,await heroCancelOrder(from,id));}catch(e){await enviarTexto(from,'⚠️ '+e.message);}
+    return;
+  }
+  if(/^cancelar (?:número|numero|hero) \d+$/i.test(lower)){
+    const id=Number(lower.match(/\d+$/)[0]);
+    await enviarTexto(from,'⚠️ Confirma cancelar o pedido #'+id+'?\\nDigite *confirmar cancelamento '+id+'* para prosseguir.');
+    return;
+  }
   if(lower==='meus números'||lower==='meus numeros'||lower==='pedidos whatsapp'){await enviarTexto(from,await heroOrderHistory(from));return;}
   if(sess?.etapa==='hero_menu'){
     if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
-    const termos={'1':'WhatsApp','2':'Telegram','3':'Instagram','4':'Google'};
+    const termos={'1':'WhatsApp'};
     if(termos[opcao]){await heroSmsWaApps(from,termos[opcao]);return;}
     if(opcao==='5'){await salvarSessaoPedido(from,{etapa:'hero_busca'});await enviarTexto(from,'🔎 Digite o nome do aplicativo que deseja buscar.\n\n0️⃣ Voltar');return;}
     if(opcao==='6'){await enviarTexto(from,await heroOrderHistory(from));return;}
@@ -8149,7 +8203,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           await salvarSessaoPedido(from,{etapa:'hero_tg_offer',heroApp:'WhatsApp',heroOferta:{country:row.country,service:row.service}});
           return atualizarCardTelegram(chatId,q.message,`🔓 CENTRALUNLOCKER — WHATSAPP BRASIL\n\n🇧🇷 DDD aleatório (sem escolha de DDD).\n📱 Aplicativo: WhatsApp\n🌎 País: Brasil\n📦 Estoque: ${row.stock}\n💰 Valor: ${brl(await heroPrecoCliente((await get('SELECT id FROM revendas WHERE jid=? OR telegram_id=? LIMIT 1',[from,String(from).replace(/^tg:/,'')]))?.id))}\n\nEscolha o pagamento:`,[[tgBtn('💳 Pagar com saldo','hero_sms_pay_saldo','primary')],[tgBtn('💠 Pagar com Pix','hero_sms_pay_pix','primary')],[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
         }
-        if(/^hero_sms_replace_\\d+$/.test(data)){
+        if(/^hero_sms_replace_\d+$/.test(data)){
           const id=Number(data.split('_').pop());
           let result;
           try{result=await heroReplaceOrder(from,id);}catch(e){result='⚠️ '+e.message;}
@@ -8169,14 +8223,23 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           kb.push([tgBtn('⬅️ Voltar','hero_sms_apps','danger')]);
           return atualizarCardTelegram(chatId,q.message,'🔓 *CENTRALUNLOCKER*\n\nSelecione a ativação sem código que deseja cancelar. A Hero SMS precisa confirmar o cancelamento antes do estorno.'+(orders.length?'':'\n\nNenhuma ativação elegível.'),kb);
         }
-        if(/^hero_sms_cancel_\d+$/.test(data)){
+        if(/^hero_sms_cancel_confirm_\d+$/.test(data)){
           const id=Number(data.split('_').pop());
           let result;try{result=await heroCancelOrder(from,id);}catch(e){result='⚠️ '+e.message;}
-          return atualizarCardTelegram(chatId,q.message,result,[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')],[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
+          return atualizarCardTelegram(chatId,q.message,result,[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
+        }
+        if(/^hero_sms_cancel_\d+$/.test(data)){
+          const id=Number(data.split('_').pop());
+          return atualizarCardTelegram(chatId,q.message,'⚠️ Confirmar cancelamento do pedido #'+id+'?',[[tgBtn('✅ Confirmar','hero_sms_cancel_confirm_'+id,'danger')],[tgBtn('⬅️ Voltar','hero_sms_orders','primary')]]);
+        }
+        if(/^hero_sms_status_\d+$/.test(data)){
+          const id=Number(data.split('_').pop());
+          let result;try{result=await heroShowOrder(from,id);}catch(e){result='⚠️ '+e.message;}
+          return atualizarCardTelegram(chatId,q.message,result,[[tgBtn('🔄 Atualizar','hero_sms_status_'+id,'primary')],[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
         }
         if(data==='hero_sms_orders'){
           await heroPedidosInit();const orders=await all('SELECT id,status,phone,sms_code FROM hero_sms_orders WHERE customer_jid=? ORDER BY id DESC LIMIT 10',[from]);
-          return atualizarCardTelegram(chatId,q.message,'📋 Pedidos Hero SMS\n\n'+(orders.map(o=>'#'+o.id+' • '+o.status+(o.phone?' • +'+o.phone:'')+(o.sms_code?' • SMS: '+o.sms_code:'')).join('\n')||'Nenhum pedido.'),[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
+          return atualizarCardTelegram(chatId,q.message,'📋 Pedidos Hero SMS\n\n'+(orders.map(o=>'#'+o.id+' • '+o.status+(o.phone?' • +'+o.phone:'')+(o.sms_code?' • SMS: '+o.sms_code:'')).join('\n')||'Nenhum pedido.'),[...orders.map(o=>[tgBtn('📦 Pedido #'+o.id,'hero_sms_status_'+o.id,'primary')]),[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
         }
         if(data==='hero_sms_search'){
           await salvarSessaoPedido(from,{etapa:'hero_tg_search',heroApps:[],heroApp:null,heroKeys:[]});
@@ -16478,6 +16541,10 @@ async function heroPedidosInit(){
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_notifications (
     order_id INTEGER PRIMARY KEY, code TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_status_outbox(
+    order_id INTEGER PRIMARY KEY, last_status TEXT, pending_status TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_hero_order_payment ON hero_sms_orders(payment_id) WHERE payment_id IS NOT NULL`);
 }
