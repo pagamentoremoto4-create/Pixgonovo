@@ -3468,8 +3468,64 @@ async function heroSmsWaOferta(from,key){
   const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
   if(!row){await enviarTexto(from,'⚠️ Oferta indisponível. Volte e escolha outra.');return;}
   await salvarSessaoPedido(from,{etapa:'hero_oferta',heroOferta:{country:row.country,service:row.service},heroApp:row.nome});
-  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível até a homologação da cobrança e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
+  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(row.preco)}*\n\n1️⃣ Pagar com saldo\n2️⃣ Pagar com Pix\n0️⃣ Voltar`);
 }
+
+// Hero SMS: checkout with the existing eSIM wallet and Pix gateway.
+async function heroCheckout(jid,cliente,key,method){
+  await heroPedidosInit();
+  if(!cliente?.id)throw new Error('Cliente não identificado.');
+  const offer=(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service));
+  if(!offer||!offer.stock)throw new Error('Oferta sem estoque.');
+  const amount=Number(offer.preco);
+  const active=await get("SELECT id FROM hero_sms_orders WHERE customer_jid=? AND status IN ('awaiting_payment','paid','purchasing','uncertain','number_received') LIMIT 1",[jid]);
+  if(active)throw new Error('Pedido #'+active.id+' ainda em andamento. Consulte o histórico.');
+  const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),method]);
+  const id=r.lastID;
+  if(method==='saldo'){
+    const debit=await run('UPDATE revendas SET saldo=saldo-?,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND saldo>=?',[amount,cliente.id,amount]);
+    if(!debit?.changes){await run("UPDATE hero_sms_orders SET status='insufficient_balance' WHERE id=?",[id]);throw new Error('Saldo insuficiente. Use Pix ou adicione saldo.');}
+    await run("UPDATE hero_sms_orders SET status='paid' WHERE id=?",[id]);
+    await heroBuyPaid(id);return id;
+  }
+  const gateway=(await gatewayPagamentoCliente(cliente))?.gateway;
+  if(!gateway)throw new Error('Gateway Pix indisponível.');
+  const pix=await gerarPix(amount,'Hero SMS #'+id,'',gateway);
+  if(!pix?.paymentId||!pix?.qrCode){await run("UPDATE hero_sms_orders SET status='payment_failed' WHERE id=?",[id]);throw new Error('Falha ao gerar Pix.');}
+  const context=JSON.stringify({tipoCompra:'HERO_SMS',heroOrderId:id});
+  await run("INSERT INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','SERVICO',?,?)",[pix.paymentId,cliente.id,jid,jid,amount,context,gateway]);
+  await run('UPDATE hero_sms_orders SET payment_id=? WHERE id=?',[pix.paymentId,id]);
+  verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
+  await enviarTexto(jid,'💠 HERO SMS — Pix #'+id+'\nValor: '+brl(amount)+'\n\nCopie e pague:\n'+pix.qrCode+'\n\nCompra somente após confirmação.');
+  return id;
+}
+async function heroBuyPaid(id){
+  const claim=await run("UPDATE hero_sms_orders SET status='purchasing' WHERE id=? AND status='paid'",[id]);if(!claim?.changes)return;
+  const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
+  try{
+    const raw=await heroSmsApi('getNumberV2',{service:o.service,country:o.country});let v;try{v=JSON.parse(raw);}catch{}
+    const activation=v?.activationId??v?.activation_id??v?.id,phone=v?.phoneNumber??v?.phone_number??v?.phone;
+    if(!activation||!phone)throw new Error('Resposta incerta da Hero SMS: '+raw.slice(0,100));
+    await run("UPDATE hero_sms_orders SET activation_id=?,phone=?,status='number_received' WHERE id=?",[String(activation),String(phone),id]);
+    await enviarTexto(o.customer_jid,'✅ HERO SMS #'+id+'\n📱 Número: +'+phone+'\n⏳ Aguardando SMS; enviaremos o código automaticamente.');
+  }catch(e){await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=?",[e.message.slice(0,400),id]);await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');}
+}
+async function heroPixConfirmed(paymentId,ctx){
+  const id=Number(ctx.heroOrderId);const o=await get('SELECT id FROM hero_sms_orders WHERE id=? AND payment_id=?',[id,String(paymentId)]);
+  if(!o)throw new Error('Pagamento não corresponde ao pedido Hero SMS.');
+  const claim=await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status='awaiting_payment'",[id]);
+  if(claim?.changes)await heroBuyPaid(id);
+}
+async function heroPollSms(){
+  await heroPedidosInit();const orders=await all("SELECT * FROM hero_sms_orders WHERE status='number_received' AND activation_id IS NOT NULL LIMIT 30");
+  for(const o of orders)try{
+    const status=await heroSmsApi('getStatus',{id:o.activation_id});if(!status.startsWith('STATUS_OK:'))continue;
+    const code=status.slice(10).trim();if(!code)continue;
+    const updated=await run("UPDATE hero_sms_orders SET sms_code=?,status='sms_received' WHERE id=? AND status='number_received'",[code,o.id]);
+    if(updated?.changes)await enviarTexto(o.customer_jid,'📩 HERO SMS #'+o.id+'\n🔐 Código: '+code);
+  }catch(e){console.log('Hero SMS SMS #'+o.id,e.message);}
+}
+setInterval(()=>heroPollSms().catch(e=>console.log('Hero SMS polling',e.message)),20000).unref?.();
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
   let texto=`🌐 *SERVIÇOS ONLINE*\n\n1️⃣ 📩 *RECEBER SMS*\n`;
@@ -7087,7 +7143,11 @@ ${descricao}`);}catch(_){}
       if(sess.heroApp){await heroSmsWaPaises(from,sess.heroApp,sess.heroSort||'preco_asc');return;}
       await heroSmsWaMenu(from);return;
     }
-    await enviarTexto(from,'⚠️ Compra Hero SMS ainda não habilitada nesta versão. Digite 0 para voltar aos países.');return;
+    if(opcao==='1'||opcao==='2'){
+      const cliente=await get("SELECT * FROM revendas WHERE (jid=? OR whatsapp=?) AND status != 'REMOVIDA'",[from,jidToNumber(from)]);
+      try{await heroCheckout(from,cliente,sess.heroOferta,opcao==='1'?'saldo':'pix');}catch(e){await enviarTexto(from,'⚠️ '+e.message);}return;
+    }
+    await enviarTexto(from,'Digite 1 (saldo), 2 (Pix) ou 0 (voltar).');return;
   }
   if (sess?.etapa === 'online_categorias') {
     if(opcao==='1'||lower==='sms'||lower==='receber sms'){await heroSmsWaMenu(from);return;}
@@ -7937,7 +7997,8 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           ]);
         }
         if(data==='hero_sms_orders'){
-          return atualizarCardTelegram(chatId,q.message,'📋 Histórico Hero SMS ainda não disponível. Nenhuma compra foi realizada por este fluxo.',[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
+          await heroPedidosInit();const orders=await all('SELECT id,status,phone,sms_code FROM hero_sms_orders WHERE customer_jid=? ORDER BY id DESC LIMIT 10',[from]);
+          return atualizarCardTelegram(chatId,q.message,'📋 Pedidos Hero SMS\n\n'+(orders.map(o=>'#'+o.id+' • '+o.status+(o.phone?' • +'+o.phone:'')+(o.sms_code?' • SMS: '+o.sms_code:'')).join('\n')||'Nenhum pedido.'),[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
         }
         if(data==='hero_sms_search'){
           await salvarSessaoPedido(from,{etapa:'hero_tg_search',heroApps:[],heroApp:null,heroKeys:[]});
@@ -7969,7 +8030,15 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           const ss=await carregarSessaoPedido(from);const key=(ss?.heroKeys||[])[Number(data.split('_').pop())];
           const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
           if(!row || row.nome!==ss?.heroApp)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
-          return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(row.preco)}\n\n⚠️ Compra ainda indisponível: aguardando homologação de PIX, saldo e entrega. Nenhum saldo foi debitado.`,[[tgBtn('Voltar','hero_sms_apps','danger')]]);
+          await salvarSessaoPedido(from,{etapa:'hero_tg_offer',heroOferta:{country:row.country,service:row.service}});
+          return atualizarCardTelegram(chatId,q.message,`💬 HERO SMS\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(row.preco)}\n\nEscolha o pagamento:`,[[tgBtn('💳 Saldo','hero_sms_pay_saldo','primary'),tgBtn('💠 Pix','hero_sms_pay_pix','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
+        }
+        if(data==='hero_sms_pay_saldo'||data==='hero_sms_pay_pix'){
+          const ss=await carregarSessaoPedido(from);
+          if(ss?.etapa!=='hero_tg_offer'||!ss.heroOferta)return atualizarCardTelegram(chatId,q.message,'Oferta expirada.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
+          try{const id=await heroCheckout(from,cliente,ss.heroOferta,data.endsWith('saldo')?'saldo':'pix');await apagarSessaoPedido(from);
+            return atualizarCardTelegram(chatId,q.message,'✅ Pedido Hero SMS #'+id+' registrado. Confira as mensagens neste chat.',[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
+          }catch(e){return atualizarCardTelegram(chatId,q.message,'⚠️ '+e.message,[[tgBtn('Voltar','hero_sms_apps','danger')]]);}
         }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });
@@ -9957,6 +10026,10 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       }
        let contextoEsim=null;
        try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
+       if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='HERO_SMS') {
+         await heroPixConfirmed(paymentId,contextoEsim);
+         await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',['delivered',paymentId]);return;
+       }
        if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
          await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
          const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim);
