@@ -16232,19 +16232,56 @@ app.post('/admin/herosms/importar',async(req,res)=>{
     res.redirect('/admin/herosms/catalogo?ok='+encodeURIComponent(offers.length+' ofertas importadas. Ativacoes anteriores preservadas.'));
   }catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
 });
+function heroSmsCategoria(nome,code){
+  const v=(String(nome||'')+' '+String(code||'')).toLowerCase();
+  if(/whatsapp|telegram|instagram|facebook|messenger|discord|signal|viber|snapchat|twitter|tiktok|wechat|line|reddit|pinterest|vk\b/.test(v))return '💬 Mensagens e redes sociais';
+  if(/google|gmail|microsoft|outlook|apple|icloud|yahoo|proton|mail|openai|chatgpt|gemini/.test(v))return '🌐 Tecnologia e e-mail';
+  if(/amazon|aliexpress|shopee|ebay|mercado livre|ifood|delivery|uber eats|rappi|temu|shein/.test(v))return '🛒 Compras e delivery';
+  if(/bank|banco|nubank|binance|paypal|wise|revolut|coinbase|mercado pago|pix|crypto|wallet/.test(v))return '🏦 Bancos e finanças';
+  if(/steam|epic games|roblox|playstation|xbox|twitch|netflix|spotify|game|gaming|riot games/.test(v))return '🎮 Jogos e entretenimento';
+  return '📱 Outros aplicativos';
+}
 app.get('/admin/herosms/catalogo',async(req,res)=>{
   try{
     await heroCatalogInit();
     await run(`CREATE TABLE IF NOT EXISTS hero_sms_country_names (id TEXT PRIMARY KEY, name TEXT NOT NULL)`);
-    const rows=await all(`SELECT h.*,c.name AS country_name FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country ORDER BY COALESCE(h.service_name,h.service),h.country LIMIT 10000`);
+    // Sem LIMIT 10000: os totais precisam considerar todas as ofertas importadas.
+    const rows=await all(`SELECT h.*,c.name AS country_name FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country ORDER BY COALESCE(NULLIF(h.service_name,''),h.service) COLLATE NOCASE,h.country`);
     const margin=Number(await getConfig('hero_sms_margin_brl','25'));
     const currency=String(await getConfig('hero_sms_cost_currency','BRL')).toUpperCase();
     const configuredRate=Number(await getConfig('hero_sms_brl_per_unit',currency==='BRL'?'1':'0'));
     const rate=currency==='BRL'?1:configuredRate;
-    const alert=rate<=0?'<p style="color:#ef4444">Configure a conversao monetaria antes de liberar qualquer venda. Nenhuma compra esta habilitada nesta versao.</p>':'';
-    const entries=rows.map(x=>`<tr><td>${safeHtml(x.country_name||x.country)} <small>(${safeHtml(x.country)})</small></td><td>${safeHtml(x.service_name||x.service)} <small>(${safeHtml(x.service)})</small></td><td>${Number(x.stock)}</td><td>${Number(x.cost).toFixed(2)} ${safeHtml(currency)}</td><td>${rate>0?brl(Number(x.cost)*rate+margin):'Aguardando cotacao'}</td><td><form method="post" action="/admin/herosms/ativar"><input type="hidden" name="country" value="${safeHtml(x.country)}"><input type="hidden" name="service" value="${safeHtml(x.service)}"><select name="active"><option value="1" ${x.active?'selected':''}>Ativo</option><option value="0" ${!x.active?'selected':''}>Inativo</option></select><button>Salvar</button></form></td></tr>`).join('');
-    res.send(page('Hero SMS — catalogo',`<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}<form method="post" action="/admin/herosms/importar"><button>Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (ex.: RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo (cotacao configurada manualmente)</label><input name="rate" value="${rate||''}"><button>Salvar precificacao</button></form><label>Buscar aplicativo, país ou código</label><input id="heroFilter" placeholder="Ex.: WhatsApp, Telegram, Brasil" oninput="document.querySelectorAll('#heroOffers tbody tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(this.value.toLowerCase())?'':'none')"><p>${rows.length} ofertas listadas. Importacao ativa novos itens por padrao; desativacoes manuais sao preservadas.</p><table id="heroOffers"><tbody><tr><th>Pais</th><th>Servico</th><th>Estoque</th><th>Custo</th><th>Venda</th><th>Status</th></tr>${entries}</tbody></table></div>`));
-  }catch(e){res.status(500).send('Falha ao abrir catalogo: '+safeHtml(e.message));}
+    const alert=rate<=0?'<p style="color:#ef4444">Configure a conversão monetária antes de liberar qualquer venda. Nenhuma compra está habilitada nesta versão.</p>':'';
+    const categorias=new Map();
+    for(const x of rows){
+      const nome=String(x.service_name||x.service);
+      const categoria=heroSmsCategoria(nome,x.service);
+      if(!categorias.has(categoria))categorias.set(categoria,new Map());
+      const apps=categorias.get(categoria);
+      const chave=String(x.service);
+      if(!apps.has(chave))apps.set(chave,{nome,code:chave,rows:[],estoque:0});
+      const app=apps.get(chave);
+      app.rows.push(x);
+      // Soma das quantidades reportadas por país/serviço; pode haver estoque compartilhado na origem.
+      if(x.active&&Number(x.stock)>0)app.estoque+=Number(x.stock);
+    }
+    const ordem=['💬 Mensagens e redes sociais','🌐 Tecnologia e e-mail','🛒 Compras e delivery','🏦 Bancos e finanças','🎮 Jogos e entretenimento','📱 Outros aplicativos'];
+    let somaOfertas=0,estoqueOfertas=0;
+    for(const x of rows){if(x.active&&Number(x.stock)>0){somaOfertas++;estoqueOfertas+=Number(x.stock);}}
+    const categoriasHtml=ordem.map(cat=>{
+      const apps=categorias.get(cat);
+      if(!apps||!apps.size)return '';
+      const grupos=[...apps.values()].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+      const itens=grupos.map(app=>{
+        const paises=app.rows.map(x=>`<tr><td>${safeHtml(x.country_name||x.country)} <small>(${safeHtml(x.country)})</small></td><td>${Number(x.stock).toLocaleString('pt-BR')}</td><td>${Number(x.cost).toFixed(2)} ${safeHtml(currency)}</td><td>${rate>0?brl(Number(x.cost)*rate+margin):'Aguardando cotação'}</td><td><form method="post" action="/admin/herosms/ativar"><input type="hidden" name="country" value="${safeHtml(x.country)}"><input type="hidden" name="service" value="${safeHtml(x.service)}"><select name="active"><option value="1" ${x.active?'selected':''}>Ativo</option><option value="0" ${!x.active?'selected':''}>Inativo</option></select><button>Salvar</button></form></td></tr>`).join('');
+        return `<details class="hero-app" data-search="${safeHtml((app.nome+' '+app.code+' '+app.rows.map(x=>x.country_name||x.country).join(' ')).toLowerCase())}"><summary><strong>${safeHtml(app.nome)}</strong> <small>(${safeHtml(app.code)})</small> <span class="hero-count">${app.estoque.toLocaleString('pt-BR')} números • ${app.rows.length} países</span></summary><div class="hero-scroll"><table><thead><tr><th>País</th><th>Estoque</th><th>Custo</th><th>Venda</th><th>Status</th></tr></thead><tbody>${paises}</tbody></table></div></details>`;
+      }).join('');
+      return `<details class="hero-category" data-category="${safeHtml(cat.toLowerCase())}"><summary><strong>${safeHtml(cat)}</strong> <span class="hero-count">${grupos.length} aplicativos</span></summary><div class="hero-apps">${itens}</div></details>`;
+    }).join('');
+    const styles=`<style>.hero-category,.hero-app{border:1px solid #64748b55;border-radius:12px;margin:10px 0;overflow:hidden}.hero-category>summary,.hero-app>summary{cursor:pointer;padding:15px;list-style:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.hero-category>summary::-webkit-details-marker,.hero-app>summary::-webkit-details-marker{display:none}.hero-category>summary:before,.hero-app>summary:before{content:'▸';font-size:18px}.hero-category[open]>summary:before,.hero-app[open]>summary:before{content:'▾'}.hero-apps{padding:0 12px 12px}.hero-app{margin:7px 0}.hero-count{margin-left:auto;font-size:13px;opacity:.8}.hero-scroll{overflow-x:auto;padding:0 10px 12px}.hero-scroll table{width:100%;min-width:580px}.hero-scroll form{display:flex;gap:6px;align-items:center}.hero-scroll button{margin:0}.hero-summary{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}.hero-summary>span{padding:10px;border:1px solid #64748b55;border-radius:10px}</style>`;
+    const filterJs=`<script>function heroFiltrar(){const q=document.getElementById('heroFilter').value.trim().toLocaleLowerCase('pt-BR');document.querySelectorAll('.hero-category').forEach(cat=>{let vis=0;cat.querySelectorAll('.hero-app').forEach(app=>{const ok=!q||app.dataset.search.includes(q)||cat.dataset.category.includes(q);app.hidden=!ok;if(ok)vis++;if(q&&ok)app.open=true;else if(!q)app.open=false;});cat.hidden=!vis;if(q&&vis)cat.open=true;else if(!q)cat.open=false;});}</script>`;
+    res.send(page('Hero SMS — catálogo',`${styles}<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}<p>🔒 Compras bloqueadas até a homologação.</p><form method="post" action="/admin/herosms/importar"><button>🔄 Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo</label><input name="rate" value="${rate||''}"><button>Salvar precificação</button></form><div class="hero-summary"><span><b>${rows.length.toLocaleString('pt-BR')}</b> ofertas importadas</span><span><b>${somaOfertas.toLocaleString('pt-BR')}</b> ofertas ativas com estoque</span><span><b>${estoqueOfertas.toLocaleString('pt-BR')}</b> números somados entre ofertas*</span></div><p><small>*Soma do estoque informado por país e serviço. Não representa necessariamente números únicos, pois a API pode compartilhar estoque.</small></p><label>Buscar aplicativo, país ou código</label><input id="heroFilter" placeholder="Ex.: WhatsApp, Telegram, Brasil" oninput="heroFiltrar()"><p>As categorias começam fechadas. Clique para abrir aplicativos e depois os países. Desativações manuais são preservadas na sincronização.</p>${categoriasHtml||'<p>Nenhuma oferta importada.</p>'}</div>${filterJs}`));
+  }catch(e){res.status(500).send('Falha ao abrir catálogo: '+safeHtml(e.message));}
 });
 app.post('/admin/herosms/precos',async(req,res)=>{
   try{const margin=Number(String(req.body.margin||'').replace(',','.'));const rate=Number(String(req.body.rate||'').replace(',','.'));const currency=String(req.body.currency||'').trim().toUpperCase();if(!Number.isFinite(margin)||margin<0||margin>100000||!Number.isFinite(rate)||rate<0||rate>100000||!/^[A-Z]{3}$/.test(currency))throw new Error('Valores invalidos.');await setConfig('hero_sms_margin_brl',String(margin));await setConfig('hero_sms_brl_per_unit',String(currency==='BRL'?1:rate));await setConfig('hero_sms_cost_currency',currency);res.redirect('/admin/herosms/catalogo?ok=Precificacao+salva');}catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
