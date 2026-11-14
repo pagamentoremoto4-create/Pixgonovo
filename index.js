@@ -3475,7 +3475,13 @@ async function heroSmsWaOferta(from,key){
 }
 
 // Hero SMS: checkout with the existing eSIM wallet and Pix gateway.
+// Aguardando Pix nao impede uma nova tentativa; ativacao ja entregue tambem nao.
+// O bloqueio se aplica somente a compras pagas sem conclusao conhecida.
+const heroCheckoutInFlight = new Set();
 async function heroCheckout(jid,cliente,key,method){
+  if(heroCheckoutInFlight.has(jid))throw new Error('Uma compra está sendo processada. Aguarde alguns segundos.');
+  heroCheckoutInFlight.add(jid);
+  try {
   await heroPedidosInit();
   if(!cliente?.id)throw new Error('Cliente não identificado.');
   const offer=(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service));
@@ -3483,8 +3489,10 @@ async function heroCheckout(jid,cliente,key,method){
   if(!heroBrasilPermitido(offer.country))throw new Error('A venda Hero SMS está disponível somente para Brasil (DDD aleatório).');
   if(String(offer.service).toLowerCase()!=='wa'&&!/whats\s?app/i.test(String(offer.nome||'')))throw new Error('Somente números WhatsApp estão disponíveis.');
   const amount=Number(offer.preco);
-  const active=await get("SELECT id FROM hero_sms_orders WHERE customer_jid=? AND status IN ('awaiting_payment','paid','purchasing','uncertain','number_received') LIMIT 1",[jid]);
-  if(active)throw new Error('Pedido #'+active.id+' ainda em andamento. Consulte o histórico.');
+  // Nao bloquear por Pix pendente nem por numero ja entregue.
+  // Uma compra paga em processamento/incerta exige conciliacao antes de outra.
+  const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain') ORDER BY id DESC LIMIT 1",[jid]);
+  if(active)throw new Error('Pedido #'+active.id+' com pagamento ou compra em verificacao. Consulte o historico ou suporte antes de comprar novamente.');
   const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),method]);
   const id=r.lastID;
   if(method==='saldo'){
@@ -3503,6 +3511,7 @@ async function heroCheckout(jid,cliente,key,method){
   verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
   await enviarTexto(jid,'💠 HERO SMS — Pix #'+id+'\nValor: '+brl(amount)+'\n\nCopie e pague:\n'+pix.qrCode+'\n\nCompra somente após confirmação.');
   return id;
+  } finally { heroCheckoutInFlight.delete(jid); }
 }
 async function heroBuyPaid(id){
   const claim=await run("UPDATE hero_sms_orders SET status='purchasing' WHERE id=? AND status='paid'",[id]);if(!claim?.changes)return;
