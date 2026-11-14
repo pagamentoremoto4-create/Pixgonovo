@@ -3704,7 +3704,8 @@ async function heroSyncExternal(){
   const oldest=Math.min(...orders.map(o=>Date.parse(String(o.created_at).replace(' ','T')+'Z')).filter(Number.isFinite));
   const from=new Date(Math.max(Date.now()-30*86400000,Number.isFinite(oldest)?oldest-86400000:Date.now()-7*86400000)).toISOString();
   const to=new Date(Date.now()+60000).toISOString();
-  // Active activations are needed to detect external number replacements before completion.
+  // Active lookup must not prevent cancellation/refund reconciliation.
+  try {
   for(let activePage=1;activePage<=20;activePage++){
     const active=await heroSmsV1('GET','/activations?'+new URLSearchParams({page:String(activePage),size:'25'}));
     const entries=Array.isArray(active?.data)?active.data:[];
@@ -3717,6 +3718,7 @@ async function heroSyncExternal(){
     }
     if(!active?.meta?.hasMore||!entries.length)break;
   }
+  } catch(e) { console.log('Hero SMS active sync (history will still run)', String(e.message).slice(0,200)); }
   let page=1,found=new Set();
   while(page<=20){
     const qs=new URLSearchParams({from,to,page:String(page),size:'25'});
@@ -3754,40 +3756,48 @@ async function heroSyncExternal(){
     page++;
   }
 }
+let heroStatusUpdatesRunning=false;
 async function heroStatusUpdates(){
-  await heroPedidosInit();
-  // Only meaningful external events generate an unsolicited notification.
-  // Unlocking menu options is NOT a message event: client can press 2 to refresh.
-  const orders=await all("SELECT * FROM hero_sms_orders WHERE status IN ('number_received','canceled','finished','replace_uncertain') ORDER BY id DESC LIMIT 300");
-  for(const o of orders){
-    const state=o.status+':'+(o.phone||'')+':'+(o.refund_status||'');
-    const old=await get('SELECT last_status,pending_status FROM hero_sms_status_outbox WHERE order_id=?',[o.id]);
-    if(!old){
-      await run('INSERT OR IGNORE INTO hero_sms_status_outbox(order_id,last_status) VALUES(?,?)',[o.id,state]);
-      continue;
+  if(heroStatusUpdatesRunning)return;
+  heroStatusUpdatesRunning=true;
+  try{
+    await heroPedidosInit();
+    const orders=await all("SELECT * FROM hero_sms_orders WHERE status IN ('number_received','canceled','finished','replace_uncertain') ORDER BY id DESC LIMIT 300");
+    for(const o of orders){
+      const state=JSON.stringify({status:o.status,phone:String(o.phone||''),refund:String(o.refund_status||'')});
+      const old=await get('SELECT last_status,pending_status FROM hero_sms_status_outbox WHERE order_id=?',[o.id]);
+      if(!old){
+        await run('INSERT OR IGNORE INTO hero_sms_status_outbox(order_id,last_status) VALUES(?,?)',[o.id,state]);
+        continue;
+      }
+      let previous;
+      try{
+        previous=JSON.parse(String(old.last_status||''));
+        if(!previous||typeof previous!=='object')throw new Error('legacy');
+      }catch(_){
+        // Legacy V9/V10 state included lock timestamps; its phone position is unreliable.
+        // Baseline it silently rather than announce a fake replacement.
+        await run('UPDATE hero_sms_status_outbox SET last_status=?,pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,o.id]);
+        continue;
+      }
+      const changedPhone=o.status==='number_received'&&!!o.phone&&!!previous.phone&&String(previous.phone)!==String(o.phone);
+      const changedCancel=o.status==='canceled'&&(previous.status!=='canceled'||(previous.refund!=='credited'&&o.refund_status==='credited'));
+      const changedFinish=o.status==='finished'&&previous.status!=='finished';
+      if(!(changedPhone||changedCancel||changedFinish)){
+        if(old.last_status!==state)await run('UPDATE hero_sms_status_outbox SET last_status=?,pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,o.id]);
+        continue;
+      }
+      const msg=changedPhone?'🔓 *CENTRALUNLOCKER*\n\n🔄 *NÚMERO ATUALIZADO*\n📦 Pedido #'+o.id+'\n📱 Novo número: +'+String(o.phone).replace(/^\+/,'')+'\n⏳ Aguardando SMS':
+        changedCancel?'🔓 *CENTRALUNLOCKER*\n\n❌ *ATIVAÇÃO CANCELADA*\n📦 Pedido #'+o.id+(o.refund_status==='credited'?'\n💰 Valor devolvido à carteira.':'\n⏳ Reembolso não confirmado.'):
+        '🔓 *CENTRALUNLOCKER*\n\n✅ Ativação finalizada\n📦 Pedido #'+o.id;
+      // Reserve state before sending so a concurrent poll cannot send it again.
+      await run('UPDATE hero_sms_status_outbox SET last_status=?,pending_status=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,state,o.id]);
+      try{
+        await enviarTexto(o.customer_jid,msg);
+        await run('UPDATE hero_sms_status_outbox SET pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[o.id]);
+      }catch(e){console.log('Hero status notification #'+o.id,String(e.message).slice(0,120));}
     }
-    // Old V9 state included a lock timer; normalize it without sending stale technical messages.
-    const oldParts=String(old.last_status||'').split(':');
-    const oldStatus=oldParts[0];
-    const oldPhone=oldParts.length>=3?oldParts[2]:oldParts[1];
-    const oldRefund=oldParts.length>=5?oldParts[4]:oldParts[2];
-    const changedPhone=o.status==='number_received'&&!!o.phone&&oldPhone!==String(o.phone);
-    const changedCancel=o.status==='canceled'&&(oldStatus!=='canceled'||oldRefund!==String(o.refund_status||''));
-    const changedFinish=o.status==='finished'&&oldStatus!=='finished';
-    const shouldNotify=changedPhone||changedCancel||changedFinish;
-    if(!shouldNotify){
-      await run('UPDATE hero_sms_status_outbox SET last_status=?,pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,o.id]);
-      continue;
-    }
-    const msg=changedPhone?'🔓 *CENTRALUNLOCKER*\n\n🔄 *NÚMERO ATUALIZADO*\n📦 Pedido #'+o.id+'\n📱 Novo número: +'+String(o.phone).replace(/^\+/,'')+'\n⏳ Aguardando SMS':
-      changedCancel?'🔓 *CENTRALUNLOCKER*\n\n❌ *ATIVAÇÃO CANCELADA*\n📦 Pedido #'+o.id+(o.refund_status==='credited'?'\n💰 Valor devolvido à carteira.':'\n⏳ Reembolso não confirmado.'):
-      '🔓 *CENTRALUNLOCKER*\n\n✅ Ativação finalizada\n📦 Pedido #'+o.id;
-    await run('UPDATE hero_sms_status_outbox SET pending_status=?,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,o.id]);
-    try{
-      await enviarTexto(o.customer_jid,msg);
-      await run('UPDATE hero_sms_status_outbox SET last_status=?,pending_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE order_id=?',[state,o.id]);
-    }catch(e){console.log('Hero status notification #'+o.id,String(e.message).slice(0,120));}
-  }
+  }finally{heroStatusUpdatesRunning=false;}
 }
 async function heroPollSms(){
   await heroPedidosInit();
@@ -3801,7 +3811,7 @@ async function heroPollSms(){
   }catch(e){console.log('Hero SMS SMS #'+o.id,e.message);}
   const pending=await all("SELECT n.order_id,n.code,o.customer_jid FROM hero_sms_notifications n JOIN hero_sms_orders o ON o.id=n.order_id WHERE n.delivered=0 AND n.attempts<30 ORDER BY n.order_id ASC LIMIT 100");
   for(const n of pending)try{
-    await enviarTexto(n.customer_jid,'📩 CENTRALUNLOCKER #'+n.order_id+'\\n🔐 Código: '+n.code);
+    await enviarTexto(n.customer_jid,'📩 CENTRALUNLOCKER #'+n.order_id+'\n🔐 Código: '+n.code);
     await run("UPDATE hero_sms_notifications SET delivered=1,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",[n.order_id]);
   }catch(e){
     await run("UPDATE hero_sms_notifications SET attempts=attempts+1,updated_at=CURRENT_TIMESTAMP WHERE order_id=?",[n.order_id]);
