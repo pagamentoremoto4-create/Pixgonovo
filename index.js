@@ -3409,13 +3409,19 @@ async function heroSmsVitrine(){
 }
 // V274: todos os aplicativos ativos sincronizados pela Hero SMS, sem lista fixa.
 function heroSmsApps(rows){return [...new Set(rows.map(x=>String(x.nome||x.service)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
-async function heroSmsWaApps(from){
-  const apps=heroSmsApps(await heroSmsVitrine());
+// Menu premium: opções curtas e pesquisa sob demanda, sem despejar todo o catálogo.
+async function heroSmsWaMenu(from){
+  await salvarSessaoPedido(from,{etapa:'hero_menu',heroApps:[],heroApp:null,heroPaises:[],heroSort:null});
+  await enviarTexto(from,`💎 *CENTRAL SMS PREMIUM*\n\n📲 Escolha o aplicativo:\n\n1️⃣ WhatsApp\n2️⃣ Telegram\n3️⃣ Instagram\n4️⃣ Google / Gmail\n5️⃣ 🔎 Buscar outro aplicativo\n6️⃣ 📋 Meus pedidos (em preparação)\n\n0️⃣ Voltar`);
+}
+async function heroSmsWaApps(from,termo){
+  const q=String(termo||'').trim().toLocaleLowerCase();
+  const apps=heroSmsApps(await heroSmsVitrine()).filter(a=>String(a).toLocaleLowerCase().includes(q)).slice(0,20);
   await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps,heroApp:null,heroPaises:[],heroSort:null});
-  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📲 Selecione o aplicativo:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço ativo com estoque no momento.'}\n\n0️⃣ Voltar`);
+  await enviarTexto(from,`💎 *CENTRAL SMS PREMIUM*\n\n🔎 Resultados para *${termo}*:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço com estoque encontrado.'}\n\n0️⃣ Voltar ao menu SMS`);
 }
 async function heroSmsWaPaises(from,app,sort='preco_asc'){
-  if(!app || String(app)==='undefined'){await heroSmsWaApps(from);return;}
+  if(!app || String(app)==='undefined'){await heroSmsWaMenu(from);return;}
   let rows=(await heroSmsVitrine()).filter(r=>String(r.nome||r.service)===String(app));
   if(sort==='preco_desc')rows.sort((a,b)=>b.preco-a.preco);
   else if(sort==='estoque')rows.sort((a,b)=>b.stock-a.stock);
@@ -6679,7 +6685,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     const acaoMenu=/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null;
     if(acaoMenu==='consultas'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(acaoMenu==='servicos'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
-    if(acaoMenu==='hero_whatsapp'){ await heroSmsWaApps(from); return; }
+    if(acaoMenu==='hero_whatsapp'){ await heroSmsWaMenu(from); return; }
     if(acaoMenu==='esim'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
     if(acaoMenu==='premium'){ await premium.list(from,cliente); return; }
     if(acaoMenu==='conta'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
@@ -6990,14 +6996,27 @@ ${descricao}`);}catch(_){}
     if(/^\d+$/.test(opcao||'')){const ids=Array.isArray(sess.blacklistServicoIds)?sess.blacklistServicoIds:[];const id=Number(ids[Number(opcao)-1]||0);if(id){const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[id]);if(servico){await iniciarServicoWhatsApp(from,cliente,servico);return;}}}
     return;
   }
+  if(sess?.etapa==='hero_menu'){
+    if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
+    const termos={'1':'WhatsApp','2':'Telegram','3':'Instagram','4':'Google'};
+    if(termos[opcao]){await heroSmsWaApps(from,termos[opcao]);return;}
+    if(opcao==='5'){await salvarSessaoPedido(from,{etapa:'hero_busca'});await enviarTexto(from,'🔎 Digite o nome do aplicativo que deseja buscar.\n\n0️⃣ Voltar');return;}
+    if(opcao==='6'){await enviarTexto(from,'📋 Histórico Hero SMS ainda não disponível. Nenhuma compra foi realizada.');return;}
+    await enviarTexto(from,'Escolha uma opção de 1 a 6, ou 0 para voltar.');return;
+  }
+  if(sess?.etapa==='hero_busca'){
+    if(opcao==='0'||lower==='voltar'){await heroSmsWaMenu(from);return;}
+    if(String(opcao||'').trim().length<2){await enviarTexto(from,'Digite pelo menos 2 caracteres para buscar.');return;}
+    await heroSmsWaApps(from,String(opcao).slice(0,60));return;
+  }
   if(sess?.etapa==='hero_apps'){
     if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     const idx=/^[1-9]\d*$/.test(opcao)?Number(opcao)-1:-1;const app=(sess.heroApps||[])[idx];if(app){await heroSmsWaPaises(from,app);return;}
     await enviarTexto(from,'Escolha um aplicativo da lista ou digite 0 para voltar.');return;
   }
   if(sess?.etapa==='hero_paises'){
-    if(opcao==='0'||lower==='voltar'){await heroSmsWaApps(from);return;}
-    if(!sess.heroApp){await heroSmsWaApps(from);return;}
+    if(opcao==='0'||lower==='voltar'){await heroSmsWaMenu(from);return;}
+    if(!sess.heroApp){await heroSmsWaMenu(from);return;}
     if(['barato','caro','quantidade'].includes(lower)){await heroSmsWaPaises(from,sess.heroApp,{barato:'preco_asc',caro:'preco_desc',quantidade:'estoque'}[lower]);return;}
     const idx=/^[1-9]\d*$/.test(opcao)?Number(opcao)-1:-1;const key=(sess.heroPaises||[])[idx];if(key){await heroSmsWaOferta(from,key);return;}
     await enviarTexto(from,'Escolha um país da lista ou digite 0 para voltar.');return;
@@ -7005,12 +7024,12 @@ ${descricao}`);}catch(_){}
   if(sess?.etapa==='hero_oferta'){
     if(opcao==='0'||lower==='voltar'){
       if(sess.heroApp){await heroSmsWaPaises(from,sess.heroApp,sess.heroSort||'preco_asc');return;}
-      await heroSmsWaApps(from);return;
+      await heroSmsWaMenu(from);return;
     }
     await enviarTexto(from,'⚠️ Compra Hero SMS ainda não habilitada nesta versão. Digite 0 para voltar aos países.');return;
   }
   if (sess?.etapa === 'online_categorias') {
-    if(opcao==='1'||lower==='sms'||lower==='receber sms'){await heroSmsWaApps(from);return;}
+    if(opcao==='1'||lower==='sms'||lower==='receber sms'){await heroSmsWaMenu(from);return;}
     if(opcao==='0'||lower==='voltar'){
       await salvarSessaoPedido(from,{etapa:'menu'});
       await enviarMenuServicosWhatsApp(from,cliente);
