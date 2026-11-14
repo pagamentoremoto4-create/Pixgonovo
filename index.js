@@ -3407,8 +3407,7 @@ async function heroSmsVitrine(termo='',chave=null){
   const rate=currency==='BRL'?1:Number(await getConfig('hero_sms_brl_per_unit','0'));
   const margin=Number(await getConfig('hero_sms_margin_brl','25'));
   if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(margin)||margin<0){
-    console.warn('Hero SMS: precificação inválida. Verifique moeda, cotação e margem no painel.');
-    return [];
+    throw new Error('Hero SMS: precificacao invalida. Confira moeda, cotacao e margem no painel antes de mostrar ofertas.');
   }
   const filtros=['h.active=1','h.stock>0','h.cost>=0','h.cost<1000000'];
   const args=[];
@@ -3435,9 +3434,14 @@ function heroSmsNome(r){
 // V274: todos os aplicativos ativos sincronizados pela Hero SMS, sem lista fixa.
 function heroSmsApps(rows){return [...new Set(rows.map(x=>String(x.nome||x.service)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
 // Menu premium: opções curtas e pesquisa sob demanda, sem despejar todo o catálogo.
+// Controle administrativo da vitrine: inicialmente somente WhatsApp.
+async function heroSmsVisivel(codigo){return String(await getConfig('hero_sms_visible_'+codigo,codigo==='whatsapp'?'1':'0'))==='1';}
 async function heroSmsWaMenu(from){
-  await salvarSessaoPedido(from,{etapa:'hero_menu',heroApps:[],heroApp:null,heroPaises:[],heroSort:null});
-  await enviarTexto(from,`💎 *CENTRAL SMS PREMIUM*\n\n📲 Escolha o aplicativo:\n\n1️⃣ WhatsApp\n2️⃣ Telegram\n3️⃣ Instagram\n4️⃣ Google / Gmail\n5️⃣ 🔎 Buscar outro aplicativo\n6️⃣ 📋 Meus pedidos (em preparação)\n\n0️⃣ Voltar`);
+  if(!await heroSmsVisivel('whatsapp')){
+    await enviarTexto(from,'⚠️ WhatsApp SMS indisponível no momento.');return;
+  }
+  // Entrada direta na seleção de países, sem repetir a escolha do aplicativo.
+  await heroSmsWaPaises(from,'WhatsApp','preco_asc',0);
 }
 async function heroSmsWaApps(from,termo){
   const q=String(termo||'').trim().toLocaleLowerCase();
@@ -3445,15 +3449,20 @@ async function heroSmsWaApps(from,termo){
   await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps,heroApp:null,heroPaises:[],heroSort:null});
   await enviarTexto(from,`💎 *CENTRAL SMS PREMIUM*\n\n🔎 Resultados para *${termo}*:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço com estoque encontrado.'}\n\n0️⃣ Voltar ao menu SMS`);
 }
-async function heroSmsWaPaises(from,app,sort='preco_asc'){
-  if(!app || String(app)==='undefined'){await heroSmsWaMenu(from);return;}
-  let rows=(await heroSmsVitrine(app)).filter(r=>String(r.nome||r.service)===String(app));
+async function heroSmsWaPaises(from,app,sort='preco_asc',pagina=0){
+  if(!await heroSmsVisivel('whatsapp')){await enviarTexto(from,'⚠️ Serviço desativado no painel.');return;}
+  if(!app){await heroSmsWaMenu(from);return;}
+  let rows=await heroSmsVitrine('WhatsApp');
+  rows=rows.filter(r=>String(r.service).toLowerCase()==='wa'||/whats\s?app/i.test(String(r.nome)));
   if(sort==='preco_desc')rows.sort((a,b)=>b.preco-a.preco);
   else if(sort==='estoque')rows.sort((a,b)=>b.stock-a.stock);
   else rows.sort((a,b)=>a.preco-b.preco);
-  rows=rows.slice(0,60);
-  await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:app,heroSort:sort,heroPaises:rows.map(x=>({country:x.country,service:x.service}))});
-  await enviarTexto(from,`💬 *WHATSAPP SMS*\n📲 Aplicativo: *${app}*\n\n🌎 Países disponíveis:\n\n${rows.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhuma oferta disponível.'}\n\nDigite *barato*, *caro* ou *quantidade* para ordenar.\n0️⃣ Voltar aos aplicativos`);
+  const paginas=Math.max(1,Math.ceil(rows.length/10));
+  pagina=Math.max(0,Math.min(Number(pagina)||0,paginas-1));
+  const exibidas=rows.slice(pagina*10,(pagina+1)*10);
+  await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:'WhatsApp',heroSort:sort,heroPagina:pagina,heroPaises:exibidas.map(x=>({country:x.country,service:x.service}))});
+  const texto=exibidas.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhuma oferta disponível.';
+  await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n🌎 Escolha o país do número (página ${pagina+1}/${paginas}):\n\n${texto}\n\nDigite *próxima*, *anterior* ou *buscar país*.\nOrdenar: *barato*, *caro*, *quantidade*.\n0️⃣ Voltar ao menu principal`);
 }
 async function heroSmsWaOferta(from,key){
   const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
@@ -7057,11 +7066,21 @@ ${descricao}`);}catch(_){}
     await enviarTexto(from,'Escolha um aplicativo da lista ou digite 0 para voltar.');return;
   }
   if(sess?.etapa==='hero_paises'){
-    if(opcao==='0'||lower==='voltar'){await heroSmsWaMenu(from);return;}
+    if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
     if(!sess.heroApp){await heroSmsWaMenu(from);return;}
-    if(['barato','caro','quantidade'].includes(lower)){await heroSmsWaPaises(from,sess.heroApp,{barato:'preco_asc',caro:'preco_desc',quantidade:'estoque'}[lower]);return;}
+    if(lower==='próxima'||lower==='proxima'){await heroSmsWaPaises(from,sess.heroApp,sess.heroSort||'preco_asc',(sess.heroPagina||0)+1);return;}
+    if(lower==='anterior'){await heroSmsWaPaises(from,sess.heroApp,sess.heroSort||'preco_asc',(sess.heroPagina||0)-1);return;}
+    if(lower==='buscar país'||lower==='buscar pais'){await salvarSessaoPedido(from,{...sess,etapa:'hero_pais_busca'});await enviarTexto(from,'🔎 Digite o nome do país que deseja consultar.\n0️⃣ Voltar');return;}
+    if(['barato','caro','quantidade'].includes(lower)){await heroSmsWaPaises(from,sess.heroApp,{barato:'preco_asc',caro:'preco_desc',quantidade:'estoque'}[lower],0);return;}
     const idx=/^[1-9]\d*$/.test(opcao)?Number(opcao)-1:-1;const key=(sess.heroPaises||[])[idx];if(key){await heroSmsWaOferta(from,key);return;}
     await enviarTexto(from,'Escolha um país da lista ou digite 0 para voltar.');return;
+  }
+  if(sess?.etapa==='hero_pais_busca'){
+    if(opcao==='0'||lower==='voltar'){await heroSmsWaPaises(from,'WhatsApp',sess.heroSort||'preco_asc',sess.heroPagina||0);return;}
+    const rows=(await heroSmsVitrine('WhatsApp')).filter(r=>(String(r.service).toLowerCase()==='wa'||/whats\s?app/i.test(String(r.nome)))&&String(r.pais).toLocaleLowerCase('pt-BR').includes(lower));
+    const found=rows.sort((a,b)=>a.preco-b.preco).slice(0,10);
+    await salvarSessaoPedido(from,{etapa:'hero_paises',heroApp:'WhatsApp',heroSort:'preco_asc',heroPagina:0,heroPaises:found.map(r=>({country:r.country,service:r.service}))});
+    await enviarTexto(from,`🌎 *Resultados para ${String(opcao).slice(0,40)}*\n\n${found.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhum país encontrado.'}\n\n0️⃣ Voltar`);return;
   }
   if(sess?.etapa==='hero_oferta'){
     if(opcao==='0'||lower==='voltar'){
@@ -16254,7 +16273,13 @@ app.post('/admin/herosms/importar',async(req,res)=>{
     for(const x of offers){
       await run(`INSERT INTO hero_sms_catalog(country,service,service_name,cost,stock,active,updated_at) VALUES(?,?,?,?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(country,service) DO UPDATE SET service_name=CASE WHEN excluded.service_name IS NOT NULL AND excluded.service_name<>'' THEN excluded.service_name ELSE hero_sms_catalog.service_name END,cost=excluded.cost,stock=excluded.stock,updated_at=CURRENT_TIMESTAMP`,[x.country,x.service,names.services[x.service]||null,x.cost,x.stock]);
     }
-    res.redirect('/admin/herosms/catalogo?ok='+encodeURIComponent(offers.length+' ofertas importadas. Ativacoes anteriores preservadas.'));
+    const whatsapp=offers.filter(x=>String(x.service).toLowerCase()==='wa');
+    const whatsappComEstoque=whatsapp.filter(x=>x.stock>0);
+    const telegram=offers.filter(x=>String(x.service).toLowerCase()==='tg');
+    const telegramComEstoque=telegram.filter(x=>x.stock>0);
+    console.info('[Hero SMS] Sincronizacao:',offers.length,'ofertas; WhatsApp:',whatsapp.length,'paises,',whatsappComEstoque.length,'com estoque; Telegram:',telegram.length,'paises,',telegramComEstoque.length,'com estoque.');
+    const resumo=offers.length+' ofertas importadas. WhatsApp: '+whatsappComEstoque.length+'/'+whatsapp.length+' paises com estoque. Telegram: '+telegramComEstoque.length+'/'+telegram.length+' paises com estoque. Ativacoes anteriores preservadas.';
+    res.redirect('/admin/herosms/catalogo?ok='+encodeURIComponent(resumo));
   }catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
 });
 function heroSmsCategoria(nome,code){
@@ -16293,6 +16318,8 @@ app.get('/admin/herosms/catalogo',async(req,res)=>{
     const ordem=['💬 Mensagens e redes sociais','🌐 Tecnologia e e-mail','🛒 Compras e delivery','🏦 Bancos e finanças','🎮 Jogos e entretenimento','📱 Outros aplicativos'];
     let somaOfertas=0,estoqueOfertas=0;
     for(const x of rows){if(x.active&&Number(x.stock)>0){somaOfertas++;estoqueOfertas+=Number(x.stock);}}
+    const visibilidade=await heroSmsVisivel('whatsapp');
+    const visibilidadeHtml=`<div class="card"><h2>💬 Visibilidade no WhatsApp</h2><p>Somente WhatsApp SMS pode aparecer no menu de clientes nesta etapa.</p><form method="post" action="/admin/herosms/visibilidade"><label><input type="checkbox" name="whatsapp" value="1" ${visibilidade?'checked':''}> Mostrar WhatsApp SMS aos clientes</label><button>Salvar visibilidade</button></form><p>🔒 Habilitar visibilidade não habilita compras.</p></div>`;
     const categoriasHtml=ordem.map(cat=>{
       const apps=categorias.get(cat);
       if(!apps||!apps.size)return '';
@@ -16305,14 +16332,86 @@ app.get('/admin/herosms/catalogo',async(req,res)=>{
     }).join('');
     const styles=`<style>.hero-category,.hero-app{border:1px solid #64748b55;border-radius:12px;margin:10px 0;overflow:hidden}.hero-category>summary,.hero-app>summary{cursor:pointer;padding:15px;list-style:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.hero-category>summary::-webkit-details-marker,.hero-app>summary::-webkit-details-marker{display:none}.hero-category>summary:before,.hero-app>summary:before{content:'▸';font-size:18px}.hero-category[open]>summary:before,.hero-app[open]>summary:before{content:'▾'}.hero-apps{padding:0 12px 12px}.hero-app{margin:7px 0}.hero-count{margin-left:auto;font-size:13px;opacity:.8}.hero-scroll{overflow-x:auto;padding:0 10px 12px}.hero-scroll table{width:100%;min-width:580px}.hero-scroll form{display:flex;gap:6px;align-items:center}.hero-scroll button{margin:0}.hero-summary{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}.hero-summary>span{padding:10px;border:1px solid #64748b55;border-radius:10px}</style>`;
     const filterJs=`<script>function heroFiltrar(){const q=document.getElementById('heroFilter').value.trim().toLocaleLowerCase('pt-BR');document.querySelectorAll('.hero-category').forEach(cat=>{let vis=0;cat.querySelectorAll('.hero-app').forEach(app=>{const ok=!q||app.dataset.search.includes(q)||cat.dataset.category.includes(q);app.hidden=!ok;if(ok)vis++;if(q&&ok)app.open=true;else if(!q)app.open=false;});cat.hidden=!vis;if(q&&vis)cat.open=true;else if(!q)cat.open=false;});}</script>`;
-    res.send(page('Hero SMS — catálogo',`${styles}<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}<p>🔒 Compras bloqueadas até a homologação.</p><form method="post" action="/admin/herosms/importar"><button>🔄 Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo</label><input name="rate" value="${rate||''}"><button>Salvar precificação</button></form><div class="hero-summary"><span><b>${rows.length.toLocaleString('pt-BR')}</b> ofertas importadas</span><span><b>${somaOfertas.toLocaleString('pt-BR')}</b> ofertas ativas com estoque</span><span><b>${estoqueOfertas.toLocaleString('pt-BR')}</b> números somados entre ofertas*</span></div><p><small>*Soma do estoque informado por país e serviço. Não representa necessariamente números únicos, pois a API pode compartilhar estoque.</small></p><label>Buscar aplicativo, país ou código</label><input id="heroFilter" placeholder="Ex.: WhatsApp, Telegram, Brasil" oninput="heroFiltrar()"><p>As categorias começam fechadas. Clique para abrir aplicativos e depois os países. Desativações manuais são preservadas na sincronização.</p>${categoriasHtml||'<p>Nenhuma oferta importada.</p>'}</div>${filterJs}`));
+    res.send(page('Hero SMS — catálogo',`${styles}<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}${visibilidadeHtml}<p>🔒 Compras bloqueadas até a homologação.</p><form method="post" action="/admin/herosms/importar"><button>🔄 Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo</label><input name="rate" value="${rate||''}"><button>Salvar precificação</button></form><div class="hero-summary"><span><b>${rows.length.toLocaleString('pt-BR')}</b> ofertas importadas</span><span><b>${somaOfertas.toLocaleString('pt-BR')}</b> ofertas ativas com estoque</span><span><b>${estoqueOfertas.toLocaleString('pt-BR')}</b> números somados entre ofertas*</span></div><p><small>*Soma do estoque informado por país e serviço. Não representa necessariamente números únicos, pois a API pode compartilhar estoque.</small></p><label>Buscar aplicativo, país ou código</label><input id="heroFilter" placeholder="Ex.: WhatsApp, Telegram, Brasil" oninput="heroFiltrar()"><p>As categorias começam fechadas. Clique para abrir aplicativos e depois os países. Desativações manuais são preservadas na sincronização.</p>${categoriasHtml||'<p>Nenhuma oferta importada.</p>'}</div>${filterJs}`));
   }catch(e){res.status(500).send('Falha ao abrir catálogo: '+safeHtml(e.message));}
+});
+app.post('/admin/herosms/visibilidade',async(req,res)=>{
+  try{await setConfig('hero_sms_visible_whatsapp',req.body.whatsapp==='1'?'1':'0');res.redirect('/admin/herosms/catalogo?ok=Visibilidade+atualizada');}
+  catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/herosms/precos',async(req,res)=>{
   try{const margin=Number(String(req.body.margin||'').replace(',','.'));const rate=Number(String(req.body.rate||'').replace(',','.'));const currency=String(req.body.currency||'').trim().toUpperCase();if(!Number.isFinite(margin)||margin<0||margin>100000||!Number.isFinite(rate)||rate<0||rate>100000||!/^[A-Z]{3}$/.test(currency))throw new Error('Valores invalidos.');await setConfig('hero_sms_margin_brl',String(margin));await setConfig('hero_sms_brl_per_unit',String(currency==='BRL'?1:rate));await setConfig('hero_sms_cost_currency',currency);res.redirect('/admin/herosms/catalogo?ok=Precificacao+salva');}catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
 });
 app.post('/admin/herosms/ativar',async(req,res)=>{
   try{await heroCatalogInit();await run(`UPDATE hero_sms_catalog SET active=? WHERE country=? AND service=?`,[String(req.body.active)==='1'?1:0,String(req.body.country||''),String(req.body.service||'')]);res.redirect('/admin/herosms/catalogo?ok=Status+atualizado');}catch(e){res.redirect('/admin/herosms/catalogo?erro='+encodeURIComponent(e.message));}
+});
+
+
+// Teste real controlado: somente painel autenticado, sem debitar clientes.
+// A solicitação fica registrada ANTES da chamada externa; respostas incertas nunca são repetidas automaticamente.
+async function heroAdminTestInit(){
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_admin_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL, country TEXT NOT NULL,
+    activation_id TEXT UNIQUE, phone TEXT, status TEXT NOT NULL, api_response TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+}
+function heroAdminTestError(e){return String(e?.message||e||'Erro').replace(/api_key=[^&\s]+/gi,'api_key=[oculta]').slice(0,250);}
+async function heroAdminTestUpdate(id,fields){
+  const allowed=['activation_id','phone','status','api_response'];
+  const keys=Object.keys(fields).filter(k=>allowed.includes(k));
+  if(!keys.length)return;
+  await run(`UPDATE hero_sms_admin_tests SET ${keys.map(k=>k+'=?').join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=?`,[...keys.map(k=>fields[k]),id]);
+}
+app.get('/admin/herosms/teste-compra',async(req,res)=>{
+  try{
+    await heroAdminTestInit();await heroCatalogInit();
+    const rows=await all(`SELECT country,service,service_name,cost,stock FROM hero_sms_catalog WHERE active=1 AND stock>0 AND LOWER(service) IN ('wa','tg') ORDER BY cost ASC LIMIT 100`);
+    const tests=await all('SELECT * FROM hero_sms_admin_tests ORDER BY id DESC LIMIT 30');
+    const opts=rows.map(r=>`<option value="${safeHtml(String(r.service))}:${safeHtml(String(r.country))}">${safeHtml(String(r.service_name||r.service))} — país ${safeHtml(String(r.country))} — custo catálogo ${safeHtml(String(r.cost))} — estoque ${safeHtml(String(r.stock))}</option>`).join('');
+    const items=tests.map(t=>`<tr><td>${t.id}</td><td>${safeHtml(t.service)}/${safeHtml(t.country)}</td><td>${safeHtml(t.status)}</td><td>${safeHtml(t.phone||'—')}</td><td>${safeHtml(t.api_response||'—')}</td><td>${t.activation_id?`<form method="post" action="/admin/herosms/teste-compra/acao"><input type="hidden" name="id" value="${t.id}"><button name="acao" value="consultar">Consultar SMS</button><button name="acao" value="cancelar" onclick="return confirm('Solicitar cancelamento real na Hero SMS?')">Cancelar</button><button name="acao" value="finalizar" onclick="return confirm('Finalizar ativação real na Hero SMS?')">Finalizar</button></form>`:'—'}</td></tr>`).join('');
+    const msg=req.query.ok?`<p>${safeHtml(String(req.query.ok))}</p>`:req.query.erro?`<p style="color:#ef4444">${safeHtml(String(req.query.erro))}</p>`:'';
+    res.send(page('Hero SMS — Teste de compra',`<div class="hero"><h1>🧪 Teste de compra REAL — administrador</h1></div><div class="card"><a href="/admin/herosms">Voltar</a>${msg}<p><strong>Atenção:</strong> esta operação pode gastar saldo REAL da Hero SMS. Não debita saldo de clientes nem gera Pix. Se houver falha de rede, confira a ativação no site antes de tentar novamente.</p><form method="post" action="/admin/herosms/teste-compra"><label>Oferta</label><select name="oferta" required>${opts}</select><label><input type="checkbox" name="confirmar" value="COMPRAR_REAL" required> Autorizo uma compra real usando o saldo da Hero SMS</label><button type="submit" onclick="return confirm('CONFIRMAR compra real na Hero SMS? Pode gerar cobrança!')">Comprar número para teste</button></form></div><div class="card"><h3>Histórico de testes</h3><table><tr><th>ID</th><th>Serviço/País</th><th>Estado</th><th>Número</th><th>Última resposta</th><th>Ações</th></tr>${items}</table></div>`));
+  }catch(e){res.status(500).send('Erro no teste Hero SMS: '+safeHtml(heroAdminTestError(e)));}
+});
+app.post('/admin/herosms/teste-compra',async(req,res)=>{
+  let id;
+  try{
+    if(req.body.confirmar!=='COMPRAR_REAL')throw new Error('Confirmação obrigatória.');
+    const m=/^(wa|tg):(\d{1,5})$/.exec(String(req.body.oferta||''));if(!m)throw new Error('Oferta inválida.');
+    await heroAdminTestInit();await heroCatalogInit();
+    const row=await get('SELECT * FROM hero_sms_catalog WHERE service=? AND country=? AND active=1 AND stock>0',[m[1],m[2]]);
+    if(!row)throw new Error('Oferta desativada ou sem estoque. Sincronize o catálogo.');
+    // Evita compras simultâneas e tentativas repetidas durante uma resposta incerta.
+    const pending=await get(`SELECT id FROM hero_sms_admin_tests WHERE status IN ('solicitando','incerto') LIMIT 1`);
+    if(pending)throw new Error('Existe uma solicitação pendente/incerta (#'+pending.id+'). Confira na Hero SMS antes de comprar outra.');
+    const result=await run('INSERT INTO hero_sms_admin_tests(service,country,status) VALUES(?,?,?)',[m[1],m[2],'solicitando']);
+    id=result.lastID;
+    const raw=await heroSmsApi('getNumberV2',{service:m[1],country:m[2]});
+    let parsed;try{parsed=JSON.parse(raw);}catch{parsed=null;}
+    const activation=parsed?.activationId??parsed?.activation_id??parsed?.id;
+    const phone=parsed?.phoneNumber??parsed?.phone_number??parsed?.phone;
+    if(!activation||!phone){
+      await heroAdminTestUpdate(id,{status:'incerto',api_response:'Resposta inesperada: '+raw.slice(0,180)});
+      throw new Error('Resposta inesperada. Confira ativações no site; NÃO repita a compra automaticamente.');
+    }
+    await heroAdminTestUpdate(id,{activation_id:String(activation),phone:String(phone),status:'numero_recebido',api_response:'Número reservado; aguardando SMS'});
+    res.redirect('/admin/herosms/teste-compra?ok='+encodeURIComponent('Compra #'+id+' realizada. Número: '+phone));
+  }catch(e){
+    if(id){const t=await get('SELECT status FROM hero_sms_admin_tests WHERE id=?',[id]);if(t?.status==='solicitando')await heroAdminTestUpdate(id,{status:'incerto',api_response:'Erro ou timeout: '+heroAdminTestError(e)});}
+    res.redirect('/admin/herosms/teste-compra?erro='+encodeURIComponent(heroAdminTestError(e)));
+  }
+});
+app.post('/admin/herosms/teste-compra/acao',async(req,res)=>{
+  try{
+    await heroAdminTestInit();const id=Number(req.body.id);const acao=String(req.body.acao||'');
+    if(!Number.isSafeInteger(id)||id<1||!['consultar','cancelar','finalizar'].includes(acao))throw new Error('Ação inválida.');
+    const t=await get('SELECT * FROM hero_sms_admin_tests WHERE id=?',[id]);if(!t?.activation_id)throw new Error('Ativação não identificada.');
+    if(['cancelado','finalizado'].includes(t.status)&&acao!=='consultar')throw new Error('Ativação encerrada.');
+    const raw=acao==='consultar'?await heroSmsApi('getStatus',{id:t.activation_id}):await heroSmsApi('setStatus',{id:t.activation_id,status:acao==='cancelar'?8:6});
+    const ok=acao==='consultar'||/^ACCESS_(CANCEL|READY|ACTIVATION)/i.test(raw);
+    await heroAdminTestUpdate(id,{status:acao==='consultar'?(raw.startsWith('STATUS_OK:')?'sms_recebido':t.status):(ok?(acao==='cancelar'?'cancelado':'finalizado'):'acao_incerta'),api_response:raw.slice(0,250)});
+    res.redirect('/admin/herosms/teste-compra?ok='+encodeURIComponent('Teste #'+id+': '+raw.slice(0,120)));
+  }catch(e){res.redirect('/admin/herosms/teste-compra?erro='+encodeURIComponent(heroAdminTestError(e)));}
 });
 
 app.get('/admin/herosms/pedidos',async(req,res)=>{
@@ -16328,7 +16427,7 @@ app.get('/admin/herosms',async(req,res)=>{
     const configurada=!!(await heroSmsChave());
     const aviso=req.query.ok?`<p style="color:#22c55e">${safeHtml(String(req.query.ok))}</p>`:'';
     const erro=req.query.erro?`<p style="color:#ef4444">${safeHtml(String(req.query.erro))}</p>`:'';
-    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRAL UNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/catalogo">📦 Gerenciar aplicativos e países</a></p><p><a href="/admin/herosms/pedidos">📋 Pedidos Hero SMS</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Compras, PIX e entrega automatica ainda nao estao habilitados.</p></div>`));
+    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRAL UNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/catalogo">📦 Gerenciar aplicativos e países</a></p><p><a href="/admin/herosms/pedidos">📋 Pedidos Hero SMS</a></p><p><a href="/admin/herosms/teste-compra">🧪 Teste de compra REAL (somente administrador)</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Compras, PIX e entrega automatica ainda nao estao habilitados.</p></div>`));
   }catch(e){res.status(500).send('Erro ao abrir configuração Hero SMS');}
 });
 app.post('/admin/herosms/config',async(req,res)=>{
