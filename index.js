@@ -470,7 +470,10 @@ app.get('/api/shared-esim/ddds', async (req, res) => {
       WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE
         AND ddd IS NOT NULL AND TRIM(ddd)<>''
       GROUP BY ddd ORDER BY CAST(ddd AS INTEGER), ddd`, [plano]);
-    res.json({ok:true, plan:plano, ddds:rows.map(r=>({ddd:String(r.ddd), available:Number(r.available||0)}))});
+    const randomRow = await get(`SELECT COUNT(*) available FROM esim_estoque
+      WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE
+        AND (ddd IS NULL OR TRIM(ddd)='')`, [plano]);
+    res.json({ok:true, plan:plano, ddds:rows.map(r=>({ddd:String(r.ddd), available:Number(r.available||0)})), random_available:Number(randomRow?.available||0)});
   } catch(e) { res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -486,9 +489,10 @@ app.post('/api/shared-esim/reserve', async (req, res) => {
   try {
     await liberarReservasEsimExpiradas();
     await run('BEGIN IMMEDIATE');
+    // DDD vazio reserva exclusivamente eSIM cadastrado como ALEATÓRIO.
     let item = ddd
       ? await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE AND ddd=? ORDER BY id ASC LIMIT 1`, [plano, ddd])
-      : await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE ORDER BY id ASC LIMIT 1`, [plano]);
+      : await get(`SELECT * FROM esim_estoque WHERE status='DISPONIVEL' AND TRIM(nome_plano)=TRIM(?) COLLATE NOCASE AND (ddd IS NULL OR TRIM(ddd)='') ORDER BY id ASC LIMIT 1`, [plano]);
     if (!item) { await run('ROLLBACK'); return res.status(409).json({ ok:false, error:'out_of_stock' }); }
     item = await garantirDadosAtivacaoEsim(item);
     if (!item?.arquivo_qr) { await run('ROLLBACK'); return res.status(422).json({ ok:false, error:'invalid_esim_item' }); }
