@@ -3393,19 +3393,44 @@ async function abrirBlacklistBrazilCompactoWhatsApp(from,cliente){
   await enviarTexto(from,texto);
 }
 // V268: catalogo Hero SMS compartilhado pelos dois canais; sem cobranca antes do checkout homologado.
-async function heroSmsVitrine(){
+// Busca direta no banco: não corta os aplicativos depois das primeiras 10 mil ofertas.
+// Códigos curtos são usados apenas como equivalência de busca; nunca inventam estoque.
+function heroSmsBuscaTermo(termo){
+  const t=String(termo||'').trim().toLocaleLowerCase('pt-BR');
+  const alias={whatsapp:['wa'],telegram:['tg'],instagram:['ig'],google:['go']};
+  return [t,...(alias[t]||[])].filter(Boolean);
+}
+async function heroSmsVitrine(termo='',chave=null){
   await heroCatalogInit();
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_country_names (id TEXT PRIMARY KEY, name TEXT NOT NULL)`);
   const currency=String(await getConfig('hero_sms_cost_currency','BRL')).toUpperCase();
   const rate=currency==='BRL'?1:Number(await getConfig('hero_sms_brl_per_unit','0'));
   const margin=Number(await getConfig('hero_sms_margin_brl','25'));
-  if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(margin)||margin<0)return [];
-  return await all(`SELECT h.country,h.service,COALESCE(NULLIF(h.service_name,''),h.service) AS nome,
+  if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(margin)||margin<0){
+    console.warn('Hero SMS: precificação inválida. Verifique moeda, cotação e margem no painel.');
+    return [];
+  }
+  const filtros=['h.active=1','h.stock>0','h.cost>=0','h.cost<1000000'];
+  const args=[];
+  if(chave&&chave.country!==undefined&&chave.service!==undefined){
+    filtros.push('h.country=?','h.service=?');args.push(String(chave.country),String(chave.service));
+  }else if(String(termo||'').trim()){
+    const termos=heroSmsBuscaTermo(termo);
+    filtros.push('('+termos.map(()=>"(LOWER(COALESCE(h.service_name,'')) LIKE ? OR LOWER(h.service) = ?)").join(' OR ')+')');
+    for(const t of termos){args.push('%'+t+'%',t);}
+  }
+  const rows=await all(`SELECT h.country,h.service,COALESCE(NULLIF(h.service_name,''),h.service) AS nome,
     COALESCE(NULLIF(c.name,''),h.country) AS pais,h.cost,h.stock
     FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country
-    WHERE h.active=1 AND h.stock>0 AND h.cost>=0 AND h.cost<1000000
-    ORDER BY nome COLLATE NOCASE,pais COLLATE NOCASE LIMIT 10000`)
-    .then(rows=>rows.map(r=>({...r,preco:Number((Number(r.cost)*rate+margin).toFixed(2))})).filter(r=>Number.isFinite(r.preco)&&r.preco>0&&r.preco<1000000));
+    WHERE ${filtros.join(' AND ')} ORDER BY nome COLLATE NOCASE,pais COLLATE NOCASE`,args);
+  return rows.map(r=>({...r,nome:heroSmsNome(r),preco:Number((Number(r.cost)*rate+margin).toFixed(2))}))
+    .filter(r=>Number.isFinite(r.preco)&&r.preco>0&&r.preco<1000000);
+}
+function heroSmsNome(r){
+  const code=String(r.service||'').toLowerCase();
+  const name=String(r.nome||'').trim();
+  const nomes={wa:'WhatsApp',tg:'Telegram',ig:'Instagram',go:'Google'};
+  return (!name||name.toLowerCase()===code)&&nomes[code]?nomes[code]:(name||r.service);
 }
 // V274: todos os aplicativos ativos sincronizados pela Hero SMS, sem lista fixa.
 function heroSmsApps(rows){return [...new Set(rows.map(x=>String(x.nome||x.service)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
@@ -3416,13 +3441,13 @@ async function heroSmsWaMenu(from){
 }
 async function heroSmsWaApps(from,termo){
   const q=String(termo||'').trim().toLocaleLowerCase();
-  const apps=heroSmsApps(await heroSmsVitrine()).filter(a=>String(a).toLocaleLowerCase().includes(q)).slice(0,20);
+  const apps=heroSmsApps(await heroSmsVitrine(termo)).filter(a=>String(a).toLocaleLowerCase().includes(q)||heroSmsBuscaTermo(termo).some(t=>t===a.toLocaleLowerCase())).slice(0,20);
   await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps,heroApp:null,heroPaises:[],heroSort:null});
   await enviarTexto(from,`💎 *CENTRAL SMS PREMIUM*\n\n🔎 Resultados para *${termo}*:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço com estoque encontrado.'}\n\n0️⃣ Voltar ao menu SMS`);
 }
 async function heroSmsWaPaises(from,app,sort='preco_asc'){
   if(!app || String(app)==='undefined'){await heroSmsWaMenu(from);return;}
-  let rows=(await heroSmsVitrine()).filter(r=>String(r.nome||r.service)===String(app));
+  let rows=(await heroSmsVitrine(app)).filter(r=>String(r.nome||r.service)===String(app));
   if(sort==='preco_desc')rows.sort((a,b)=>b.preco-a.preco);
   else if(sort==='estoque')rows.sort((a,b)=>b.stock-a.stock);
   else rows.sort((a,b)=>a.preco-b.preco);
@@ -3431,7 +3456,7 @@ async function heroSmsWaPaises(from,app,sort='preco_asc'){
   await enviarTexto(from,`💬 *WHATSAPP SMS*\n📲 Aplicativo: *${app}*\n\n🌎 Países disponíveis:\n\n${rows.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhuma oferta disponível.'}\n\nDigite *barato*, *caro* ou *quantidade* para ordenar.\n0️⃣ Voltar aos aplicativos`);
 }
 async function heroSmsWaOferta(from,key){
-  const row=key?(await heroSmsVitrine()).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
+  const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
   if(!row){await enviarTexto(from,'⚠️ Oferta indisponível. Volte e escolha outra.');return;}
   await salvarSessaoPedido(from,{etapa:'hero_oferta',heroOferta:{country:row.country,service:row.service},heroApp:row.nome});
   await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível até a homologação da cobrança e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
@@ -5089,7 +5114,7 @@ function normalizarOpcaoTelegram(texto) {
 // Hero SMS Telegram: resultados limitados e filtrados por termo, sem catálogo gigante.
 async function heroSmsTelegramResultados(chatId,mensagem,from,termo){
   const busca=String(termo||'').trim().toLocaleLowerCase('pt-BR');
-  const apps=heroSmsApps(await heroSmsVitrine()).filter(a=>a.toLocaleLowerCase('pt-BR').includes(busca)).slice(0,20);
+  const apps=heroSmsApps(await heroSmsVitrine(termo)).filter(a=>a.toLocaleLowerCase('pt-BR').includes(busca)||heroSmsBuscaTermo(termo).some(t=>t===a.toLocaleLowerCase('pt-BR'))).slice(0,20);
   await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps,heroApp:null,heroKeys:[]});
   const kb=apps.map((app,i)=>[tgBtn(app.slice(0,55),`hero_sms_app_${i}`,'primary','','📲')]);
   if(!apps.length)kb.push([tgBtn('🔎 Nova busca','hero_sms_search','primary')]);
@@ -7906,14 +7931,14 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         if(/^hero_sms_app_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const app=(ss?.heroApps||[])[Number(data.split('_').pop())];
-          if(!app || !heroSmsApps(await heroSmsVitrine()).includes(app))return atualizarCardTelegram(chatId,q.message,'Aplicativo indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          if(!app || !heroSmsApps(await heroSmsVitrine(app)).includes(app))return atualizarCardTelegram(chatId,q.message,'Aplicativo indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
           await salvarSessaoPedido(from,{etapa:'hero_tg_sort',heroApp:app});
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nOrdenar países por:`,[[tgBtn('💰 Mais barato','hero_sms_sort_asc','primary')],[tgBtn('💎 Mais caro','hero_sms_sort_desc','primary')],[tgBtn('📦 Quantidade','hero_sms_sort_stock','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
         if(/^hero_sms_sort_(asc|desc|stock)$/.test(data)){
           const ss=await carregarSessaoPedido(from);const app=ss?.heroApp;
           if(!app)return atualizarCardTelegram(chatId,q.message,'Selecione primeiro um aplicativo.',[[tgBtn('Aplicativos','hero_sms_apps','primary')]]);
-          let rows=(await heroSmsVitrine()).filter(r=>r.nome===app);
+          let rows=(await heroSmsVitrine(app)).filter(r=>r.nome===app);
           const mode=data.split('_').pop();rows.sort(mode==='stock'?(a,b)=>b.stock-a.stock:mode==='desc'?(a,b)=>b.preco-a.preco:(a,b)=>a.preco-b.preco);rows=rows.slice(0,40);
           await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:app,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
           const kb=rows.map((r,i)=>[tgBtn(`${r.pais} • ${brl(r.preco)}`.slice(0,60),`hero_sms_offer_${i}`,'primary','','🌎')]);
@@ -7923,7 +7948,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         if(/^hero_sms_offer_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const key=(ss?.heroKeys||[])[Number(data.split('_').pop())];
-          const row=key?(await heroSmsVitrine()).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
+          const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
           if(!row || row.nome!==ss?.heroApp)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(row.preco)}\n\n⚠️ Compra ainda indisponível: aguardando homologação de PIX, saldo e entrega. Nenhum saldo foi debitado.`,[[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
