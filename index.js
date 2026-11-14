@@ -3395,22 +3395,23 @@ async function heroSmsVitrine(){
   const currency=String(await getConfig('hero_sms_cost_currency','BRL')).toUpperCase();
   const rate=currency==='BRL'?1:Number(await getConfig('hero_sms_brl_per_unit','0'));
   const margin=Number(await getConfig('hero_sms_margin_brl','25'));
-  if(!(rate>0)||!Number.isFinite(margin)||margin<0)return [];
+  if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(margin)||margin<0)return [];
   return await all(`SELECT h.country,h.service,COALESCE(NULLIF(h.service_name,''),h.service) AS nome,
     COALESCE(NULLIF(c.name,''),h.country) AS pais,h.cost,h.stock
     FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country
-    WHERE h.active=1 AND h.stock>0 AND h.cost>=0
+    WHERE h.active=1 AND h.stock>0 AND h.cost>=0 AND h.cost<1000000
     ORDER BY nome COLLATE NOCASE,pais COLLATE NOCASE LIMIT 10000`)
-    .then(rows=>rows.map(r=>({...r,preco:Number((Number(r.cost)*rate+margin).toFixed(2))})));
+    .then(rows=>rows.map(r=>({...r,preco:Number((Number(r.cost)*rate+margin).toFixed(2))})).filter(r=>Number.isFinite(r.preco)&&r.preco>0&&r.preco<1000000));
 }
 // V274: todos os aplicativos ativos sincronizados pela Hero SMS, sem lista fixa.
 function heroSmsApps(rows){return [...new Set(rows.map(x=>String(x.nome||x.service)))].sort((a,b)=>a.localeCompare(b,'pt-BR'));}
 async function heroSmsWaApps(from){
   const apps=heroSmsApps(await heroSmsVitrine());
-  await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps});
+  await salvarSessaoPedido(from,{etapa:'hero_apps',heroApps:apps,heroApp:null,heroPaises:[],heroSort:null});
   await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📲 Selecione o aplicativo:\n\n${apps.map((a,i)=>`${i+1}. ${a}`).join('\n')||'Nenhum serviço ativo com estoque no momento.'}\n\n0️⃣ Voltar`);
 }
 async function heroSmsWaPaises(from,app,sort='preco_asc'){
+  if(!app || String(app)==='undefined'){await heroSmsWaApps(from);return;}
   let rows=(await heroSmsVitrine()).filter(r=>String(r.nome||r.service)===String(app));
   if(sort==='preco_desc')rows.sort((a,b)=>b.preco-a.preco);
   else if(sort==='estoque')rows.sort((a,b)=>b.stock-a.stock);
@@ -3420,8 +3421,9 @@ async function heroSmsWaPaises(from,app,sort='preco_asc'){
   await enviarTexto(from,`💬 *WHATSAPP SMS*\n📲 Aplicativo: *${app}*\n\n🌎 Países disponíveis:\n\n${rows.map((r,i)=>`${i+1}. ${r.pais} • ${brl(r.preco)} • Estoque: ${r.stock}`).join('\n')||'Nenhuma oferta disponível.'}\n\nDigite *barato*, *caro* ou *quantidade* para ordenar.\n0️⃣ Voltar aos aplicativos`);
 }
 async function heroSmsWaOferta(from,key){
-  const row=(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service);
+  const row=key?(await heroSmsVitrine()).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
   if(!row){await enviarTexto(from,'⚠️ Oferta indisponível. Volte e escolha outra.');return;}
+  await salvarSessaoPedido(from,{etapa:'hero_oferta',heroOferta:{country:row.country,service:row.service},heroApp:row.nome});
   await enviarTexto(from,`💬 *WHATSAPP SMS*\n\n📱 Aplicativo: *${row.nome}*\n🌎 País: *${row.pais}*\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(row.preco)}*\n\n⚠️ Compra temporariamente indisponível até a homologação da cobrança e entrega automática. Nenhum saldo foi debitado.\n\n0️⃣ Voltar`);
 }
 async function listarServicosOnlineTexto(){
@@ -6673,7 +6675,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
     const acaoMenu=/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null;
     if(acaoMenu==='consultas'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(acaoMenu==='servicos'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
-    if(acaoMenu==='hero_whatsapp'){ await heroSmsWaPaises(from); return; }
+    if(acaoMenu==='hero_whatsapp'){ await heroSmsWaApps(from); return; }
     if(acaoMenu==='esim'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
     if(acaoMenu==='premium'){ await premium.list(from,cliente); return; }
     if(acaoMenu==='conta'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
@@ -6986,14 +6988,22 @@ ${descricao}`);}catch(_){}
   }
   if(sess?.etapa==='hero_apps'){
     if(opcao==='0'||lower==='voltar'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);return;}
-    const app=(sess.heroApps||[])[Number(opcao)-1];if(app){await heroSmsWaPaises(from,app);return;}
+    const idx=/^[1-9]\d*$/.test(opcao)?Number(opcao)-1:-1;const app=(sess.heroApps||[])[idx];if(app){await heroSmsWaPaises(from,app);return;}
     await enviarTexto(from,'Escolha um aplicativo da lista ou digite 0 para voltar.');return;
   }
   if(sess?.etapa==='hero_paises'){
     if(opcao==='0'||lower==='voltar'){await heroSmsWaApps(from);return;}
+    if(!sess.heroApp){await heroSmsWaApps(from);return;}
     if(['barato','caro','quantidade'].includes(lower)){await heroSmsWaPaises(from,sess.heroApp,{barato:'preco_asc',caro:'preco_desc',quantidade:'estoque'}[lower]);return;}
-    const key=(sess.heroPaises||[])[Number(opcao)-1];if(key){await heroSmsWaOferta(from,key);return;}
+    const idx=/^[1-9]\d*$/.test(opcao)?Number(opcao)-1:-1;const key=(sess.heroPaises||[])[idx];if(key){await heroSmsWaOferta(from,key);return;}
     await enviarTexto(from,'Escolha um país da lista ou digite 0 para voltar.');return;
+  }
+  if(sess?.etapa==='hero_oferta'){
+    if(opcao==='0'||lower==='voltar'){
+      if(sess.heroApp){await heroSmsWaPaises(from,sess.heroApp,sess.heroSort||'preco_asc');return;}
+      await heroSmsWaApps(from);return;
+    }
+    await enviarTexto(from,'⚠️ Compra Hero SMS ainda não habilitada nesta versão. Digite 0 para voltar aos países.');return;
   }
   if (sess?.etapa === 'online_categorias') {
     if(opcao==='1'||lower==='sms'||lower==='receber sms'){await heroSmsWaApps(from);return;}
@@ -7834,30 +7844,32 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if (data === 'menu_assinatura_premium') { pedidoSessao.set(from,{etapa:'premium_ggsoma'}); return menuAssinaturaPremiumTelegram(chatId,cliente,q.message); }
         if(data==='hero_sms_apps'){
           const apps=heroSmsApps(await heroSmsVitrine()).slice(0,80);
-          await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps});
+          await salvarSessaoPedido(from,{etapa:'hero_tg_apps',heroApps:apps,heroApp:null,heroKeys:[]});
           const kb=apps.map((app,i)=>[tgBtn(app.slice(0,55),`hero_sms_app_${i}`,'primary','','📲')]);
           kb.push([tgBtn('Voltar','menu_voltar','danger','','⬅️')]);
           return atualizarCardTelegram(chatId,q.message,'💬 *WHATSAPP SMS*\n\nSelecione o aplicativo ativado no painel:',kb);
         }
         if(/^hero_sms_app_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const app=(ss?.heroApps||[])[Number(data.split('_').pop())];
-          if(!app)return atualizarCardTelegram(chatId,q.message,'Aplicativo indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
+          if(!app || !heroSmsApps(await heroSmsVitrine()).includes(app))return atualizarCardTelegram(chatId,q.message,'Aplicativo indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger','','⬅️')]]);
           await salvarSessaoPedido(from,{etapa:'hero_tg_sort',heroApp:app});
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nOrdenar países por:`,[[tgBtn('💰 Mais barato','hero_sms_sort_asc','primary')],[tgBtn('💎 Mais caro','hero_sms_sort_desc','primary')],[tgBtn('📦 Quantidade','hero_sms_sort_stock','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
         if(/^hero_sms_sort_(asc|desc|stock)$/.test(data)){
           const ss=await carregarSessaoPedido(from);const app=ss?.heroApp;
+          if(!app)return atualizarCardTelegram(chatId,q.message,'Selecione primeiro um aplicativo.',[[tgBtn('Aplicativos','hero_sms_apps','primary')]]);
           let rows=(await heroSmsVitrine()).filter(r=>r.nome===app);
           const mode=data.split('_').pop();rows.sort(mode==='stock'?(a,b)=>b.stock-a.stock:mode==='desc'?(a,b)=>b.preco-a.preco:(a,b)=>a.preco-b.preco);rows=rows.slice(0,40);
           await salvarSessaoPedido(from,{etapa:'hero_tg_countries',heroApp:app,heroKeys:rows.map(x=>({country:x.country,service:x.service}))});
           const kb=rows.map((r,i)=>[tgBtn(`${r.pais} • ${brl(r.preco)}`.slice(0,60),`hero_sms_offer_${i}`,'primary','','🌎')]);
+          if(!rows.length)kb.push([tgBtn('Escolher outro aplicativo','hero_sms_apps','primary')]);
           kb.push([tgBtn('Alterar filtro',`hero_sms_app_${(ss.heroApps||[]).indexOf(app)}`,'danger')]);
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n📲 ${app}\n\nEscolha o país:`,kb);
         }
         if(/^hero_sms_offer_\d+$/.test(data)){
           const ss=await carregarSessaoPedido(from);const key=(ss?.heroKeys||[])[Number(data.split('_').pop())];
-          const row=key?(await heroSmsVitrine()).find(x=>x.country===key.country&&x.service===key.service):null;
-          if(!row)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
+          const row=key?(await heroSmsVitrine()).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
+          if(!row || row.nome!==ss?.heroApp)return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
           return atualizarCardTelegram(chatId,q.message,`💬 WHATSAPP SMS\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(row.preco)}\n\n⚠️ Compra ainda indisponível: aguardando homologação de PIX, saldo e entrega. Nenhum saldo foi debitado.`,[[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
         if (data === 'menu_servicos') {
@@ -9212,16 +9224,20 @@ async function gatewayPrincipal() {
   const cfg=await gatewaysPagamentoAtivos();
   return cfg.lista.includes(cfg.padrao)?cfg.padrao:(cfg.lista[0]||null);
 }
-// V257: gateway definido exclusivamente pelo administrador no cadastro do cliente.
-// Nunca substituir silenciosamente a preferência se a operadora estiver inativa.
+// V282: prioridade ao gateway ativo do perfil; fallback ao padrao ativo do painel.
+// Nunca escolher outro gateway arbitrariamente se o padrao estiver desativado.
 async function gatewayPagamentoCliente(cliente) {
-  const cfg=await gatewaysPagamentoAtivos();
-  const registro=cliente?.id ? await get('SELECT gateway_pagamento FROM revendas WHERE id=?',[cliente.id]) : null;
-  const escolha=String(registro?.gateway_pagamento||'').trim().toLowerCase();
-  if(escolha && ['depixpay','mercadopago','misticpay'].includes(escolha)){
-    return {gateway:cfg.lista.includes(escolha)?escolha:null, bloqueado:!cfg.lista.includes(escolha), escolha};
-  }
-  return {gateway:await gatewayPrincipal(),bloqueado:false,escolha:''};
+  const cfg = await gatewaysPagamentoAtivos();
+  const registro = cliente?.id ? await get('SELECT gateway_pagamento FROM revendas WHERE id=?', [cliente.id]) : null;
+  const escolha = String(registro?.gateway_pagamento || '').trim().toLowerCase();
+  const perfilAtivo = cfg.lista.includes(escolha);
+  const padraoAtivo = cfg.lista.includes(cfg.padrao);
+  return {
+    gateway: perfilAtivo ? escolha : (padraoAtivo ? cfg.padrao : null),
+    bloqueado: !perfilAtivo && !padraoAtivo,
+    escolha,
+    origem: perfilAtivo ? 'perfil' : (padraoAtivo ? 'padrao' : 'indisponivel')
+  };
 }
 const TEXTO_CPF_PAGAMENTO_V257 = '📝 *CADASTRO PARA PAGAMENTOS*\n\n💳 Para continuar, informe seu CPF (somente números).\n\n⚠️ *ATENÇÃO:* O CPF informado deve ser da mesma pessoa que realizará o pagamento PIX.\n\n🔒 Esse CPF ficará salvo no seu cadastro e será utilizado automaticamente nos próximos pagamentos.\n\n❌ Pagamentos realizados por contas de outros titulares poderão ser devolvidos.\n\n👇 *Digite seu CPF para continuar:*\n\n🤖 *CENTRAL UNLOCKER*';
 
@@ -9446,8 +9462,9 @@ async function gerarPixMercadoPago(valor, cliente) {
   };
 }
 
-async function gerarPix(valor, cliente, documento, gateway='pixgo') {
+async function gerarPix(valor, cliente, documento, gateway=null) {
   try {
+    if (!gateway) throw new Error('Gateway nao selecionado');
     if (gateway === 'mercadopago') return await gerarPixMercadoPago(valor, cliente);
     if (gateway === 'misticpay') return await gerarPixMisticPay(valor, cliente);
     if (gateway === 'depixpay') return await gerarPixDepixPay(valor,cliente,documento);
@@ -9467,7 +9484,6 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   if (!ehTelegram) await enviarMensagem('⏳ Gerando PIX...');
   const documento = gateway === 'depixpay' ? String(sess.documento_pix || '') : '';
   const pix = await gerarPix(sess.valor_pix, `${ehTelegram ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
-  await apagarSessaoPedido(chave);
   if (!pix) {
     await enviarMensagem(`❌ Não foi possível gerar o PIX. Tente novamente ou contate o suporte.`);
     return false;
@@ -9484,6 +9500,9 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
     verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
   }
+  // Apagar somente apos o pagamento ter sido gerado e registrado.
+  // Se o gateway falhar, o cliente pode tentar novamente sem perder o pedido.
+  await apagarSessaoPedido(chave);
 
   // Telegram: checkout PIX visual — QR grande + valor + botão nativo COPIAR PIX.
   // O código PIX não é mais despejado como uma mensagem enorme no chat.
