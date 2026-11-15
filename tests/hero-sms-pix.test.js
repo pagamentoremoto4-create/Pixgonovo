@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const sqlite3=require('sqlite3');
 const protocol=require('../hero-sms-pix');
+const heroProtocol=require('../hero-sms-protocol');
 const errors=require('../hero-sms-checkout-errors');
 const source=fs.readFileSync(require.resolve('../index.js'),'utf8');
 function section(a,b){const i=source.indexOf(a);assert.ok(i>=0,a);const j=source.indexOf(b,i);assert.ok(j>i,b);return source.slice(i,j);}
@@ -15,7 +16,7 @@ async function fixture(t,{gateway='depixpay',document='12345678901'}={}){
  const all=(sql,args=[])=>new Promise((resolve,reject)=>db.all(sql,args,(e,r)=>e?reject(e):resolve(r)));
  const messages=[],charges=[],purchases=[],sessions=new Map(),images=[];
  let starts=0;
- const ctx=vm.createContext({run,get,all,...protocol,...errors,console,Number,String,Set,Date,JSON,Buffer,
+ const ctx=vm.createContext({run,get,all,...protocol,...errors,heroProtocol,console,Number,String,Set,Date,JSON,Buffer,
   addColumnIfMissing:async()=>{},heroSmsVitrine:async()=>[{country:'73',service:'wa',cost:1,stock:100,nome:'WhatsApp'}],heroBrasilPermitido:c=>c==='73',heroPrecoCliente:async()=>25,
   gatewayPagamentoCliente:async()=>assert.fail('Hero must use the panel default, not the customer gateway'),gatewaysPagamentoAtivos:async()=>({lista:[gateway],padrao:gateway}),documentoPixCliente:async()=>String((await get('SELECT pix_documento FROM revendas WHERE id=1'))?.pix_documento||''),
   salvarSessaoPedido:async(jid,s)=>sessions.set(jid,s),apagarSessaoPedido:async jid=>sessions.delete(jid),
@@ -24,7 +25,7 @@ async function fixture(t,{gateway='depixpay',document='12345678901'}={}){
   verificarPagamento:()=>{starts++;},brl:v=>'R$ '+Number(v).toFixed(2),avisoTokenizacaoPix:()=>'',
   QRCode:{toBuffer:async()=>Buffer.from('image')},isTgJid:j=>String(j).startsWith('tg:'),tgIdFromJid:j=>String(j).slice(3),
   heroReportCheckoutError:e=>errors.checkoutMessage(e,'test'),onlyDigits:v=>String(v).replace(/\D/g,''),documentoPixValido:v=>/^\d{11}$/.test(v),
-  heroSmsApi:async()=>{purchases.push(true);return JSON.stringify({activationId:'123',phoneNumber:'5511999999999'});},
+  heroSmsV1:async(method,path,payload)=>{assert.equal(method,'POST');assert.equal(path,'/activations');assert.equal(payload.amount,1);assert.equal(payload.country,73);assert.equal(payload.verificationType,'sms');purchases.push(true);return {data:[{id:123,phone:5511999999999}]};},
   heroWhatsMenuPedido:async(jid,id)=>messages.push({jid,text:'card #'+id}),
   depixDelayedElegivel:async()=>true,
   consultarStatus:async paymentId=>({success:true,data:{payment_id:paymentId,amount:25,status:'completed'}})
@@ -90,7 +91,7 @@ test('wrong amount, missing amount, wrong id or wrong customer never authorizes 
  assert.equal(f.purchases.length,0);assert.equal((await f.get('SELECT status FROM pix_pedidos')).status,'pending');
 });
 test('paid PIX with an uncertain provider purchase is delivery_pending and is never bought again',async t=>{
- const f=await fixture(t);await f.buy();let calls=0;f.ctx.heroSmsApi=async()=>{calls++;throw new Error('timeout');};
+ const f=await fixture(t);await f.buy();let calls=0;f.ctx.heroSmsV1=async()=>{calls++;throw new Error('timeout');};
  assert.equal(await f.ctx.heroPixConfirmed('pix-1',{tipoCompra:'HERO_SMS',heroOrderId:1}),false);
  assert.equal((await f.get('SELECT status FROM pix_pedidos')).status,'delivery_pending');
  await f.ctx.heroRecoverPix();assert.equal(calls,1);assert.equal((await f.get('SELECT status FROM hero_sms_orders')).status,'uncertain');
@@ -156,8 +157,45 @@ test('an inactive panel default blocks Pix without choosing another active gatew
 });
 
 test('an incomplete provider purchase preserves its activation id for later external reconciliation',async t=>{
-  const f=await fixture(t);await f.buy();f.ctx.heroSmsApi=async()=>JSON.stringify({activationId:123});
+  const f=await fixture(t);await f.buy();f.ctx.heroSmsV1=async()=>({data:[{id:123}]});
   await f.ctx.heroPixConfirmed('pix-1',{tipoCompra:'HERO_SMS',heroOrderId:1});
   const order=await f.get('SELECT activation_id,status,phone FROM hero_sms_orders');
   assert.equal(order.activation_id,'123');assert.equal(order.status,'uncertain');assert.equal(order.phone,null);
+});
+
+test('MisticPay documented check response reads transaction.value in BRL without subtracting fees',async()=>{
+ const ctx=vm.createContext({String,clienteMisticPay:async()=>({api:{post:async()=>({data:{message:'Transação encontrada com sucesso!',transaction:{transactionId:'central-test',value:25,fee:0.31,transactionState:'COMPLETO',transactionType:'DEPOSITO',transactionMethod:'PIX'}}})}})});
+ vm.runInContext(section('async function consultarStatus(','async function escolherGatewayParaSessao('),ctx);
+ const result=await ctx.consultarStatus('central-test','misticpay');
+ assert.equal(result.data.amount,25);assert.equal(result.data.payment_id,'central-test');assert.equal(result.data.status,'completed');
+ const payment={payment_id:'central-test',revenda_id:1,valor:25,gateway:'misticpay'},order={payment_id:'central-test',customer_id:1,payment_method:'pix',price_brl:25};
+ assert.equal(protocol.validateHeroPix(payment,order,result),true);
+});
+test('Pix diagnostics distinguish missing amount from wrong identity without exposing payer details',()=>{
+ const payment={payment_id:'pix',revenda_id:1,valor:25,gateway:'misticpay'},order={payment_id:'pix',customer_id:1,payment_method:'pix',price_brl:25};
+ const missing=protocol.heroPixValidation(payment,order,{success:true,data:{payment_id:'pix',status:'completed'}});
+ assert.equal(missing.reason,'PROVIDER_AMOUNT_MISSING');assert.equal(missing.expected_amount_cents,2500);assert.equal(missing.provider_amount_cents,null);
+ const mismatch=protocol.heroPixValidation(payment,order,{success:true,data:{payment_id:'other',amount:25,status:'completed',payerDocument:'private',api_key:'private'}});
+ assert.equal(mismatch.reason,'PROVIDER_PAYMENT_ID_MISMATCH');assert.ok(!JSON.stringify(mismatch).includes('private'));
+});
+test('a paid MisticPay Pix using the documented value field is recovered without a new charge',async t=>{
+ const f=await fixture(t,{gateway:'misticpay'});await f.buy();
+ f.ctx.clienteMisticPay=async()=>({api:{post:async()=>({data:{transaction:{transactionId:'pix-1',value:25,fee:0.31,transactionState:'COMPLETO'}}})}});
+ vm.runInContext(section('async function consultarStatus(','async function escolherGatewayParaSessao('),f.ctx);
+ await f.ctx.heroRecoverPix();await f.ctx.heroRecoverPix();
+ assert.equal(f.charges.length,1);assert.equal(f.purchases.length,1);assert.equal((await f.get('SELECT status FROM pix_pedidos')).status,'delivered');
+});
+test('a real value mismatch remains blocked and saves a specific diagnostic',async t=>{
+ const f=await fixture(t,{gateway:'misticpay'});await f.buy();
+ await assert.rejects(f.ctx.heroPixConfirmed('pix-1',{tipoCompra:'HERO_SMS',heroOrderId:1},{success:true,data:{payment_id:'pix-1',amount:24,status:'completed'}}),e=>e.code==='PROVIDER_AMOUNT_MISMATCH');
+ const row=await f.get('SELECT last_error,status FROM hero_sms_orders');assert.match(row.last_error,/PROVIDER_AMOUNT_MISMATCH/);assert.equal(row.status,'awaiting_payment');assert.equal(f.purchases.length,0);
+});
+
+test('closed test is excluded from Pix recovery and does not block a new purchase',async t=>{
+ const f=await fixture(t);await f.buy();await f.run("UPDATE hero_sms_orders SET status='uncertain',last_error='Request failed with status code 404'");
+ vm.runInContext(section('async function heroCloseTestOrder(','async function heroReconcileExternalCancellation('),f.ctx);
+ await f.ctx.heroCloseTestOrder(1);await f.ctx.heroRecoverPix();
+ assert.equal(f.purchases.length,0);assert.equal(await f.ctx.heroPixConfirmed('pix-1',{tipoCompra:'HERO_SMS',heroOrderId:1}),false);
+ f.ctx.gerarPix=async()=>({paymentId:'pix-2',qrCode:'000201-PIX2'});assert.equal(await f.buy(),2);
+ assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'test_closed');
 });

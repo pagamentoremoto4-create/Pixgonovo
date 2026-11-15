@@ -2,9 +2,9 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const protocol=require('../hero-sms-protocol');
-test('replace: parses documented REST data array for the exact activation',()=>{
+test('replace: parses one authenticated replacement, including a new activation id',()=>{
   assert.deepEqual(protocol.parseReplacement({data:[{id:123,phone:'5511999999999'}]},'123'),{activationId:'123',phone:'5511999999999'});
-  assert.throws(()=>protocol.parseReplacement({data:[{id:999,phone:'5511999999999'}]},'123'));
+  assert.deepEqual(protocol.parseReplacement({data:[{id:999,phone:'5511999999999'}]},'123'),{activationId:'999',phone:'5511999999999'});
   assert.throws(()=>protocol.parseReplacement({data:[]},'123'));
   assert.throws(()=>protocol.parseReplacement({data:[{id:123,phone:null}]},'123'));
   assert.throws(()=>protocol.parseReplacement({data:[{id:123,phone:'5511999999999'},{id:123,phone:'5511888888888'}]},'123'));
@@ -34,4 +34,15 @@ test('pagination: uses hasMore or total, and tolerates absent metadata',()=>{
 test('API dates use the documented UTC second precision, without milliseconds',()=>{
   assert.equal(protocol.apiDate('2026-11-15T00:54:22.336Z'),'2026-11-15T00:54:22Z');
   assert.throws(()=>protocol.apiDate('not a date'));
+});
+
+test('REST purchase parses the documented singleton activation array and preserves incomplete IDs',()=>{
+  assert.deepEqual(protocol.parsePurchasedActivation({data:[{id:123,phone:5511999999999}]}),{activationId:'123',phoneNumber:'5511999999999'});
+  assert.deepEqual(protocol.parsePurchasedActivation({data:[{id:123}]}),{activationId:'123',phoneNumber:null});
+  assert.throws(()=>protocol.parsePurchasedActivation({data:[]}));
+  assert.throws(()=>protocol.parsePurchasedActivation({data:[{id:1},{id:2}]}));
+});
+test('provider errors preserve title and details without copying arbitrary response fields',()=>{
+  const message=protocol.providerErrorSummary({title:'BAD_ACTION',details:'Method Not Found',api_key:'secret',headers:{Authorization:'secret'}});
+  assert.match(message,/BAD_ACTION/);assert.ok(!message.includes('secret'));
 });

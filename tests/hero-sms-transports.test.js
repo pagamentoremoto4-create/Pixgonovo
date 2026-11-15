@@ -48,3 +48,9 @@ test('Pix QR image on Telegram uses the customer chat and buffer',async()=>{
  const i=source.indexOf('async function heroSendPixImage('),j=source.indexOf('function heroReportCheckoutError(',i);
  vm.runInContext(source.slice(i,j),ctx);const image=Buffer.from('image');await ctx.heroSendPixImage('tg:123',image);assert.equal(sent[0][0],'123');assert.equal(sent[0][1],image);
 });
+
+test('Telegram cards shown over menu media update the caption and keyboard',async()=>{
+ const f=fixture();f.ctx.tgBot.editMessageCaption=async(...args)=>f.sent.push(args);
+ await f.ctx.heroEditOrderMessage({transport:'telegram',chatId:'123',messageId:77,kind:'caption'},{text:'Novo número: +5511888888888',buttons:[]});
+ assert.equal(f.sent[0][1].message_id,77);assert.match(f.sent[0][0],/5511888888888/);
+});

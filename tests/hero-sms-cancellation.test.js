@@ -91,3 +91,17 @@ test('JSON-encoded ACCESS_CANCEL is accepted as the documented string response',
  const f=await fixture(t);f.ctx.heroSmsApi=async()=>JSON.stringify('ACCESS_CANCEL');await f.ctx.heroCancelOrder('wa:5511',1);
  assert.equal((await f.get('SELECT saldo FROM revendas WHERE id=1')).saldo,75);
 });
+
+test('closing an explicitly declared test changes only that order, leaving Pix and wallet untouched',async t=>{
+ const f=await fixture(t,{method:'pix'});
+ await f.run("UPDATE hero_sms_orders SET status='uncertain',activation_id=NULL,phone=NULL,payment_id='pix15',last_error='Request failed with status code 404' WHERE id=1");
+ await f.run('CREATE TABLE pix_pedidos(payment_id TEXT PRIMARY KEY,status TEXT)');await f.run("INSERT INTO pix_pedidos VALUES('pix15','delivery_pending')");
+ await f.ctx.heroCloseTestOrder(1);await f.ctx.heroCloseTestOrder(1);
+ const order=await f.get('SELECT status,refund_status,last_error FROM hero_sms_orders WHERE id=1');
+ assert.equal(order.status,'test_closed');assert.equal(order.refund_status,'none');assert.match(order.last_error,/404/);
+ assert.equal((await f.get('SELECT saldo FROM revendas')).saldo,50);assert.equal((await f.get('SELECT status FROM pix_pedidos')).status,'delivery_pending');
+ assert.equal((await f.get('SELECT COUNT(*) n FROM hero_sms_test_closures')).n,1);assert.equal((await f.get('SELECT COUNT(*) n FROM hero_sms_refund_ledger')).n,0);
+});
+test('test closure refuses an order with a real activation and preserves its state',async t=>{
+ const f=await fixture(t);await assert.rejects(f.ctx.heroCloseTestOrder(1));assert.equal((await f.get('SELECT status FROM hero_sms_orders')).status,'number_received');assert.equal((await f.get('SELECT saldo FROM revendas')).saldo,50);
+});

@@ -17,7 +17,7 @@ async function fixture(t){
   const sent=[];
   const ctx=vm.createContext({run,get,all,heroProtocol:protocol,renderOrderCard,createOrderMessenger,console,URLSearchParams,Date,Number,Map,Set,JSON,String,
     enviarTexto:async(jid,msg)=>{sent.push({jid,msg});return {transport:'test',messageId:sent.length};},
-    isTgJid:jid=>String(jid).startsWith('tg:'),salvarSessaoPedido:async()=>{},
+    isTgJid:jid=>String(jid).startsWith('tg:'),tgIdFromJid:jid=>String(jid).slice(3),salvarSessaoPedido:async()=>{},
     addColumnIfMissing:async()=>{},heroSmsV1:async()=>({data:[],meta:{hasMore:false}}),
     heroSmsApi:async()=> 'STATUS_WAIT_CODE',heroWaitSeconds:()=>0,brl:v=>'R$ '+v});
   vm.runInContext(section('async function heroPedidosInit(){','async function heroCatalogInit(){'),ctx);
@@ -39,7 +39,7 @@ test('real replacement handler saves the documented array response and sends lin
 });
 test('ambiguous replacement is held for reconciliation and cannot be repeated',async t=>{
   const f=await fixture(t);let calls=0;
-  f.ctx.heroSmsV1=async()=>{calls++;return {data:[{id:999,phone:'5511999999999'}]};};
+  f.ctx.heroSmsV1=async()=>{calls++;return {data:[{id:999,phone:'5511999999999'},{id:1000,phone:'5511888888888'}]};};
   await f.ctx.heroReplaceOrder('test',1);
   assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'replace_uncertain');
   await assert.rejects(f.ctx.heroReplaceOrder('test',1));assert.equal(calls,1);
@@ -160,4 +160,22 @@ test('an unsuccessful cancellation notification remains queued for retry',async 
   assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,0);
   f.ctx.enviarTexto=send;await f.ctx.heroStatusUpdates();assert.equal(f.sent.length,1);
   assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);
+});
+
+test('replacement with a new provider activation id updates the same local order and phone',async t=>{
+ const f=await fixture(t);f.ctx.heroSmsV1=async()=>({data:[{id:999,phone:5511888888888}]});
+ await f.ctx.heroReplaceOrder('test',1);
+ const row=await f.get('SELECT id,activation_id,phone,status FROM hero_sms_orders WHERE id=1');
+ assert.equal(row.id,1);assert.equal(row.activation_id,'999');assert.equal(row.phone,'5511888888888');assert.equal(row.status,'number_received');
+});
+test('a replacement without a confirmed phone preserves the new activation id for synchronization',async t=>{
+ const f=await fixture(t);f.ctx.heroSmsV1=async()=>({data:[{id:999}]});await f.ctx.heroReplaceOrder('test',1);
+ const row=await f.get('SELECT activation_id,phone,status FROM hero_sms_orders WHERE id=1');assert.equal(row.activation_id,'999');assert.equal(row.phone,null);assert.equal(row.status,'replace_uncertain');
+});
+test('Telegram user opening an order adopts the message currently visible in that chat',async t=>{
+ const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET customer_jid='tg:123' WHERE id=1");
+ await f.ctx.heroShowTelegramOrderCard('tg:123',1,{message_id:77,chat:{id:123},photo:[{}],date:1});
+ const saved=JSON.parse((await f.get('SELECT reference_json FROM hero_sms_message_refs WHERE order_id=1')).reference_json);
+ assert.equal(saved.messageId,77);assert.equal(saved.kind,'caption');assert.equal(f.sent.length,1);assert.equal(f.sent[0].edit,true);
+ await assert.rejects(f.ctx.heroShowTelegramOrderCard('tg:123',1,{message_id:88,chat:{id:999}}));
 });

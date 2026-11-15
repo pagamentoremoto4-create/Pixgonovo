@@ -1,10 +1,11 @@
 'use strict';
 function renderOrderCard(order, waitSeconds=0, telegram=false) {
-  const statuses={awaiting_payment:'💠 Aguardando pagamento Pix.',payment_expired:'⌛ Pix expirado ou encerrado.',payment_creating:'⏳ Gerando pagamento Pix.',payment_reconciliation:'⏳ Pagamento Pix em conferência.',payment_failed:'❌ Não foi possível gerar o pagamento.',insufficient_balance:'❌ Saldo insuficiente.',paid:'✅ Pagamento confirmado. Aguardando compra do número.',purchasing:'⏳ Solicitando número ao fornecedor.',uncertain:'⚠️ Compra em verificação. Nenhum número foi confirmado neste pedido.',number_received:'⏳ Aguardando SMS.',sms_received:'✅ SMS RECEBIDO',canceled:'❌ ATIVAÇÃO CANCELADA',finished:'✅ Ativação finalizada.',replace_pending:'🔄 Troca em andamento.',replace_uncertain:'⏳ Troca em conferência.',cancel_pending:'⏳ Cancelamento em conferência.'};
+  const statuses={test_closed:'🧪 Pedido de teste encerrado.',awaiting_payment:'💠 Aguardando pagamento Pix.',payment_expired:'⌛ Pix expirado ou encerrado.',payment_creating:'⏳ Gerando pagamento Pix.',payment_reconciliation:'⏳ Pagamento Pix em conferência.',payment_failed:'❌ Não foi possível gerar o pagamento.',insufficient_balance:'❌ Saldo insuficiente.',paid:'✅ Pagamento confirmado. Aguardando compra do número.',purchasing:'⏳ Solicitando número ao fornecedor.',uncertain:'⚠️ Compra em verificação. Nenhum número foi confirmado neste pedido.',number_received:'⏳ Aguardando SMS.',sms_received:'✅ SMS RECEBIDO',canceled:order.activation_id?'❌ ATIVAÇÃO CANCELADA':'❌ COMPRA ENCERRADA',finished:'✅ Ativação finalizada.',replace_pending:'🔄 Troca em andamento.',replace_uncertain:'⏳ Troca em conferência.',cancel_pending:'⏳ Cancelamento em conferência.'};
   const lines=['🔓 CENTRALUNLOCKER',`📦 PEDIDO #${order.id}`];
   if(order.phone)lines.push(`📱 Número: +${String(order.phone).replace(/^\+/,'')}`);
   lines.push('',statuses[order.status]||'⏳ Pedido em acompanhamento.');
   if(['uncertain','payment_reconciliation'].includes(order.status))lines.push('Confira este pedido com o administrador antes de tentar comprar ou pagar novamente.');
+  if(order.status==='test_closed')lines.push('O encerramento do teste não altera o pagamento nem o saldo.');
   if(order.sms_code)lines.push(`🔐 Código: ${order.sms_code}`);
   else if(order.status==='number_received')lines.push('📩 O código aparecerá nesta mensagem automaticamente.');
   if(order.status==='canceled')lines.push(order.refund_status==='credited'?'💰 Valor devolvido à sua carteira.':'⏳ Crédito na carteira ainda não confirmado.');
@@ -20,14 +21,14 @@ function renderOrderCard(order, waitSeconds=0, telegram=false) {
 }
 function createOrderMessenger({loadOrder,loadReference,saveReference,send,edit,render}) {
   const queues=new Map();
-  async function update(id,{createIfMissing=true}={}){
+  async function update(id,{createIfMissing=true,reference:targetReference=null}={}){
     const previous=queues.get(id)||Promise.resolve();
     const job=previous.catch(()=>{}).then(async()=>{
       const order=await loadOrder(id);
       if(!order)throw new Error('Pedido não encontrado.');
       const card=render(order);
       const fingerprint=JSON.stringify(card);
-      const stored=await loadReference(id);
+      const stored=targetReference?{reference:targetReference,fingerprint:null}:await loadReference(id);
       if(stored?.fingerprint===fingerprint)return true;
       if(stored){
         try{

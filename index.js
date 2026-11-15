@@ -1,9 +1,10 @@
 require('dotenv').config();
+const APP_RELEASE='10.1.5';
 const heroProtocol = require('./hero-sms-protocol');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
 const {creditHeroRefund}=require('./hero-sms-refunds');
 const {checkoutError,checkoutMessage,checkoutDiagnostic}=require('./hero-sms-checkout-errors');
-const {validateHeroPix,parseHeroPixContext,heroPixDelivered}=require('./hero-sms-pix');
+const {validateHeroPix,heroPixValidation,parseHeroPixContext,heroPixDelivered}=require('./hero-sms-pix');
 
 const express = require('express');
 const http = require('http');
@@ -3626,10 +3627,10 @@ async function heroBuyPaid(id){
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
   try{
     if(!heroBrasilPermitido(o.country)||String(o.service).toLowerCase()!=='wa')throw new Error('Compra bloqueada: somente WhatsApp Brasil.');
-    const raw=await heroSmsApi('getNumberV2',{service:o.service,country:o.country});let v;try{v=JSON.parse(raw);}catch{}
-    const activation=v?.activationId??v?.activation_id??v?.id,phone=v?.phoneNumber??v?.phone_number??v?.phone;
-    if(/^\d{1,30}$/.test(String(activation||'')))await run('UPDATE hero_sms_orders SET activation_id=? WHERE id=? AND activation_id IS NULL',[String(activation),id]);
-    if(!activation||!phone)throw new Error('Resposta incerta do fornecedor: '+raw.slice(0,100));
+    const response=await heroSmsV1('POST','/activations',{service:o.service,country:Number(o.country),amount:1,verificationType:'sms'});
+    const {activationId:activation,phoneNumber:phone}=heroProtocol.parsePurchasedActivation(response);
+    await run('UPDATE hero_sms_orders SET activation_id=? WHERE id=? AND activation_id IS NULL',[activation,id]);
+    if(!phone)throw new Error('Hero SMS retornou a ativação '+activation+' sem número confirmado; conferir no fornecedor.');
     await run("UPDATE hero_sms_orders SET activation_id=?,phone=?,status='number_received',number_received_at=CURRENT_TIMESTAMP WHERE id=?",[String(activation),String(phone),id]);
   }catch(e){
     const diagnostic=checkoutDiagnostic(e,'HERO-PURCHASE-'+id);
@@ -3692,12 +3693,14 @@ async function heroEditOrderMessage(reference,card){
   if(reference.transport==='telegram'){
     if(!tgBot)throw new Error('Telegram desconectado.');
     try{
-      await tgBot.editMessageText(card.text,{chat_id:reference.chatId,message_id:reference.messageId,reply_markup:{inline_keyboard:card.buttons}});
+      const options={chat_id:reference.chatId,message_id:reference.messageId,reply_markup:{inline_keyboard:card.buttons}};
+      if(reference.kind==='caption')await tgBot.editMessageCaption(card.text,options);
+      else await tgBot.editMessageText(card.text,options);
       return;
     }catch(error){
       const description=String(error.response?.body?.description||error.message||'');
       if(/message is not modified/i.test(description))return;
-      if(/message to edit not found|message can.t be edited|message_id_invalid/i.test(description))error.cannotEdit=true;
+      if(/message to edit not found|message can.t be edited|message_id_invalid|there is no text in the message to edit/i.test(description))error.cannotEdit=true;
       throw error;
     }
   }
@@ -3735,6 +3738,16 @@ async function heroUpdateOrderCard(id,options={}){
   });
   return heroOrderMessenger.update(Number(id),options);
 }
+async function heroShowTelegramOrderCard(jid,id,message){
+  await heroPedidosInit();
+  const order=await get('SELECT * FROM hero_sms_orders WHERE id=? AND customer_jid=?',[Number(id),jid]);
+  if(!order)throw new Error('Pedido não encontrado.');
+  if(!message?.message_id)return heroUpdateOrderCard(order.id);
+  const chatId=String(message.chat?.id||'');
+  if(chatId!==String(tgIdFromJid(jid)))throw new Error('A mensagem não pertence ao chat do pedido.');
+  const kind=message.photo||message.video||message.animation||message.document?'caption':'text';
+  return heroUpdateOrderCard(order.id,{reference:{transport:'telegram',chatId,messageId:message.message_id,kind,sentAt:Number(message.date||0)*1000||Date.now()}});
+}
 async function heroWhatsMenuPedido(jid,id){
   await heroPedidosInit();
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=? AND customer_jid=?',[Number(id),jid]);
@@ -3758,18 +3771,19 @@ async function heroShowOrder(jid,id){
     '\n'+status+(o.sms_code?'\n🔐 Código: '+o.sms_code:'');
 }
 // API v1: troca de número sem criar outra compra e sem alterar o pagamento.
-async function heroSmsV1(method,path){
+async function heroSmsV1(method,path,payload=undefined){
   const key=await heroSmsChave();
   if(!key)throw new Error('Chave Hero SMS não configurada.');
   const response=await axios({method,url:'https://hero-sms.com/api/v1'+path,
-    headers:{Authorization:'ApiKey '+key},timeout:18000,
+    headers:{Authorization:'ApiKey '+key},data:payload,timeout:18000,
     validateStatus:()=>true});
   if(response.status<200||response.status>=300){
     const reason=response.status===422&&response.data?.errors
       ? JSON.stringify(response.data.errors)
-      : (typeof response.data==='object'?JSON.stringify(response.data):String(response.data||''));
+      : heroProtocol.providerErrorSummary(response.data);
     const error=new Error('Hero SMS recusou a operação (HTTP '+response.status+'): '+reason.slice(0,600));
     error.httpStatus=response.status;
+    error.code=String(response.data?.title||'HERO_HTTP_'+response.status);
     throw error;
   }
   return response.data;
@@ -3784,7 +3798,15 @@ async function heroReplaceOrder(jid,orderId){
   if(!claimed?.changes)throw new Error('Operação em andamento.');
   try{
     const data=await heroSmsV1('POST','/activations/'+encodeURIComponent(o.activation_id)+'/replace');
-    const {phone, activationId: activation}=heroProtocol.parseReplacement(data,o.activation_id);
+    const {phone, activationId: activation}=heroProtocol.parseReplacement(data,o.activation_id,{allowMissingPhone:true});
+    if(!phone){
+      await run("UPDATE hero_sms_orders SET activation_id=?,phone=NULL,status='replace_uncertain',last_error='Fornecedor retornou ID de troca sem número confirmado' WHERE id=? AND status='replace_pending'",[activation,o.id]);
+      return '⏳ Troca em conferência. O novo número será atualizado quando confirmado pelo fornecedor.';
+    }
+    if(String(phone).replace(/^\+/,'')===String(o.phone||'').replace(/^\+/,'')){
+      await run("UPDATE hero_sms_orders SET activation_id=?,status='replace_pending',last_error='Troca solicitada; fornecedor ainda retornou o número anterior' WHERE id=?",[activation,o.id]);
+      return '⏳ Troca solicitada. Aguardando o fornecedor confirmar um número diferente.';
+    }
     await run("UPDATE hero_sms_orders SET phone=?,activation_id=?,status='number_received',number_received_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,last_error=NULL WHERE id=? AND status='replace_pending'",[String(phone),String(activation),o.id]);
     return '🔄 CENTRALUNLOCKER — NÚMERO TROCADO\n📦 Pedido #'+o.id+'\n📱 Novo número: +'+String(phone).replace(/^\+/,'')+'\n⏳ Aguardando SMS.';
   }catch(e){
@@ -3808,14 +3830,20 @@ async function heroPixConfirmed(paymentId,ctx,verification=null){
   if(!context)throw new Error('Contexto Pix Hero SMS inválido.');
   const payment=await get('SELECT * FROM pix_pedidos WHERE payment_id=?',[String(paymentId)]);
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=? AND payment_id=?',[Number(context.heroOrderId),String(paymentId)]);
+  if(o?.status==='test_closed')return false;
   const verified=verification||await consultarStatus(String(paymentId),payment?.gateway);
   const allowDelayed=payment?.gateway==='depixpay'&&(await depixDelayedElegivel(paymentId)||['completed','delivery_pending','delivered'].includes(payment.status));
-  if(!validateHeroPix(payment,o,verified,{allowDelayed}))throw new Error('Pix não confirmado: identificador, valor ou vínculo do cliente divergente/ausente.');
+  const validation=heroPixValidation(payment,o,verified,{allowDelayed});
+  if(!validation.valid){
+    console.log('HERO_PIX_VALIDATION',JSON.stringify(validation));
+    if(o)await run("UPDATE hero_sms_orders SET last_error=? WHERE id=? AND status IN ('awaiting_payment','payment_expired','paid')",[JSON.stringify(validation).slice(0,1200),o.id]);
+    const error=new Error('Pix não confirmado: '+validation.reason);error.code=validation.reason;throw error;
+  }
   const storedContext=parseHeroPixContext(payment.contexto_json);
   if(Number(storedContext?.heroOrderId)!==Number(o.id)||payment.tipo_pagamento!=='SERVICO')throw new Error('Contexto local do Pix não corresponde ao pedido.');
   await run(`INSERT INTO hero_sms_pix_receipts(payment_id,order_id,gateway,amount_brl,provider_status) VALUES(?,?,?,?,?) ON CONFLICT(payment_id) DO NOTHING`,[String(paymentId),o.id,payment.gateway,Number(payment.valor),verified.data.status]);
   await run("UPDATE pix_pedidos SET status='completed' WHERE payment_id=? AND status IN ('pending','expired')",[String(paymentId)]);
-  await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status IN ('awaiting_payment','payment_expired')",[o.id]);
+  await run("UPDATE hero_sms_orders SET status='paid',last_error=NULL WHERE id=? AND status IN ('awaiting_payment','payment_expired')",[o.id]);
   // An order left in paid before a restart is safe to claim. Purchasing/uncertain
   // are never automatically retried: the provider may already have executed it.
   await heroBuyPaid(o.id);
@@ -3854,6 +3882,18 @@ async function heroRecoverPix(){
 // this mapping still requires confirmation with the provider.
 async function heroCreditConfirmedRefund(o,requireReceipt=false){
   return creditHeroRefund(DB_PATH,o.id,{requireReceipt});
+}
+async function heroCloseTestOrder(id){
+  await heroPedidosInit();
+  const order=await get('SELECT * FROM hero_sms_orders WHERE id=?',[Number(id)]);
+  if(!order)throw new Error('Pedido não encontrado.');
+  if(order.status==='test_closed'){await heroQueueExternalUpdate(order.id);return 'Este teste já foi encerrado; o bloqueio deste pedido foi removido.';}
+  if(order.status!=='uncertain'||order.activation_id||order.phone||order.sms_code)throw new Error('Esta ação é apenas para teste em verificação, sem ativação ou número registrado.');
+  await run(`INSERT INTO hero_sms_test_closures(order_id,previous_status,previous_error,payment_id,reason) VALUES(?,?,?,?,?) ON CONFLICT(order_id) DO NOTHING`,[order.id,order.status,order.last_error||'',order.payment_id||null,'Administrador confirmou teste encerrado no fornecedor; sem alteração financeira']);
+  const changed=await run("UPDATE hero_sms_orders SET status='test_closed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='uncertain' AND activation_id IS NULL AND phone IS NULL AND sms_code IS NULL",[order.id]);
+  if(!changed?.changes){const fresh=await get('SELECT status FROM hero_sms_orders WHERE id=?',[order.id]);if(fresh?.status!=='test_closed')throw new Error('O pedido mudou durante o encerramento. Atualize a página.');}
+  await heroQueueExternalUpdate(order.id);
+  return 'Pedido #'+order.id+' marcado como teste encerrado. Bloqueio deste pedido removido. Pix e saldo não foram alterados.';
 }
 async function heroQueueExternalUpdate(id){
   const order=await get('SELECT status,phone,refund_status FROM hero_sms_orders WHERE id=?',[id]);
@@ -3963,7 +4003,7 @@ async function heroStatusUpdates(){
     await heroPedidosInit();
     const confirmed=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_cancel_receipts c ON c.order_id=o.id AND c.activation_id=o.activation_id WHERE o.refund_status='none' AND o.status IN ('cancel_pending','canceled') LIMIT 100");
     for(const o of confirmed)try{await heroCreditConfirmedRefund(o,true);}catch(e){console.log('Hero estorno pendente #'+o.id,String(e.message).slice(0,120));}
-    const orders=await all("SELECT o.id,o.status,e.state AS event_state,e.delivered AS event_delivered FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id LEFT JOIN hero_sms_external_events e ON e.order_id=o.id WHERE o.activation_id IS NOT NULL AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending') AND (r.order_id IS NOT NULL OR o.status='number_received' OR e.delivered=0) ORDER BY o.id DESC LIMIT 300");
+    const orders=await all("SELECT o.id,o.status,e.state AS event_state,e.delivered AS event_delivered FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id LEFT JOIN hero_sms_external_events e ON e.order_id=o.id WHERE (o.activation_id IS NOT NULL OR e.delivered=0) AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending','test_closed') AND (r.order_id IS NOT NULL OR o.status='number_received' OR e.delivered=0) ORDER BY o.id DESC LIMIT 300");
     for(const o of orders){
       try{
         await heroUpdateOrderCard(o.id,{createIfMissing:o.status==='number_received'||o.event_delivered===0});
@@ -8585,7 +8625,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if(/^hero_sms_replace_\d+$/.test(data)){
           const id=Number(data.split('_').pop());
           let result;
-          try{await heroReplaceOrder(from,id);await heroWhatsMenuPedido(from,id);return;}
+          try{await heroReplaceOrder(from,id);await heroShowTelegramOrderCard(from,id,q.message);return;}
           catch(e){result='⚠️ Não foi possível concluir a operação. Tente novamente ou contate o suporte.';}
           return atualizarCardTelegram(chatId,null,result,[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
         }
@@ -8614,7 +8654,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         }
         if(/^hero_sms_status_\d+$/.test(data)){
           const id=Number(data.split('_').pop());
-          try{await heroWhatsMenuPedido(from,id);return;}
+          try{await heroShowTelegramOrderCard(from,id,q.message);return;}
           catch(e){return atualizarCardTelegram(chatId,q.message,'⚠️ Não foi possível abrir o pedido.',[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);}
         }
         if(data==='hero_sms_orders'){
@@ -10383,7 +10423,7 @@ async function consultarStatus(paymentId, gateway='pixgo') {
       const d = (await api.post('/transactions/check', { transactionId: paymentId }, { timeout: 15000 })).data;
       const raw = String(d?.transaction?.transactionState || '').toUpperCase();
       const status = raw === 'COMPLETO' ? 'completed' : (['FALHA','CANCELADO'].includes(raw) ? 'expired' : 'pending');
-      return { success: true, data: { status, raw_status: raw, payment_id:String(d?.transaction?.transactionId||''), amount:d?.transaction?.amount??d?.transaction?.transactionAmount } };
+      return { success: true, data: { status, raw_status: raw, payment_id:String(d?.transaction?.transactionId||''), amount:d?.transaction?.value??d?.transaction?.amount??d?.transaction?.transactionAmount } };
     }
     if (gateway === 'mercadopago') {
       const mp = clienteMercadoPago();
@@ -13952,6 +13992,10 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
 app.get('/webhook/whatsapp', (req, res) => res.json({ ok:true, whatsapp: WHATSAPP_ENABLED ? 'enabled' : 'disabled' }));
 
+app.get('/health',async(req,res)=>{
+  try{await get('SELECT 1 AS ok');res.status(200).json({ok:true,version:APP_RELEASE});}
+  catch(e){res.status(503).json({ok:false});}
+});
 app.get('/', (req, res) => {
   if (qrCodeBase64) return res.send(page('QR', `<div class="card" style="text-align:center"><h1>📱 Atendimento ativo</h1><p>Escaneie o QR Code na página WhatsApp do painel administrativo.</p></div>`));
   res.send(page('Online', `<div class="card" style="text-align:center"><h1>✅ CENTRALUNLOCKER ONLINE</h1><p>${tgBot ? 'Telegram conectado ✅' : 'Telegram aguardando token'}${conectado ? '<br>WhatsApp conectado ✅' : WHATSAPP_ENABLED ? '<br>WhatsApp aguardando conexão' : '<br>WhatsApp desabilitado'}</p><p><a class="btn green" href="/admin">Acessar painel admin</a></p></div>`));
@@ -16901,7 +16945,15 @@ async function heroSmsApi(acao,parametros={}){
   const url=new URL('https://hero-sms.com/stubs/handler_api.php');
   url.searchParams.set('api_key',chave);url.searchParams.set('action',acao);
   for(const [k,v] of Object.entries(parametros))if(v!==undefined&&v!==null)url.searchParams.set(k,String(v));
-  const resp=await axios.get(url.toString(),{timeout:18000,responseType:'text'});
+  let resp;
+  try{resp=await axios.get(url.toString(),{timeout:18000,responseType:'text'});}
+  catch(error){
+    const summary=heroProtocol.providerErrorSummary(error.response?.data);
+    const safe=new Error('Hero SMS '+acao+' (HTTP '+(error.response?.status||'rede')+'): '+(summary||'Resposta indisponível'));
+    safe.code=String(error.response?.status?'HERO_HTTP_'+error.response.status:'HERO_NETWORK_ERROR');
+    safe.response=error.response?.status?{status:error.response.status}:undefined;
+    throw safe;
+  }
   const data=heroProtocol.compatibilityText(resp.data);
   if(!data||/^(BAD_KEY|ERROR_SQL|NO_API_KEY|BAD_ACTION)/i.test(data))throw new Error('Hero SMS recusou a solicitação. Verifique a chave API.');
   return data;
@@ -16936,6 +16988,10 @@ async function heroPedidosInit(){
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_notifications (
     order_id INTEGER PRIMARY KEY, code TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_test_closures(
+    order_id INTEGER PRIMARY KEY, previous_status TEXT NOT NULL, previous_error TEXT,
+    payment_id TEXT, reason TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_external_events(
     order_id INTEGER PRIMARY KEY, state TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
@@ -17041,8 +17097,19 @@ app.get('/admin/herosms/catalogo',async(req,res)=>{
   try{
     await heroCatalogInit();
     await run(`CREATE TABLE IF NOT EXISTS hero_sms_country_names (id TEXT PRIMARY KEY, name TEXT NOT NULL)`);
-    // Sem LIMIT 10000: os totais precisam considerar todas as ofertas importadas.
-    const rows=await all(`SELECT h.*,c.name AS country_name FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country ORDER BY COALESCE(NULLIF(h.service_name,''),h.service) COLLATE NOCASE,h.country`);
+    const search=String(req.query.q||'').trim().slice(0,100),pageSize=100;
+    const terms=search?heroSmsBuscaTermo(search):[];
+    if(search.toLowerCase()==='brasil')terms.push('brazil');
+    const predicates=terms.map(()=>"(LOWER(COALESCE(h.service_name,'')) LIKE ? OR LOWER(h.service)=? OR LOWER(COALESCE(c.name,'')) LIKE ? OR h.country=?)");
+    const where=predicates.length?' WHERE '+predicates.join(' OR '):'';
+    const args=terms.flatMap(term=>['%'+term+'%',term,'%'+term+'%',term]);
+    const filtered=await get(`SELECT COUNT(*) AS count FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country${where}`,args);
+    const totalFiltered=Number(filtered?.count||0),totalPages=Math.max(1,Math.ceil(totalFiltered/pageSize));
+    const currentPage=Math.min(totalPages,Math.max(1,Math.trunc(Number(req.query.p)||1)));
+    const totals=await get(`SELECT COUNT(*) AS offers,SUM(CASE WHEN active=1 AND stock>0 THEN 1 ELSE 0 END) AS active_offers,SUM(CASE WHEN active=1 AND stock>0 THEN stock ELSE 0 END) AS stock FROM hero_sms_catalog`);
+    const rows=await all(`SELECT h.*,c.name AS country_name FROM hero_sms_catalog h LEFT JOIN hero_sms_country_names c ON c.id=h.country${where} ORDER BY COALESCE(NULLIF(h.service_name,''),h.service) COLLATE NOCASE,h.service,h.country LIMIT ? OFFSET ?`,[...args,pageSize,(currentPage-1)*pageSize]);
+    const pageLink=p=>'/admin/herosms/catalogo?'+new URLSearchParams({q:search,p:String(p)});
+    const navigation=`<p>Página ${currentPage} de ${totalPages} • ${totalFiltered.toLocaleString('pt-BR')} ofertas encontradas • ${rows.length} nesta página</p><p>${currentPage>1?`<a href="${safeHtml(pageLink(currentPage-1))}">⬅️ Anterior</a>`:''} ${currentPage<totalPages?`<a href="${safeHtml(pageLink(currentPage+1))}">Próxima ➡️</a>`:''}</p>`;
     const margin=Number(await getConfig('hero_sms_margin_brl','25'));
     const currency=String(await getConfig('hero_sms_cost_currency','BRL')).toUpperCase();
     const configuredRate=Number(await getConfig('hero_sms_brl_per_unit',currency==='BRL'?'1':'0'));
@@ -17062,8 +17129,7 @@ app.get('/admin/herosms/catalogo',async(req,res)=>{
       if(x.active&&Number(x.stock)>0)app.estoque+=Number(x.stock);
     }
     const ordem=['💬 Mensagens e redes sociais','🌐 Tecnologia e e-mail','🛒 Compras e delivery','🏦 Bancos e finanças','🎮 Jogos e entretenimento','📱 Outros aplicativos'];
-    let somaOfertas=0,estoqueOfertas=0;
-    for(const x of rows){if(x.active&&Number(x.stock)>0){somaOfertas++;estoqueOfertas+=Number(x.stock);}}
+    const somaOfertas=Number(totals?.active_offers||0),estoqueOfertas=Number(totals?.stock||0);
     const visibilidade=await heroSmsVisivel('whatsapp');
     const visibilidadeHtml=`<div class="card"><h2>💬 Visibilidade no WhatsApp</h2><p>Somente WhatsApp SMS pode aparecer no menu de clientes nesta etapa.</p><form method="post" action="/admin/herosms/visibilidade"><label><input type="checkbox" name="whatsapp" value="1" ${visibilidade?'checked':''}> Mostrar WhatsApp SMS aos clientes</label><button>Salvar visibilidade</button></form><p>🔒 Habilitar visibilidade não habilita compras.</p></div>`;
     const categoriasHtml=ordem.map(cat=>{
@@ -17072,13 +17138,13 @@ app.get('/admin/herosms/catalogo',async(req,res)=>{
       const grupos=[...apps.values()].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
       const itens=grupos.map(app=>{
         const paises=app.rows.map(x=>`<tr><td>${safeHtml(x.country_name||x.country)} <small>(${safeHtml(x.country)})</small></td><td>${Number(x.stock).toLocaleString('pt-BR')}</td><td>${Number(x.cost).toFixed(2)} ${safeHtml(currency)}</td><td>${rate>0?brl(Number(x.cost)*rate+margin):'Aguardando cotação'}</td><td><form method="post" action="/admin/herosms/ativar"><input type="hidden" name="country" value="${safeHtml(x.country)}"><input type="hidden" name="service" value="${safeHtml(x.service)}"><select name="active"><option value="1" ${x.active?'selected':''}>Ativo</option><option value="0" ${!x.active?'selected':''}>Inativo</option></select><button>Salvar</button></form></td></tr>`).join('');
-        return `<details class="hero-app" data-search="${safeHtml((app.nome+' '+app.code+' '+app.rows.map(x=>x.country_name||x.country).join(' ')).toLowerCase())}"><summary><strong>${safeHtml(app.nome)}</strong> <small>(${safeHtml(app.code)})</small> <span class="hero-count">${app.estoque.toLocaleString('pt-BR')} números • ${app.rows.length} países</span></summary><div class="hero-scroll"><table><thead><tr><th>País</th><th>Estoque</th><th>Custo</th><th>Venda</th><th>Status</th></tr></thead><tbody>${paises}</tbody></table></div></details>`;
+        return `<details class="hero-app" data-search="${safeHtml((app.nome+' '+app.code+' '+app.rows.map(x=>x.country_name||x.country).join(' ')).toLowerCase())}"><summary><strong>${safeHtml(app.nome)}</strong> <small>(${safeHtml(app.code)})</small> <span class="hero-count">${app.estoque.toLocaleString('pt-BR')} números nesta página • ${app.rows.length} países nesta página</span></summary><div class="hero-scroll"><table><thead><tr><th>País</th><th>Estoque</th><th>Custo</th><th>Venda</th><th>Status</th></tr></thead><tbody>${paises}</tbody></table></div></details>`;
       }).join('');
       return `<details class="hero-category" data-category="${safeHtml(cat.toLowerCase())}"><summary><strong>${safeHtml(cat)}</strong> <span class="hero-count">${grupos.length} aplicativos</span></summary><div class="hero-apps">${itens}</div></details>`;
     }).join('');
     const styles=`<style>.hero-category,.hero-app{border:1px solid #64748b55;border-radius:12px;margin:10px 0;overflow:hidden}.hero-category>summary,.hero-app>summary{cursor:pointer;padding:15px;list-style:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap}.hero-category>summary::-webkit-details-marker,.hero-app>summary::-webkit-details-marker{display:none}.hero-category>summary:before,.hero-app>summary:before{content:'▸';font-size:18px}.hero-category[open]>summary:before,.hero-app[open]>summary:before{content:'▾'}.hero-apps{padding:0 12px 12px}.hero-app{margin:7px 0}.hero-count{margin-left:auto;font-size:13px;opacity:.8}.hero-scroll{overflow-x:auto;padding:0 10px 12px}.hero-scroll table{width:100%;min-width:580px}.hero-scroll form{display:flex;gap:6px;align-items:center}.hero-scroll button{margin:0}.hero-summary{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}.hero-summary>span{padding:10px;border:1px solid #64748b55;border-radius:10px}</style>`;
-    const filterJs=`<script>function heroFiltrar(){const q=document.getElementById('heroFilter').value.trim().toLocaleLowerCase('pt-BR');document.querySelectorAll('.hero-category').forEach(cat=>{let vis=0;cat.querySelectorAll('.hero-app').forEach(app=>{const ok=!q||app.dataset.search.includes(q)||cat.dataset.category.includes(q);app.hidden=!ok;if(ok)vis++;if(q&&ok)app.open=true;else if(!q)app.open=false;});cat.hidden=!vis;if(q&&vis)cat.open=true;else if(!q)cat.open=false;});}</script>`;
-    res.send(page('Hero SMS — catálogo',`${styles}<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}${visibilidadeHtml}<p>🔒 Vendas habilitadas pelo checkout; valide os fluxos em ambiente de teste antes de produção.</p><form method="post" action="/admin/herosms/importar"><button>🔄 Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo</label><input name="rate" value="${rate||''}"><button>Salvar precificação</button></form><div class="hero-summary"><span><b>${rows.length.toLocaleString('pt-BR')}</b> ofertas importadas</span><span><b>${somaOfertas.toLocaleString('pt-BR')}</b> ofertas ativas com estoque</span><span><b>${estoqueOfertas.toLocaleString('pt-BR')}</b> números somados entre ofertas*</span></div><p><small>*Soma do estoque informado por país e serviço. Não representa necessariamente números únicos, pois a API pode compartilhar estoque.</small></p><label>Buscar aplicativo, país ou código</label><input id="heroFilter" placeholder="Ex.: WhatsApp, Telegram, Brasil" oninput="heroFiltrar()"><p>As categorias começam fechadas. Clique para abrir aplicativos e depois os países. Desativações manuais são preservadas na sincronização.</p>${categoriasHtml||'<p>Nenhuma oferta importada.</p>'}</div>${filterJs}`));
+    const filterJs='';
+    res.send(page('Hero SMS — catálogo',`${styles}<div class="hero"><h1>📱 Hero SMS — Aplicativos e países</h1></div><div class="card"><a href="/admin/herosms">Voltar para APIs</a>${req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:''}${req.query.erro?`<p style="color:#ef4444">${safeHtml(req.query.erro)}</p>`:''}${alert}${visibilidadeHtml}<p>🔒 Vendas habilitadas pelo checkout; valide os fluxos em ambiente de teste antes de produção.</p><form method="post" action="/admin/herosms/importar"><button>🔄 Importar / atualizar todas as ofertas</button></form><form method="post" action="/admin/herosms/precos"><label>Margem fixa em reais</label><input name="margin" value="${margin.toFixed(2)}"><label>Moeda de custo (RUB, USD, BRL)</label><input name="currency" value="${safeHtml(currency)}"><label>R$ por unidade da moeda de custo</label><input name="rate" value="${rate||''}"><button>Salvar precificação</button></form><div class="hero-summary"><span><b>${Number(totals?.offers||0).toLocaleString('pt-BR')}</b> ofertas importadas</span><span><b>${somaOfertas.toLocaleString('pt-BR')}</b> ofertas ativas com estoque</span><span><b>${estoqueOfertas.toLocaleString('pt-BR')}</b> números somados entre ofertas*</span></div><p><small>*Soma do estoque informado por país e serviço. Não representa necessariamente números únicos, pois a API pode compartilhar estoque.</small></p><form method="get" action="/admin/herosms/catalogo"><label>Buscar aplicativo, país ou código</label><input id="heroFilter" name="q" value="${safeHtml(search)}" placeholder="Ex.: WhatsApp, Telegram, Brasil"><button type="submit">Buscar</button> <a href="/admin/herosms/catalogo">Limpar busca</a></form>${navigation}<p>As categorias começam fechadas. Clique para abrir aplicativos e depois os países. Desativações manuais são preservadas na sincronização.</p>${categoriasHtml||'<p>Nenhuma oferta encontrada nesta busca.</p>'}${navigation}</div>${filterJs}`));
   }catch(e){res.status(500).send('Falha ao abrir catálogo: '+safeHtml(e.message));}
 });
 app.post('/admin/herosms/visibilidade',async(req,res)=>{
@@ -17132,13 +17198,11 @@ app.post('/admin/herosms/teste-compra',async(req,res)=>{
     if(pending)throw new Error('Existe uma solicitação pendente/incerta (#'+pending.id+'). Confira na Hero SMS antes de comprar outra.');
     const result=await run('INSERT INTO hero_sms_admin_tests(service,country,status) VALUES(?,?,?)',[m[1],m[2],'solicitando']);
     id=result.lastID;
-    const raw=await heroSmsApi('getNumberV2',{service:m[1],country:m[2]});
-    let parsed;try{parsed=JSON.parse(raw);}catch{parsed=null;}
-    const activation=parsed?.activationId??parsed?.activation_id??parsed?.id;
-    const phone=parsed?.phoneNumber??parsed?.phone_number??parsed?.phone;
-    if(!activation||!phone){
-      await heroAdminTestUpdate(id,{status:'incerto',api_response:'Resposta inesperada: '+raw.slice(0,180)});
-      throw new Error('Resposta inesperada. Confira ativações no site; NÃO repita a compra automaticamente.');
+    const response=await heroSmsV1('POST','/activations',{service:m[1],country:Number(m[2]),amount:1,verificationType:'sms'});
+    const {activationId:activation,phoneNumber:phone}=heroProtocol.parsePurchasedActivation(response);
+    if(!phone){
+      await heroAdminTestUpdate(id,{activation_id:activation,status:'incerto',api_response:'Fornecedor retornou ID sem número confirmado'});
+      throw new Error('Resposta incompleta. Confira ativações no site; NÃO repita a compra automaticamente.');
     }
     await heroAdminTestUpdate(id,{activation_id:String(activation),phone:String(phone),status:'numero_recebido',api_response:'Número reservado; aguardando SMS'});
     res.redirect('/admin/herosms/teste-compra?ok='+encodeURIComponent('Compra #'+id+' realizada. Número: '+phone));
@@ -17161,6 +17225,18 @@ app.post('/admin/herosms/teste-compra/acao',async(req,res)=>{
 });
 
 const heroAdminReconcileToken=crypto.randomBytes(24).toString('hex');
+app.post('/admin/herosms/pedidos/:id/encerrar-teste',async(req,res)=>{
+  const id=Number(req.params.id);
+  if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página do pedido antes de confirmar.');
+  try{
+    if(req.body?.confirmar_teste!=='sim')throw new Error('Confirme que este é um teste já encerrado no fornecedor.');
+    const message=await heroCloseTestOrder(id);
+    res.redirect('/admin/herosms/pedidos/'+id+'?ok='+encodeURIComponent(message));
+  }catch(e){
+    if(!Number.isSafeInteger(id)||id<1)return res.status(400).send('Pedido inválido');
+    res.redirect('/admin/herosms/pedidos/'+id+'?erro='+encodeURIComponent(checkoutDiagnostic(e,'HERO-TEST-'+id).message));
+  }
+});
 app.post('/admin/herosms/pedidos/:id/conferir-cancelamento',async(req,res)=>{
   const id=Number(req.params.id);
   if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página do pedido antes de confirmar.');
@@ -17186,7 +17262,9 @@ app.get('/admin/herosms/pedidos/:id',async(req,res)=>{
     const notice=req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:req.query.erro?`<p>${safeHtml(req.query.erro)}</p>`:'';
     const canReconcile=!o.sms_code&&['uncertain','purchasing','paid','number_received','cancel_pending','canceled'].includes(o.status);
     const syncForm=canReconcile?`<h3>Cancelado manualmente na Hero SMS?</h3><p>Informe o ID da ativação no fornecedor. Esta ação consulta o cancelamento e atualiza o cliente, sem executar outro cancelamento nem creditar saldo automaticamente.</p><form method="post" action="/admin/herosms/pedidos/${id}/conferir-cancelamento"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label>ID da ativação Hero SMS</label><input name="activation_id" value="${safeHtml(o.activation_id||'')}" inputmode="numeric" pattern="[0-9]{1,30}" required><label><input type="checkbox" name="confirmar_vinculo" value="sim" required> Confirmo que esta ativação pertence ao pedido #${id}</label><button type="submit">Conferir cancelamento e atualizar cliente</button></form>`:'';
-    res.send(page('Pedido Hero SMS #'+id,`<div class="hero"><h1>📦 Pedido Hero SMS #${id}</h1></div><div class="card">${notice}<p><a href="/admin/herosms/pedidos">Voltar aos pedidos</a></p><p><b>Estado:</b> ${safeHtml(o.status)}</p><p><b>Pagamento:</b> ${safeHtml(o.payment_method)} • ${brl(o.price_brl)}</p><p><b>Ativação:</b> ${safeHtml(o.activation_id||'Não registrada')}</p><p><b>Número:</b> ${safeHtml(o.phone||'Não registrado')}</p><p><b>Crédito na carteira:</b> ${safeHtml(o.refund_status)}</p>${payment?`<p><b>Pix:</b> ${safeHtml(payment.gateway)} • ${safeHtml(payment.status)} • ${brl(payment.valor)}</p>`:''}<h3>Motivo registrado</h3><pre style="white-space:pre-wrap">${safeHtml(diagnostic)}</pre><p>Se o pedido estiver em verificação, confira o histórico da Hero SMS antes de repetir a compra ou liberar saldo.</p>${syncForm}</div>`));
+    const canCloseTest=o.status==='uncertain'&&!o.activation_id&&!o.phone&&!o.sms_code;
+    const closeForm=canCloseTest?`<h3>Encerrar pedido de teste</h3><p>Use apenas se este pedido foi um teste já encerrado no fornecedor. Remove o bloqueio deste pedido e para sua recuperação automática. Não gera compra, não altera o pagamento Pix e não credita nem debita saldo.</p><form method="post" action="/admin/herosms/pedidos/${id}/encerrar-teste"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label><input type="checkbox" name="confirmar_teste" value="sim" required> Confirmo que este pedido é um teste já encerrado no fornecedor</label><button type="submit">Encerrar teste e liberar novas compras</button></form>`:'';
+    res.send(page('Pedido Hero SMS #'+id,`<div class="hero"><h1>📦 Pedido Hero SMS #${id}</h1></div><div class="card">${notice}<p><a href="/admin/herosms/pedidos">Voltar aos pedidos</a></p><p><b>Estado:</b> ${safeHtml(o.status)}</p><p><b>Pagamento:</b> ${safeHtml(o.payment_method)} • ${brl(o.price_brl)}</p><p><b>Ativação:</b> ${safeHtml(o.activation_id||'Não registrada')}</p><p><b>Número:</b> ${safeHtml(o.phone||'Não registrado')}</p><p><b>Crédito na carteira:</b> ${safeHtml(o.refund_status)}</p>${payment?`<p><b>Pix:</b> ${safeHtml(payment.gateway)} • ${safeHtml(payment.status)} • ${brl(payment.valor)}</p>`:''}<h3>Motivo registrado</h3><pre style="white-space:pre-wrap">${safeHtml(diagnostic)}</pre><p>Se o pedido estiver em verificação, confira o histórico da Hero SMS antes de repetir a compra ou liberar saldo.</p>${syncForm}${closeForm}</div>`));
   }catch(e){res.status(500).send('Erro ao abrir diagnóstico do pedido Hero SMS');}
 });
 app.get('/admin/herosms/pedidos',async(req,res)=>{
@@ -17300,7 +17378,7 @@ try {
     : 'não encontradas');
 } catch (e) { console.log('⚠️ Falha ao verificar a sessão persistente:', e.message); }
 
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 SERVIDOR ONLINE NA PORTA ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 CENTRALUNLOCKER ${APP_RELEASE} ONLINE NA PORTA ${PORT}`));
 // Inicializa o banco pelo fluxo do Telegram e, em seguida, carrega todas as
 // sessões de WhatsApp. Isso evita duas migrações SQLite rodando ao mesmo tempo.
 iniciarTelegram()

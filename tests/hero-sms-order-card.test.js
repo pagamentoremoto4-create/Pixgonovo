@@ -55,3 +55,10 @@ test('unresolved purchase and payment states explain the block without offering 
   assert.ok(!card.text.includes('Solicitar cancelamento'));assert.ok(!card.text.includes('Pagar'));
  }
 });
+
+test('explicit navigation adopts the current Telegram message, and future SMS edits reuse it',async()=>{
+ const f=fixture();await f.messenger.update(1);
+ await f.messenger.update(1,{reference:{transport:'telegram',messageId:77,kind:'caption'}});
+ f.order.status='sms_received';f.order.sms_code='012345';await f.messenger.update(1);
+ assert.equal(f.calls.send.length,1);assert.equal(f.calls.edit.length,2);assert.equal(f.calls.edit[1].r.messageId,77);
+});

@@ -1,40 +1,40 @@
-CENTRALUNLOCKER — PACOTE COMPLETO ATUALIZADO
+CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.5
 
-Inclui o projeto completo, assets, testes e correções da integração Hero SMS.
+INSTALAR / ATUALIZAR
+1. Extraia o ZIP e atualize os arquivos de código do projeto.
+2. Preserve o DATA_DIR existente, seu banco, sessões WhatsApp e variáveis de ambiente.
+   O pacote não inclui banco, senhas, sessões privadas ou node_modules.
+3. Instale as dependências com npm ci (ou o buildCommand já configurado no Render).
+4. Inicie com npm start.
+5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.5.
 
-INSTALAÇÃO
-1. Extraia o ZIP.
-2. Instale as dependências com npm ci.
-3. Configure as variáveis a partir de .env.example ou mantenha as variáveis
-   que você já usa na hospedagem. O arquivo .env privado não faz parte do ZIP.
-4. Execute npm run test:hero para conferir os testes.
-5. Inicie com npm start.
+LIBERAR O PEDIDO #15 DECLARADO COMO TESTE
+No painel CENTRALUNLOCKER, abra Hero SMS > Pedidos > #15 — Abrir.
+Em "Encerrar pedido de teste", confirme a declaração e clique em
+"Encerrar teste e liberar novas compras".
+A ação afeta apenas o pedido escolhido e para sua recuperação automática.
+Não altera o Pix, não devolve dinheiro e não credita ou debita saldo.
+O registro permanece no histórico com auditoria; não é apagado.
+Essa ação precisa ser feita pelo administrador na hospedagem após a atualização.
+Nenhum registro real do seu servidor foi alterado durante o desenvolvimento.
 
-Na atualização de uma instalação existente, mantenha o banco e as sessões no
-DATA_DIR persistente já configurado. O pacote contém código; não contém banco,
-senhas, sessões WhatsApp, node_modules ou dados locais de teste.
+CORREÇÕES CONSOLIDADAS
+- Novas compras Hero SMS usam POST /api/v1/activations, amount=1, verificationType=sms.
+  Não repete compra de resultado incerto e não tenta outro endpoint automaticamente.
+- Troca suporta uma nova identificação de ativação devolvida na resposta autenticada.
+- Telegram atualiza o card visível e usa edição de legenda quando houver mídia.
+- O SMS chega por atualização automática do card, sem consulta manual de código.
+- Pix usa o gateway padrão ATIVO do painel, com CPF/CNPJ para DePix Pay quando exigido.
+- MisticPay lê transaction.value; ID, valor, cliente e estado continuam conferidos.
+- Recuperação de Pix após reinício sem comprar o mesmo pedido duas vezes.
+- Cancelamentos externos reconhecem STATUS_CANCEL e atualizam o cliente por fila.
+- Catálogo paginado em 100 ofertas, busca no servidor e totais de todo o banco.
+- Rota /health criada para corresponder à configuração do Render.
 
-A documentação detalhada está em CORRECOES-HERO-SMS.md.
-79 testes locais passaram com o provedor e os canais simulados.
+VERIFICAÇÃO
+98 testes com SQLite e APIs/canais simulados passaram.
+As verificações locais não são homologação com suas contas e não geraram
+cobranças, compras ou estornos reais.
 
-O SMS atualiza o card automaticamente por consulta a cada 20 segundos.
-Quando a edição não for possível, é enviada uma mensagem substituta.
-
-Cancelamentos confirmados pelo bot devolvem o preço integral à carteira,
-inclusive para compras pagas por Pix. Não há estorno bancário do Pix nesse fluxo.
-
-PENDÊNCIA: o mapeamento legado status 10 do histórico como reembolso ainda
-precisa de confirmação do fornecedor; o OpenAPI enviado não define o significado
-dos números do enum. Leia a auditoria antes de ativar vendas em produção.
-
-Pacote V10.1.1: correção da identificação do cliente no checkout, mensagens de erro
-específicas e datas do histórico no formato documentado. Consulte CORRECOES-HERO-SMS.md.
-
-Pacote V10.1.2: revisão Pix com gateway padrão ativo do painel, coleta de documento
-DePix Pay, correção do QR no WhatsApp, validação de pagamento e recuperação após
-reinício. Para pedido bloqueado, abra Hero SMS > Pedidos > Abrir e leia o motivo.
-Atualize o código preservando seu DATA_DIR, banco, sessões e variáveis de ambiente.
-
-Pacote V10.1.3: cancelamento manual na Hero SMS atualiza o cliente via status e fila
-persistente. Se o pedido não tem ID de ativação, use a conferência administrativa
-na página do pedido com o ID correto do fornecedor. Essa ação não credita saldo.
+Leia CORRECOES-HERO-SMS.md para detalhes e limites, inclusive o mapeamento legado
+dos status numéricos do histórico que ainda requer confirmação da Hero SMS.
