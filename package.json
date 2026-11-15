@@ -1,12 +1,13 @@
 {
   "name": "centralunlocker-revendas",
-  "version": "10.1.10",
+  "version": "10.1.11",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "test:ggsoma": "node test/ggsoma.test.js",
     "test:premium": "node test/premium.test.js",
-    "test:hero": "node --test tests/hero-sms-*.test.js"
+    "test:hero": "node --test tests/hero-sms-*.test.js",
+    "test:community": "node --test tests/community-hub.test.js"
   },
   "dependencies": {
     "axios": "^1.7.9",

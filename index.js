@@ -1,5 +1,6 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.10';
+const APP_RELEASE='10.1.11';
+const {createHub,allowedCallback:communityAllowedCallback}=require('./community-hub');
 const heroProtocol = require('./hero-sms-protocol');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
@@ -3079,7 +3080,7 @@ function page(title, body, options={}) {
   const bgMode = ['strong','soft','none'].includes(options.bgModeOverride) ? options.bgModeOverride : PAINEL_BG_MODE;
   const efeitos = typeof options.effectsOverride === 'boolean' ? options.effectsOverride : PAINEL_EFEITOS;
   const isProTheme = ['central-hacker-pro','command-blue','cyber-purple','security-red','gold-premium'].includes(themeId);
-  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/apis">🔌 <span>APIs</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/apis">🔌 <span>APIs</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
+  const sidebarHtml = isProTheme ? `<aside class="side pro-side" id="adminSide"><div class="pro-logo"><div class="pro-lock">🔐</div><div><strong>CENTRAL<br><em>UNLOCKER</em></strong><small>UNLOCK EVERYTHING</small></div></div><nav class="pro-nav"><a href="/admin">⌂ <span>Dashboard</span></a><a href="/admin/pedidos">▣ <span>Pedidos</span></a><a href="/admin/dados-internos-imei">⌕ <span>Base Dados IMEI</span></a><a href="/admin/revendas">♙ <span>Clientes</span></a><a href="/admin/servicos">⚒ <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">▤ <span>eSIM</span></a><a href="/admin/esim-compartilhado">⇄ <span>Estoque compartilhado</span></a><a href="/admin/mensagens">◉ <span>Mensagens</span></a><a href="/admin/comunidade">📣 Canais e vendas</a><a href="/admin/anuncios">◈ <span>Anúncios automáticos</span></a><a href="/admin/financeiro">◉ <span>Financeiro</span></a><a href="/admin/pagamentos-config">▣ <span>Formas de pagamento</span></a><a href="/admin/relatorios">▥ <span>Relatórios</span></a><a href="/admin/backup">▤ <span>Backup</span></a><a href="/admin/whatsapp">◉ <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">♢ <span>Destinatários de avisos</span></a><a href="/admin/temas">◈ <span>Temas do Painel</span></a><a href="/admin/premium">⭐ Assinaturas Premium</a><a href="/admin/apis">🔌 <span>APIs</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙ <span>Configurações</span></a><a href="/admin/logout">↪ <span>Sair</span></a></nav><div class="pro-quote-card"><img src="/theme-banner/central-hacker-pro-side.jpg?v=106" alt="Hacker CentralUnlocker"><blockquote>“A persistência<br>é o caminho do êxito.”</blockquote><small>— Central Unlocker</small></div></aside>` : `<aside class="side" id="adminSide"><div class="brand"><span class="brand-text">CentralUnlocker</span></div><div class="nav-title">Painel</div><a href="/admin">📊 <span>Dashboard</span></a><a href="/admin/pedidos">📋 <span>Pedidos</span></a><a href="/admin/dados-internos-imei">🔎 <span>Base Dados IMEI</span></a><a href="/admin/revendas">👥 <span>Clientes</span></a><a href="/admin/servicos">🛠 <span>Serviços</span></a><a href="/admin/ofertas">📷 <span>Fotos e ofertas</span></a><a href="/admin/menu-whatsapp">☰ <span>Menu WhatsApp</span></a><a href="/admin/esim">📱 <span>eSIM</span></a><a href="/admin/esim-compartilhado">🔗 <span>Estoque compartilhado</span></a><a href="/admin/mensagens">📢 <span>Mensagens</span></a><a href="/admin/comunidade">📣 Canais e vendas</a><a href="/admin/anuncios">📣 <span>Anúncios automáticos</span></a><a href="/admin/financeiro">💰 <span>Financeiro</span></a><a href="/admin/pagamentos-config">💳 <span>Formas de pagamento</span></a><a href="/admin/relatorios">📈 <span>Relatórios</span></a><a href="/admin/backup">💾 <span>Backup</span></a><div class="nav-title">Sistema</div><a href="/admin/whatsapp">📲 <span>Conectar WhatsApp</span></a><a href="/admin/destinatarios-avisos">🔔 <span>Destinatários de avisos</span></a><a href="/admin/temas">🎨 <span>Temas do Painel</span></a><a href="/admin/apis">🔌 <span>APIs</span></a><a href="/admin/consultas-assinatura">🔎 <span>Consultas por assinatura</span></a><a href="/admin/consultavip">🕵️ <span>CONSULTAVIP</span></a><a href="/admin/config">⚙️ <span>Configurações</span></a><a href="/admin/logout">🚪 <span>Sair</span></a><div class="side-profile"><b>Admin Master</b></div></aside>`;
   const headerHtml = isProTheme ? `<div class="admin-head pro-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="pro-search">⌕ <span>Buscar no sistema...</span></div><div class="pro-head-items"><span>🟢 <b>BOT WHATSAPP</b><small>Conectado</small></span><span>◷ <b class="head-clock" id="headClock"></b></span><span>🔔</span><span class="pro-admin">🧑‍💻 <b>Admin</b><small>MASTER</small></span></div></div>` : `<div class="admin-head"><button type="button" class="menu-toggle" id="menuToggle" aria-label="Abrir ou recolher menu">☰</button><div class="head-brand"><b>CentralUnlocker</b><span>Central de administração</span></div><div class="head-status"><span class="system-dot" id="systemDot"></span><span id="systemText">Sistema online</span><span class="head-clock" id="headClock"></span></div></div>`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeHtml(title)}</title>
   <style>
@@ -4985,6 +4986,8 @@ async function enviarExtrasRodadaCentral(campanha,texto,imagemPath){
     try{const r=await enviarTelegramCentral(campanha,texto,imagemPath);total+=r.total;enviadas+=r.enviadas;falhas+=r.falhas;detalhes.push(`Telegram ${r.enviadas}/${r.total}`)}
     catch(e){falhas++;detalhes.push(`Telegram: ${e.message}`)}
   }
+
+  if(Number(campanha.community_tg_ads)||Number(campanha.community_wa_ads)){const r=await communityHub.ads(campanha,await textoCampanhaPorCanal(campanha,'telegram'),imagemPath);detalhes.push(...r.detalhes);}
   return {total,enviadas,falhas,detalhes};
 }
 async function enviarGruposCentral(campanha,texto,imagemPath){
@@ -5008,6 +5011,7 @@ async function enviarGruposCentral(campanha,texto,imagemPath){
   return {total:grupos.length,enviadas,falhas};
 }
 async function enviarAnuncioCentral(campanha){
+  if(!campanha.proximo_envio)campanha={...campanha,community_round:crypto.randomUUID()};
   const texto=String(campanha.mensagem||'').trim();
   const imagemPath=await imagemCampanhaCentralEnvio(campanha);
   const detalhes=[]; let total=0,enviadas=0,falhas=0;
@@ -5024,8 +5028,10 @@ async function enviarAnuncioCentral(campanha){
     try{const r=await enviarGruposCentral(campanha,texto,imagemPath);total+=r.total;enviadas+=r.enviadas;falhas+=r.falhas;detalhes.push(`Grupos ${r.enviadas}/${r.total}`)}
     catch(e){falhas++;detalhes.push(`Grupos: ${e.message}`)}
   }
-  if(!Number(campanha.destino_grupos_whatsapp||0)&&!Number(campanha.destino_status_whatsapp||0)&&!Number(campanha.destino_telegram_central||0)) throw new Error('Nenhum canal selecionado.');
-  const canais=[Number(campanha.destino_grupos_whatsapp)?'Grupos':'',Number(campanha.destino_status_whatsapp)?'Status':'',Number(campanha.destino_telegram_central)?'Telegram':''].filter(Boolean).join(' + ');
+
+  if(Number(campanha.community_tg_ads)||Number(campanha.community_wa_ads)){const r=await communityHub.ads(campanha,await textoCampanhaPorCanal(campanha,'telegram'),imagemPath);detalhes.push(...r.detalhes);}
+  if(!Number(campanha.community_tg_ads)&&!Number(campanha.community_wa_ads)&&!Number(campanha.destino_grupos_whatsapp||0)&&!Number(campanha.destino_status_whatsapp||0)&&!Number(campanha.destino_telegram_central||0)) throw new Error('Nenhum canal selecionado.');
+  const canais=[Number(campanha.community_tg_ads)?'Canal Telegram (fila)':'',Number(campanha.community_wa_ads)?'Canal WhatsApp (fila)':'',Number(campanha.destino_grupos_whatsapp)?'Grupos':'',Number(campanha.destino_status_whatsapp)?'Status':'',Number(campanha.destino_telegram_central)?'Telegram':''].filter(Boolean).join(' + ');
   await run(`INSERT INTO historico_anuncios_central(campanha_id,nome,canais,total,enviadas,falhas,detalhes,status) VALUES(?,?,?,?,?,?,?,?)`,[campanha.id,campanha.nome,canais,total,enviadas,falhas,detalhes.join(' | '),falhas&&enviadas===0?'ERRO':'CONCLUIDO']);
   await avancarFotoCampanha(campanha,enviadas);
   return {total,enviadas,falhas,detalhes:detalhes.join(' | '),canais};
@@ -5565,6 +5571,7 @@ async function garantirMenuNativoTelegram(chatId){
 
 async function enviarMenuTelegram(chatId, cliente) {
   if (!tgBot) return;
+  if(!await communityHub.access(chatId))return;
   const texto = menuTelegramTexto(cliente);
   await garantirMenuNativoTelegram(chatId);
   const opts = await tecladoTelegramMenu(cliente);
@@ -5712,6 +5719,7 @@ async function heroSmsTelegramResultados(chatId,mensagem,from,termo){
 }
 
 async function processarMensagemTelegram(msg) {
+  if(msg?.chat?.type!=='private')return;
   if(await premium.adminMessage(msg))return;
   if (!msg?.from?.id || !msg?.chat?.id) return;
   const fromAdmin = tgJid(msg.from.id);
@@ -5858,7 +5866,7 @@ async function processarMensagemTelegram(msg) {
   const textoOriginal = String(msg.text || '').trim();
   const texto = textoOriginal.toLowerCase().trim();
   if (!textoOriginal) return;
-  if (texto === '/start' || texto === '/senha') return;
+  if (/^\/start(?:@\w+)?(?:\s|$)/.test(texto) || texto === '/senha') return;
   if (String(msg.from.id) === String(ADMIN_TELEGRAM_ID || '')) {
     if (texto === '/admin' || texto === 'admin' || texto === 'painel' || texto === 'administração' || texto === 'administracao' || texto === '🔐 administração') {
       await enviarPainelAdminTelegram(msg.chat.id, true);
@@ -5903,6 +5911,11 @@ Envie este código para o WhatsApp da CentralUnlocker:
     return;
   }
 
+  const communitySession=await carregarSessaoPedido(from);
+  const communityReadOnly=(['3','4','6'].includes(opcao)&&(!communitySession||communitySession.etapa==='menu'))||/^(?:historico|histórico|pedidos|meus pedidos|saldo|conta|suporte|ajuda|cancelar|voltar|sair|menu|0)$/.test(texto);
+  const communityPaidSession=/^(?:hero_(?:order|status|codes)|suporte|historico|atendimento)/.test(communitySession?.etapa||'');
+  const communityPurchaseText=/^(?:comprar|solicitar|assinar|esim|premium|serviços|servicos|pagar|\/pagar)(?:\s|$)/i.test(texto)||/^\d+$/.test(opcao)||/^(?:premium_|esim_|hero_(?:cpf|tg_search)|aguardando_(?:imei|cpf|pagamento|gateway)|saldo_insuficiente|servico_|dhru_campo|entrada)/.test(communitySession?.etapa||'');
+  if(communityPurchaseText&&!communityReadOnly&&!communityPaidSession&&!await communityHub.access(msg.from.id))return;
   const sessHeroTelegram=await carregarSessaoPedido(from);
   if(await heroHandlePixDocument(from,cliente,sessHeroTelegram,textoOriginal))return;
   if(sessHeroTelegram?.etapa==='hero_tg_search'){
@@ -8425,6 +8438,10 @@ async function responderBotaoAdminTelegram(chatId, data) {
 
 async function iniciarTelegram() {
   await initDB();
+  await communityHub.init();
+  await addColumnIfMissing('campanhas_anuncios','community_tg_ads','INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing('campanhas_anuncios','community_wa_ads','INTEGER NOT NULL DEFAULT 0');
+  communityHub.start();
   iniciarWorkerAnuncios();
   if (!TELEGRAM_BOT_TOKEN || !TelegramBot) {
     console.log('⚠️ TELEGRAM_BOT_TOKEN não configurado. Servidor online apenas com painel.');
@@ -8442,8 +8459,11 @@ async function iniciarTelegram() {
   // V4.6 — botão Menu nativo do Telegram (canto inferior esquerdo).
   // Abre a lista de comandos; /start é o atalho principal para a HOME.
   await garantirMenuNativoTelegram();
-  tgBot.onText(/\/start/, async (msg) => {
+  tgBot.onText(/^\/start(?:@\w+)?(?:\s+([A-Za-z0-9_-]{1,64}))?$/, async (msg,match) => {
     try {
+      if(msg.chat.type!=='private')return;
+      if(match?.[1])return communityResume(msg,match[1]);
+      if(!await communityHub.access(msg.from.id,'menu'))return;
       try { const r=await tgBot.sendMessage(msg.chat.id, '⌨️', { reply_markup:{ remove_keyboard:true } }); await tgBot.deleteMessage(msg.chat.id, r.message_id).catch(()=>{}); } catch(_) {}
       const { cliente, novo } = await cadastrarClienteTelegram(msg.from);
       if (novo) {
@@ -8494,6 +8514,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         console.log(`⚠️ V4940 CALLBACK SEM CHAT: data=${data || '(vazio)'}`);
         return;
       }
+      if(data==='community_verify'){await tgBot.answerCallbackQuery(q.id);if(String(chatId)!==String(q.from.id))return;return communityResume({from:q.from,chat:q.message.chat},await communityHub.takeIntent(q.from.id)||'menu');}
       const ehBotaoAdmin = data.startsWith('admin_') || data.startsWith('adm');
       if (ehBotaoAdmin) {
         if (String(q.from?.id) !== String(ADMIN_TELEGRAM_ID || '')) {
@@ -8616,6 +8637,8 @@ Digite /menu para solicitar serviços pelo Telegram.`);
       // Botões do cliente no Telegram
       const ehBotaoCliente = data.startsWith('hero_sms_') || data.startsWith('homecat_') || data.startsWith('svc_cat_') || data.startsWith('prem_') || data.startsWith('menu_') || data.startsWith('servico_') || data.startsWith('pagar_') || data.startsWith('saldo_') || data.startsWith('gateway_') || data.startsWith('comprar_') || data.startsWith('pixdoc_') || data.startsWith('esim_op_') || /^esim_(\d+|confirmar_\d+|cancelar_compra|ddd_\d+_\d{2}|aleatorio_\d+|device_(?:iphone|android)_\d+|qty_(?:minus|plus)_\d+|pay_(?:saldo|pix)_\d+|manual_\d+)$/.test(data);
       if (ehBotaoCliente) {
+        if(String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Abra o serviço no privado do bot.'});return;}
+        if(!communityAllowedCallback(data)&&!await communityHub.access(q.from.id,communityIntentForCallback(data))){await tgBot.answerCallbackQuery(q.id);return;}
         if(data.startsWith('hero_sms_')&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Abra o serviço no privado do bot.'});return;}
         if((data==='menu_premium'||data.startsWith('prem_'))&&String(chatId)!==String(q.from.id)){await tgBot.answerCallbackQuery(q.id,{text:'Compre no privado do bot.'});return;}
         const { cliente } = await cadastrarClienteTelegram(q.from);
@@ -13714,6 +13737,46 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
+const communityHub=createHub({run,get,all,adminId:ADMIN_TELEGRAM_ID,bot:()=>tgBot,
+ socket:async()=> (await sessaoParaAnuncios())?.socket||null,groups:listarGruposAnuncios,
+ links:communityPurchaseLinks,orderPayload:communityOrderPayload,adLinks:async c=>communityPurchaseLinks(communityCampaignPayload(c))});
+communityHub.mount(app,page);
+async function communityOrderPayload(order){
+ if(order.servico_id){const service=await get('SELECT api_provider FROM servicos_catalogo WHERE id=?',[order.servico_id]);return (service?.api_provider==='GGSOMA'?'premium_':'servico_')+order.servico_id;}
+ if(/^eSIM\s/i.test(order.servico_nome||'')){const name=String(order.servico_nome).replace(/^eSIM\s+/i,'');const plan=await get('SELECT id FROM esim_planos WHERE nome_plano=? AND ativo=1',[name]);if(plan)return 'esim_'+plan.id;}
+ return 'menu';
+}
+function communityIntentForCallback(data){if(data.startsWith('hero_sms_'))return 'hero';if(/^(servico|esim)_\d+$/.test(data))return data;if(/^prem_show_\d+$/.test(data))return data.replace('prem_show_','premium_');return undefined;}
+function communityCampaignPayload(c){
+ const type=tipoCompraCampanha(c),ref=Number(c.compra_ref||c.servico_id_compra||c.produto_id||0);
+ return type==='HERO_SMS'?'hero':type==='CONSULTAVIP'?'consulta':type==='PREMIUM'?'premium_'+ref:type==='SERVICO'||type==='LEGACY_SERVICO'?'servico_'+ref:type==='ESIM'||type==='LEGACY_ESIM'?'esim_'+ref:'menu';
+}
+let communityBotIdentity=null;
+async function communityPurchaseLinks(payload){
+ let telegram='',whatsapp='';
+ try{if(!communityBotIdentity&&tgBot)communityBotIdentity=await tgBot.getMe();const me=communityBotIdentity;if(me?.username)telegram='https://t.me/'+me.username+'?start='+encodeURIComponent(payload);}catch(_){}
+ const numero=await numeroBotServicosAnuncio();let phrase='menu';
+ if(payload==='hero')phrase='Comprar numero WhatsApp';
+ if(payload==='consulta'){
+  phrase='Assinar ConsultaVIP';const user=String(await getConfig('consultavip_bot_username','')).replace(/^@/,'');
+  if(user)telegram='https://t.me/'+user+'?start=planos';
+ }
+ let m=payload.match(/^(servico|esim|premium)_(\d+)$/);
+ if(m){if(m[1]==='servico'){const sv=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[Number(m[2])]);if(sv)phrase=fraseCompraServicoAnuncio(sv);}
+ if(m[1]==='esim'){const es=await get('SELECT nome_plano FROM esim_planos WHERE id=? AND ativo=1',[Number(m[2])]);if(es)phrase='Comprar '+normalizarFraseComercialAnuncio(es.nome_plano);}
+ if(m[1]==='premium'){const product=await premium.product(Number(m[2]));if(product){let meta={};try{meta=JSON.parse(product.json||'{}');}catch(_){}phrase=ggsoma.purchasePhrase(product,meta);}}}
+ if(numero)whatsapp='https://wa.me/'+numero+'?text='+encodeURIComponent(phrase);
+ return {telegram,whatsapp};
+}
+async function communityResume(msg,payload){
+ const id=msg.from.id;if(!await communityHub.access(id,payload||'menu'))return;
+ await communityHub.takeIntent(id);
+ const mapping={hero:'hero_sms_cat_whatsapp',menu:'menu_voltar'};
+ const data=mapping[payload]||(/^(servico|esim)_\d+$/.test(payload)?payload:/^premium_\d+$/.test(payload)?payload.replace('premium_','prem_show_'):null);
+ if(data){const card=await tgBot.sendMessage(id,'Escolha uma opção para continuar.',{reply_markup:{inline_keyboard:[[{text:'🛒 Continuar compra',callback_data:data}],[{text:'Menu principal',callback_data:'menu_voltar'}]]}});return card;}
+ const {cliente}=await cadastrarClienteTelegram(msg.from);return enviarMenuTelegram(id,cliente);
+}
+
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
@@ -14661,7 +14724,7 @@ app.get('/admin/anuncios', async (req, res) => {
   const historico=await all(`SELECT * FROM historico_anuncios_central ORDER BY id DESC LIMIT 30`);
   const checks=grupos.map(g=>`<label style="display:block;padding:8px;border-bottom:1px solid #233"><input type="checkbox" name="grupos" value="${safeHtml(g.id)}"> <b>${safeHtml(g.nome)}</b> <span class="muted">(${g.participantes})</span></label>`).join('')||'<p class="muted">Nenhum grupo disponível agora. Você pode salvar e editar depois que uma sessão de anúncios estiver conectada.</p>';
   const cards=campanhas.map(c=>{
-    const canais=[Number(c.destino_grupos_whatsapp)?'👥 Grupos':'',Number(c.destino_status_whatsapp)?'🟢 Status':'',Number(c.destino_telegram_central)?'✈️ Telegram':''].filter(Boolean).join(' • ')||'Nenhum canal';
+    const canais=[Number(c.community_tg_ads)?'📣 Canal Telegram':'',Number(c.community_wa_ads)?'📣 Canal WhatsApp':'',Number(c.destino_grupos_whatsapp)?'👥 Grupos':'',Number(c.destino_status_whatsapp)?'🟢 Status':'',Number(c.destino_telegram_central)?'✈️ Telegram':''].filter(Boolean).join(' • ')||'Nenhum canal';
     const modo=String(c.modo_envio||'RASCUNHO').toUpperCase();
     const estado=Number(c.ativo)?(modo==='RECORRENTE'?'🟢 ATIVO':'🕒 AGENDADO'):'⏸️ PAUSADO/RASCUNHO';
     const foto=fotoAtualCampanha(c),quantidadeFotos=fotosCampanhaCentral(c).length;
@@ -14669,7 +14732,7 @@ app.get('/admin/anuncios', async (req, res) => {
     return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:start"><h2>${Number(c.favorito)?'📌 ':''}${safeHtml(c.nome)}</h2><span class="pill">${estado}</span></div>${img}<p>${safeHtml(String(c.mensagem||'')).replace(/\n/g,'<br>')}</p><p><b>${canais}</b>${(c.compra_tipo||c.produto_id||c.servico_id_compra)?`<br><span class="pill">🛒 COMPRA DIRETA → ${safeHtml(c.compra_tipo==='CONSULTAVIP'?'ConsultaVIP':c.compra_tipo==='PREMIUM'?'Assinatura Premium':c.compra_tipo==='SERVICO'?'Serviço':c.compra_tipo==='ESIM'?'Produto/eSIM':c.servico_id_compra?'Serviço':'Produto/eSIM')}</span>`:''}</p><p class="muted">Modo: ${safeHtml(modo)}${Number(c.destino_grupos_whatsapp)?` · ⏱️ ${Math.max(1,Number(c.intervalo_grupos_minutos||5))} min entre grupos`:''}${modo==='RECORRENTE'?` · 🔄 repete ${Math.max(1,Number(c.recorrencia_horas||24))}h após terminar a rodada`:''}${Number(c.destino_grupos_whatsapp)&&Number(c.grupo_indice_atual||0)>0?` · 📍 próximo grupo ${Number(c.grupo_indice_atual)+1}`:''}${c.proximo_envio?` · Próximo: ${dateBR(c.proximo_envio)}`:''}<br>Último: ${dateBR(c.ultimo_envio)} · ✅ ${Number(c.ultima_enviadas||0)} · ❌ ${Number(c.ultima_falhas||0)}<br>${safeHtml(c.ultima_detalhes||'')}</p><div class="actions"><a class="btn" href="/admin/anuncios/${c.id}/editar">✏️ Editar</a><form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/agora"><button class="btn green" onclick="return confirm('Enviar agora para os canais selecionados?')">▶️ Enviar agora</button></form>${['AGENDADO','RECORRENTE'].includes(modo)?`<form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/toggle"><button class="btn orange">${Number(c.ativo)?'⏸️ Pausar':'▶️ Ativar'}</button></form>`:''}<form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/duplicar"><button class="btn">📋 Duplicar</button></form><form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/favorito"><button class="btn">${Number(c.favorito)?'☆ Desafixar':'📌 Fixar'}</button></form><form class="forms-inline" method="post" action="/admin/anuncios/${c.id}/apagar"><button class="btn red" onclick="return confirm('Apagar este anúncio?')">🗑️ Apagar</button></form></div></div>`;
   }).join('')||'<div class="card"><p class="muted">Nenhum anúncio cadastrado.</p></div>';
   const hist=historico.map(h=>`<tr><td>${dateBR(h.criado_em)}</td><td>${safeHtml(h.nome||'-')}</td><td>${safeHtml(h.canais||'-')}</td><td>${h.enviadas||0}/${h.total||0}</td><td>${h.falhas||0}</td><td>${safeHtml(h.status||'-')}</td></tr>`).join('')||'<tr><td colspan="6">Sem envios registrados.</td></tr>';
-  const body=`<div class="topbar"><div><h1>📣 Central de Anúncios</h1><p class="muted">Crie uma vez e escolha os canais. Ordem fixa quando houver mais de um: 1º WhatsApp Status → 2º Telegram → 3º WhatsApp Grupos.</p></div></div>${erroGrupos?`<div class="card"><p style="color:#f59e0b">⚠️ Grupos: ${safeHtml(erroGrupos)}</p></div>`:''}<div class="card"><h2>➕ Criar anúncio</h2><form method="post" enctype="multipart/form-data" action="/admin/anuncios"><label>Nome</label><input name="nome" required maxlength="120" placeholder="Ex.: Promoção eSIM"><label>Mensagem</label><textarea name="mensagem" rows="8" maxlength="4000" required></textarea>${abasFotosAnuncio()}<h3>Destinos</h3><div class="grid"><label><input type="checkbox" name="canal_grupos" value="1"> 👥 WhatsApp Grupos</label><label><input type="checkbox" name="canal_status" value="1"> 🟢 WhatsApp Status</label><label><input type="checkbox" name="canal_telegram" value="1"> ✈️ Telegram</label></div><div class="card" style="margin-top:12px"><h3>🛒 Compra direta por canal</h3><label>O que este anúncio vende?</label><select name="compra_destino">${compraOpts}</select><p class="muted">Opcional. Telegram abre o destino dentro do Telegram; WhatsApp recebe o link direto correspondente. ConsultaVIP usa o 2º bot no Telegram e o ConsultaVIP privado no WhatsApp.</p></div><div id="grupoBox" class="card" style="margin-top:12px"><h3>👥 Programação dos grupos</h3><label><input type="checkbox" id="todosGrupos" onchange="document.querySelectorAll('[name=grupos]').forEach(x=>x.checked=this.checked)"> Selecionar todos os grupos</label><div style="max-height:260px;overflow:auto">${checks}</div><label>⏱️ Minutos entre um grupo e outro</label><input type="number" name="intervalo_grupos_minutos" min="1" max="1440" value="5" required><p class="muted">Ex.: 5 = envia no primeiro grupo, espera 5 minutos e envia no próximo.</p></div><h3>Quando enviar</h3><select name="modo_envio" id="modoEnvio"><option value="RASCUNHO">Salvar como rascunho</option><option value="AGORA">Enviar agora</option><option value="AGENDADO">Agendar data e hora</option><option value="RECORRENTE">Recorrente</option></select><div id="agendaBox" style="display:none"><label>Data e hora</label><input type="datetime-local" name="data_agendada"></div><div id="recBox" style="display:none"><label>🔄 Repetir a campanha a cada quantas horas?</label><input type="number" name="recorrencia_horas" min="1" max="8760" value="6"><p class="muted">A contagem começa depois que terminar de enviar para todos os grupos selecionados.</p></div><br><button type="button" class="btn" id="previewBtn">👁️ Pré-visualizar</button> <button class="btn green">💾 Salvar anúncio</button><div id="previewAd" class="card" style="display:none;margin-top:12px"></div></form></div><h2>📌 Anúncios criados</h2><div class="grid">${cards}</div><h2>🕘 Histórico de envios</h2><div class="card" style="overflow:auto"><table><tr><th>Data</th><th>Anúncio</th><th>Canais</th><th>Enviados</th><th>Falhas</th><th>Status</th></tr>${hist}</table></div><script>(()=>{const m=document.getElementById('modoEnvio'),a=document.getElementById('agendaBox'),r=document.getElementById('recBox');function u(){a.style.display=m.value==='AGENDADO'?'block':'none';r.style.display=m.value==='RECORRENTE'?'block':'none'}m.addEventListener('change',u);u();document.getElementById('previewBtn').addEventListener('click',()=>{const f=m.closest('form'),p=document.getElementById('previewAd');const canais=[f.canal_grupos.checked?'👥 Grupos':'',f.canal_status.checked?'🟢 Status':'',f.canal_telegram.checked?'✈️ Telegram':''].filter(Boolean).join(' • ');p.innerHTML='<h3>'+((f.nome.value||'Sem nome').replace(/[<>]/g,''))+'</h3><p>'+((f.mensagem.value||'').replace(/[<>]/g,'').replace(/\\n/g,'<br>'))+'</p><p><b>'+canais+'</b></p>';p.style.display='block'});})();</script>${SCRIPT_ABAS_FOTOS_ANUNCIO}`;
+  const body=`<div class="topbar"><div><h1>📣 Central de Anúncios</h1><p class="muted">Crie uma vez e escolha os canais. Ordem fixa quando houver mais de um: 1º WhatsApp Status → 2º Telegram → 3º WhatsApp Grupos.</p></div></div>${erroGrupos?`<div class="card"><p style="color:#f59e0b">⚠️ Grupos: ${safeHtml(erroGrupos)}</p></div>`:''}<div class="card"><h2>➕ Criar anúncio</h2><form method="post" enctype="multipart/form-data" action="/admin/anuncios"><label>Nome</label><input name="nome" required maxlength="120" placeholder="Ex.: Promoção eSIM"><label>Mensagem</label><textarea name="mensagem" rows="8" maxlength="4000" required></textarea>${abasFotosAnuncio()}<h3>Destinos</h3><div class="grid"><label><input type="checkbox" name="community_tg_ads" value="1"> 📣 Canal Telegram de anúncios</label><br><label><input type="checkbox" name="community_wa_ads" value="1"> 📣 Canal WhatsApp de anúncios</label><br><a href="/admin/comunidade">Configurar canais e vendas</a><label><input type="checkbox" name="canal_grupos" value="1"> 👥 WhatsApp Grupos</label><label><input type="checkbox" name="canal_status" value="1"> 🟢 WhatsApp Status</label><label><input type="checkbox" name="canal_telegram" value="1"> ✈️ Telegram</label></div><div class="card" style="margin-top:12px"><h3>🛒 Compra direta por canal</h3><label>O que este anúncio vende?</label><select name="compra_destino">${compraOpts}</select><p class="muted">Opcional. Telegram abre o destino dentro do Telegram; WhatsApp recebe o link direto correspondente. ConsultaVIP usa o 2º bot no Telegram e o ConsultaVIP privado no WhatsApp.</p></div><div id="grupoBox" class="card" style="margin-top:12px"><h3>👥 Programação dos grupos</h3><label><input type="checkbox" id="todosGrupos" onchange="document.querySelectorAll('[name=grupos]').forEach(x=>x.checked=this.checked)"> Selecionar todos os grupos</label><div style="max-height:260px;overflow:auto">${checks}</div><label>⏱️ Minutos entre um grupo e outro</label><input type="number" name="intervalo_grupos_minutos" min="1" max="1440" value="5" required><p class="muted">Ex.: 5 = envia no primeiro grupo, espera 5 minutos e envia no próximo.</p></div><h3>Quando enviar</h3><select name="modo_envio" id="modoEnvio"><option value="RASCUNHO">Salvar como rascunho</option><option value="AGORA">Enviar agora</option><option value="AGENDADO">Agendar data e hora</option><option value="RECORRENTE">Recorrente</option></select><div id="agendaBox" style="display:none"><label>Data e hora</label><input type="datetime-local" name="data_agendada"></div><div id="recBox" style="display:none"><label>🔄 Repetir a campanha a cada quantas horas?</label><input type="number" name="recorrencia_horas" min="1" max="8760" value="6"><p class="muted">A contagem começa depois que terminar de enviar para todos os grupos selecionados.</p></div><br><button type="button" class="btn" id="previewBtn">👁️ Pré-visualizar</button> <button class="btn green">💾 Salvar anúncio</button><div id="previewAd" class="card" style="display:none;margin-top:12px"></div></form></div><h2>📌 Anúncios criados</h2><div class="grid">${cards}</div><h2>🕘 Histórico de envios</h2><div class="card" style="overflow:auto"><table><tr><th>Data</th><th>Anúncio</th><th>Canais</th><th>Enviados</th><th>Falhas</th><th>Status</th></tr>${hist}</table></div><script>(()=>{const m=document.getElementById('modoEnvio'),a=document.getElementById('agendaBox'),r=document.getElementById('recBox');function u(){a.style.display=m.value==='AGENDADO'?'block':'none';r.style.display=m.value==='RECORRENTE'?'block':'none'}m.addEventListener('change',u);u();document.getElementById('previewBtn').addEventListener('click',()=>{const f=m.closest('form'),p=document.getElementById('previewAd');const canais=[f.canal_grupos.checked?'👥 Grupos':'',f.canal_status.checked?'🟢 Status':'',f.canal_telegram.checked?'✈️ Telegram':''].filter(Boolean).join(' • ');p.innerHTML='<h3>'+((f.nome.value||'Sem nome').replace(/[<>]/g,''))+'</h3><p>'+((f.mensagem.value||'').replace(/[<>]/g,'').replace(/\\n/g,'<br>'))+'</p><p><b>'+canais+'</b></p>';p.style.display='block'});})();</script>${SCRIPT_ABAS_FOTOS_ANUNCIO}`;
   res.send(page('Central de Anúncios',body));
 });
 
@@ -14678,7 +14741,7 @@ app.post('/admin/anuncios', uploadFotosAnuncio, async (req,res)=>{
   const gruposOn=!!req.body.canal_grupos,statusOn=!!req.body.canal_status,tgOn=!!req.body.canal_telegram;
   const { produtoId, servicoId, compraTipo, compraRef }=parseDestinoCompraAnuncio(req.body.compra_destino);
   if(!nome||!mensagem)return res.redirect('/admin/anuncios');
-  if(!gruposOn&&!statusOn&&!tgOn)return res.status(400).send(page('Canal obrigatório','<h1>❌ Selecione pelo menos um canal.</h1><a class="btn" href="/admin/anuncios">Voltar</a>'));
+  if(!gruposOn&&!statusOn&&!tgOn&&!req.body.community_tg_ads&&!req.body.community_wa_ads)return res.status(400).send(page('Canal obrigatório','<h1>❌ Selecione pelo menos um canal.</h1><a class="btn" href="/admin/anuncios">Voltar</a>'));
   let grupos=req.body.grupos||[];if(!Array.isArray(grupos))grupos=[grupos];grupos=grupos.filter(x=>String(x).endsWith('@g.us'));
   const modo=['RASCUNHO','AGORA','AGENDADO','RECORRENTE'].includes(String(req.body.modo_envio||'').toUpperCase())?String(req.body.modo_envio).toUpperCase():'RASCUNHO';
   const rec=Math.max(1,Math.min(8760,Number(req.body.recorrencia_horas||6)));
@@ -14692,6 +14755,7 @@ app.post('/admin/anuncios', uploadFotosAnuncio, async (req,res)=>{
   const imagem=fotos[0];
   const ins=await run(`INSERT INTO campanhas_anuncios(nome,mensagem,imagem,produto_id,servico_id_compra,compra_tipo,compra_ref,ativo,proximo_envio,destino_grupos_whatsapp,destino_status_whatsapp,destino_telegram_central,grupos_json,intervalo_min,intervalo_max,intervalo_grupos_minutos,modo_envio,recorrencia_horas,enviar_whatsapp,enviar_telegram,destino_clientes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,[nome,mensagem,imagem,produtoId,servicoId,compraTipo,compraRef,ativo,prox,gruposOn?1:0,statusOn?1:0,tgOn?1:0,JSON.stringify(grupos),min,max,intervaloGruposMinutos,modo,rec,0,0]);
   await run('UPDATE campanhas_anuncios SET imagem_2=?,imagem_3=?,imagem_4=?,imagem_5=? WHERE id=?',[...fotos.slice(1),ins.lastID]);
+  await run('UPDATE campanhas_anuncios SET community_tg_ads=?,community_wa_ads=? WHERE id=?',[req.body.community_tg_ads?1:0,req.body.community_wa_ads?1:0,ins.lastID]);
   if(modo==='AGORA'){
     const c=await get('SELECT * FROM campanhas_anuncios WHERE id=?',[ins.lastID]);
     anunciosCentraisEmEnvio.add(c.id);
@@ -14722,7 +14786,7 @@ app.get('/admin/anuncios/:id/editar',async(req,res)=>{
   const sel=new Set(gruposCampanhaCentral(c));
   const compraOpts=await opcoesDestinoCompraCentral(c);
   const checks=grupos.map(g=>`<label style="display:block;padding:8px;border-bottom:1px solid #233"><input type="checkbox" name="grupos" value="${safeHtml(g.id)}" ${sel.has(g.id)?'checked':''}> <b>${safeHtml(g.nome)}</b></label>`).join('')||'<p class="muted">Grupos indisponíveis no momento.</p>';
-  const body=`<h1>✏️ Editar anúncio</h1><div class="card"><form method="post" enctype="multipart/form-data" action="/admin/anuncios/${c.id}/editar"><label>Nome</label><input name="nome" required value="${safeHtml(c.nome||'')}"><label>Mensagem</label><textarea name="mensagem" rows="8" required>${safeHtml(c.mensagem||'')}</textarea>${abasFotosAnuncio(c)}<h3>Destinos</h3><label><input type="checkbox" name="canal_grupos" value="1" ${Number(c.destino_grupos_whatsapp)?'checked':''}> 👥 WhatsApp Grupos</label><br><label><input type="checkbox" name="canal_status" value="1" ${Number(c.destino_status_whatsapp)?'checked':''}> 🟢 WhatsApp Status</label><br><label><input type="checkbox" name="canal_telegram" value="1" ${Number(c.destino_telegram_central)?'checked':''}> ✈️ Telegram</label><div class="card" style="margin-top:12px"><h3>🛒 Compra direta por canal</h3><label>O que este anúncio vende?</label><select name="compra_destino">${compraOpts}</select><p class="muted">Telegram e WhatsApp recebem o destino correto automaticamente. ConsultaVIP: 2º bot no Telegram e ConsultaVIP privado no WhatsApp.</p></div><div class="card"><h3>👥 Programação dos grupos</h3>${checks}<label>⏱️ Minutos entre um grupo e outro</label><input type="number" name="intervalo_grupos_minutos" min="1" max="1440" value="${Math.max(1,Number(c.intervalo_grupos_minutos||5))}"><p class="muted">O sistema espera esse tempo antes de passar para o próximo grupo.</p></div><label>Modo</label><select name="modo_envio"><option value="RASCUNHO" ${String(c.modo_envio)==='RASCUNHO'?'selected':''}>Rascunho</option><option value="AGENDADO" ${String(c.modo_envio)==='AGENDADO'?'selected':''}>Agendado</option><option value="RECORRENTE" ${String(c.modo_envio)==='RECORRENTE'?'selected':''}>Recorrente</option></select><label>Próxima data/hora (para agendado)</label><input type="datetime-local" name="data_agendada"><label>🔄 Repetir a campanha a cada quantas horas?</label><input type="number" name="recorrencia_horas" min="1" max="8760" value="${Math.max(1,Number(c.recorrencia_horas||6))}"><p class="muted">Para modo Recorrente. A nova rodada é agendada somente depois que a rodada atual terminar.</p><br><button class="btn green">💾 Salvar alterações</button> <a class="btn" href="/admin/anuncios">Cancelar</a></form></div>${SCRIPT_ABAS_FOTOS_ANUNCIO}`;
+  const body=`<h1>✏️ Editar anúncio</h1><div class="card"><form method="post" enctype="multipart/form-data" action="/admin/anuncios/${c.id}/editar"><label>Nome</label><input name="nome" required value="${safeHtml(c.nome||'')}"><label>Mensagem</label><textarea name="mensagem" rows="8" required>${safeHtml(c.mensagem||'')}</textarea>${abasFotosAnuncio(c)}<h3>Destinos</h3><label><input type="checkbox" name="community_tg_ads" value="1" ${Number(c.community_tg_ads)?'checked':''}> 📣 Canal Telegram de anúncios</label><br><label><input type="checkbox" name="community_wa_ads" value="1" ${Number(c.community_wa_ads)?'checked':''}> 📣 Canal WhatsApp de anúncios</label><br><a href="/admin/comunidade">Configurar canais e vendas</a><label><input type="checkbox" name="canal_grupos" value="1" ${Number(c.destino_grupos_whatsapp)?'checked':''}> 👥 WhatsApp Grupos</label><br><label><input type="checkbox" name="canal_status" value="1" ${Number(c.destino_status_whatsapp)?'checked':''}> 🟢 WhatsApp Status</label><br><label><input type="checkbox" name="canal_telegram" value="1" ${Number(c.destino_telegram_central)?'checked':''}> ✈️ Telegram</label><div class="card" style="margin-top:12px"><h3>🛒 Compra direta por canal</h3><label>O que este anúncio vende?</label><select name="compra_destino">${compraOpts}</select><p class="muted">Telegram e WhatsApp recebem o destino correto automaticamente. ConsultaVIP: 2º bot no Telegram e ConsultaVIP privado no WhatsApp.</p></div><div class="card"><h3>👥 Programação dos grupos</h3>${checks}<label>⏱️ Minutos entre um grupo e outro</label><input type="number" name="intervalo_grupos_minutos" min="1" max="1440" value="${Math.max(1,Number(c.intervalo_grupos_minutos||5))}"><p class="muted">O sistema espera esse tempo antes de passar para o próximo grupo.</p></div><label>Modo</label><select name="modo_envio"><option value="RASCUNHO" ${String(c.modo_envio)==='RASCUNHO'?'selected':''}>Rascunho</option><option value="AGENDADO" ${String(c.modo_envio)==='AGENDADO'?'selected':''}>Agendado</option><option value="RECORRENTE" ${String(c.modo_envio)==='RECORRENTE'?'selected':''}>Recorrente</option></select><label>Próxima data/hora (para agendado)</label><input type="datetime-local" name="data_agendada"><label>🔄 Repetir a campanha a cada quantas horas?</label><input type="number" name="recorrencia_horas" min="1" max="8760" value="${Math.max(1,Number(c.recorrencia_horas||6))}"><p class="muted">Para modo Recorrente. A nova rodada é agendada somente depois que a rodada atual terminar.</p><br><button class="btn green">💾 Salvar alterações</button> <a class="btn" href="/admin/anuncios">Cancelar</a></form></div>${SCRIPT_ABAS_FOTOS_ANUNCIO}`;
   res.send(page('Editar anúncio',body));
 });
 app.post('/admin/anuncios/:id/editar',uploadFotosAnuncio,async(req,res)=>{
@@ -14744,6 +14808,7 @@ app.post('/admin/anuncios/:id/editar',uploadFotosAnuncio,async(req,res)=>{
   const intervaloSegundos=intervaloGruposMinutos*60;
   let prox=null,ativo=0;if(modo==='AGENDADO'){const d=new Date(req.body.data_agendada||'');prox=!Number.isNaN(d.getTime())?d.toISOString():c.proximo_envio;ativo=prox?1:0;}if(modo==='RECORRENTE'){prox=c.proximo_envio||new Date(Date.now()+60000).toISOString();ativo=1;}
   await run(`UPDATE campanhas_anuncios SET nome=?,mensagem=?,imagem=?,imagem_2=?,imagem_3=?,imagem_4=?,imagem_5=?,foto_indice_atual=?,produto_id=?,servico_id_compra=?,compra_tipo=?,compra_ref=?,destino_grupos_whatsapp=?,destino_status_whatsapp=?,destino_telegram_central=?,grupos_json=?,intervalo_min=?,intervalo_max=?,intervalo_grupos_minutos=?,modo_envio=?,recorrencia_horas=?,ativo=?,proximo_envio=?,grupo_indice_atual=0,rodada_enviadas=0,rodada_falhas=0,rodada_extras_enviados=0,atualizado_em=CURRENT_TIMESTAMP WHERE id=?`,[String(req.body.nome||'').trim(),String(req.body.mensagem||'').trim(),...fotos,mudouFoto?0:Number(c.foto_indice_atual||0),produtoId,servicoId,compraTipo,compraRef,req.body.canal_grupos?1:0,req.body.canal_status?1:0,req.body.canal_telegram?1:0,JSON.stringify(grupos),intervaloSegundos,intervaloSegundos,intervaloGruposMinutos,modo,rec,ativo,prox,c.id]);
+  await run('UPDATE campanhas_anuncios SET community_tg_ads=?,community_wa_ads=? WHERE id=?',[req.body.community_tg_ads?1:0,req.body.community_wa_ads?1:0,c.id]);
   for(const antigo of new Set(antigos.filter((f,indice)=>f && f!==fotos[indice]))) await apagarFotoAnuncioSemUso(antigo);
   res.redirect('/admin/anuncios');
 });
@@ -14762,6 +14827,7 @@ app.post('/admin/anuncios/:id/duplicar',async(req,res)=>{
   if(c){
     const copia=await run(`INSERT INTO campanhas_anuncios(nome,mensagem,imagem,produto_id,servico_id_compra,compra_tipo,compra_ref,ativo,proximo_envio,destino_grupos_whatsapp,destino_status_whatsapp,destino_telegram_central,grupos_json,intervalo_min,intervalo_max,intervalo_grupos_minutos,modo_envio,recorrencia_horas,favorito,enviar_whatsapp,enviar_telegram,destino_clientes) VALUES(?,?,?,?,?,?,?,0,NULL,?,?,?,?,?,?,?,'RASCUNHO',?,0,0,0,0)`,[`Cópia - ${c.nome}`,c.mensagem,c.imagem,c.produto_id||null,c.servico_id_compra||null,c.compra_tipo||'',c.compra_ref||null,c.destino_grupos_whatsapp,c.destino_status_whatsapp,c.destino_telegram_central,c.grupos_json,c.intervalo_min,c.intervalo_max,c.intervalo_grupos_minutos||5,c.recorrencia_horas]);
     await run('UPDATE campanhas_anuncios SET imagem_2=?,imagem_3=?,imagem_4=?,imagem_5=?,foto_indice_atual=0 WHERE id=?',[c.imagem_2,c.imagem_3,c.imagem_4,c.imagem_5,copia.lastID]);
+    await run('UPDATE campanhas_anuncios SET community_tg_ads=?,community_wa_ads=? WHERE id=?',[Number(c.community_tg_ads||0),Number(c.community_wa_ads||0),copia.lastID]);
   }
   res.redirect('/admin/anuncios');
 });

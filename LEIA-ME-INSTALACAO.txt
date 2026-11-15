@@ -1,3 +1,7 @@
+ATUALIZAÇÃO 10.1.11 — CANAIS E VENDAS
+Leia CANAIS-E-VENDAS.md. Nova configuração em /admin/comunidade.
+Preserve seu banco, variáveis e sessões. Configure os destinos depois de atualizar.
+
 CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.10
 
 INSTALAR / ATUALIZAR
