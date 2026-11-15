@@ -1,4 +1,4 @@
-CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.9
+CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.10
 
 INSTALAR / ATUALIZAR
 1. Extraia o ZIP e atualize os arquivos de código do projeto.
@@ -6,7 +6,7 @@ INSTALAR / ATUALIZAR
    O pacote não inclui banco, senhas, sessões privadas ou node_modules.
 3. Instale as dependências com npm ci (ou o buildCommand já configurado no Render).
 4. Inicie com npm start.
-5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.9.
+5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.10.
 
 LIBERAR O PEDIDO #15 DECLARADO COMO TESTE
 No painel CENTRALUNLOCKER, abra Hero SMS > Pedidos > #15 — Abrir.
@@ -87,7 +87,7 @@ No Telegram, abra Administração > Layout do Telegram > Ícones animados > WHAT
 Envie o Custom Emoji/Premium diretamente pelo seletor do Telegram.
 O ícone será salvo e usado no botão WhatsApp já existente na HOME, sem duplicá-lo.
 Vincular WhatsApp mantém sua própria configuração. Abra novamente a HOME para visualizar.
-A integração de compra direta Hero SMS nos anúncios continua pendente nesta versão.
+Compra direta Hero SMS em anúncios adicionada na versão 10.1.10; veja instruções abaixo.
 
 HERO SMS NO OUTRO BOT TELEGRAM — 10.1.9
 Abra Hero SMS > Compartilhar números com outros bots (/admin/herosms/compartilhado).
@@ -104,4 +104,19 @@ vendas de números; a conexão compartilhada geral precisa continuar ativa.
 135 testes Node e 19 testes Python, incluindo HTTP entre os dois projetos,
 passaram com fornecedores, pagamentos e Telegram simulados.
 Leia INTEGRACAO-HERO-SMS-COM-OUTRO-BOT.md para instalação e protocolo.
-A compra direta Hero SMS nos anúncios automáticos deste painel continua pendente.
+Compra direta Hero SMS em anúncios disponível na versão 10.1.10.
+
+COMPRA DIRETA NOS ANÚNCIOS — 10.1.10
+No painel, abra Anúncios automáticos > Novo anúncio ou Editar.
+No campo Compra direta / O que este anúncio vende?, selecione:
+WhatsApp SMS — Escolher país
+Salve o anúncio no modo desejado. A opção vale para Telegram e WhatsApp.
+No Telegram, COMPRAR NÚMERO abre a seleção de países disponíveis.
+No WhatsApp, o link abre o Bot de Serviços no privado com Comprar numero WhatsApp.
+O cliente escolhe o país e depois saldo ou Pix. Clicar não compra nem cobra.
+Preços individuais e países ativos/estoque continuam sendo conferidos no checkout.
+Não há opção de país fixo; o cliente escolhe o país, conforme solicitado.
+Criar, editar e duplicar mantêm a opção salva. Modos e intervalos existentes continuam.
+141 testes Node passaram; tela, criação, edição e duplicação verificadas em banco
+isolado, somente rascunhos. Nenhum anúncio enviado, compra real ou deploy realizado.
+Este ZIP completo inclui a integração com o outro bot e o ícone WhatsApp SMS.

@@ -1,0 +1,26 @@
+CENTRALUNLOCKER 10.1.10 — BOTÃO DE COMPRA DIRETA HERO SMS
+
+1. Atualize o CENTRALUNLOCKER com este ZIP completo, preservando banco,
+   DATA_DIR, sessões e variáveis de ambiente. Instale dependências como antes.
+2. Abra o painel > Anúncios automáticos.
+3. Crie um anúncio ou edite um anúncio já existente.
+4. Em Compra direta / O que este anúncio vende?, escolha:
+   WhatsApp SMS — Escolher país
+5. Escolha os canais, imagem, texto e programação, e salve.
+
+Telegram: o anúncio terá COMPRAR NÚMERO; o botão abre os países disponíveis.
+WhatsApp: o anúncio terá COMPRAR AGORA com link para o Bot de Serviços privado.
+A mensagem preenchida é Comprar numero WhatsApp. O cliente envia e vê os países.
+Depois de escolher o país, ele confirma saldo ou Pix. Não há compra/cobrança
+apenas por clicar. Não há país pré-selecionado.
+
+O preço individual do cliente e os países habilitados/com estoque continuam
+valendo. Um anúncio antigo salvo sem compra direta precisa ser editado para
+selecionar esse destino. Esta atualização não publica anúncios automaticamente.
+
+O pacote inclui as correções anteriores e a integração com Telegramesim V22.
+Não é necessário alterar o outro bot para esta opção no painel central.
+
+Validação: 141 testes Node aprovados, tela real de formulário e persistência em
+SQLite local, com criação/edição/duplicação somente como rascunhos. Nenhum envio,
+operação financeira real nem instalação na hospedagem do usuário foi executado.

@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.9';
+const APP_RELEASE='10.1.10';
 const heroProtocol = require('./hero-sms-protocol');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
@@ -4894,6 +4894,7 @@ function tipoCompraCampanha(campanha){
 }
 async function opcoesCompraTelegram(campanha) {
   const tipo=tipoCompraCampanha(campanha), ref=Number(campanha?.compra_ref||0);
+  if(tipo==='HERO_SMS')return {reply_markup:{inline_keyboard:[[{text:'🛒 COMPRAR NÚMERO',callback_data:'hero_sms_cat_whatsapp'}]]}};
   if(tipo==='CONSULTAVIP'){
     const username=String(await getConfig('consultavip_bot_username','')||'').replace(/^@/,'').trim();
     return username?{reply_markup:{inline_keyboard:[[{text:'⭐ ASSINAR CONSULTAVIP',url:`https://t.me/${username}?start=planos`}]]}}:{};
@@ -4911,6 +4912,7 @@ function parseDestinoCompraAnuncio(valor) {
   let m=v.match(/^produto:(\d+)$/);if(m)return {produtoId:Number(m[1]),servicoId:null,compraTipo:'ESIM',compraRef:Number(m[1])};
   m=v.match(/^servico:(\d+)$/);if(m)return {produtoId:null,servicoId:Number(m[1]),compraTipo:'SERVICO',compraRef:Number(m[1])};
   m=v.match(/^premium:(\d+)$/);if(m)return {produtoId:null,servicoId:null,compraTipo:'PREMIUM',compraRef:Number(m[1])};
+  if(v==='herosms')return {produtoId:null,servicoId:null,compraTipo:'HERO_SMS',compraRef:null};
   if(v==='consultavip')return {produtoId:null,servicoId:null,compraTipo:'CONSULTAVIP',compraRef:null};
   return {produtoId:null,servicoId:null,compraTipo:'',compraRef:null};
 }
@@ -4937,7 +4939,8 @@ async function textoCampanhaPorCanal(campanha,canal){
     }
     if(canal==='whatsapp'){
       const numero=await numeroBotServicosAnuncio();let frase='';
-      if(tipo==='CONSULTAVIP')frase='Assinar ConsultaVIP';
+      if(tipo==='HERO_SMS')frase='Comprar numero WhatsApp';
+      else if(tipo==='CONSULTAVIP')frase='Assinar ConsultaVIP';
       else if(tipo==='PREMIUM'&&ref){const p=await premium.product(ref);if(p){let meta={};try{meta=JSON.parse(p.json||'{}')}catch(_){};frase=ggsoma.purchasePhrase(p,meta);}}
       else if(tipo==='SERVICO'&&ref){const sv=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[ref]);if(sv)frase=fraseCompraServicoAnuncio(sv);}
       else if(tipo==='ESIM'&&ref){const es=await get('SELECT nome_plano FROM esim_planos WHERE id=? AND ativo=1',[ref]);if(es)frase=`Comprar ${normalizarFraseComercialAnuncio(es.nome_plano)}`;}
@@ -6971,6 +6974,13 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     if(!valor){await salvarSessaoPedido(from,{etapa:'aguardando_valor_pix',tipo_pix:'SALDO'});await enviarTexto(from,'💳 *ADICIONAR SALDO*\n\nDigite somente o valor que deseja adicionar.\n\nValor mínimo: R$ 10,00\nExemplo: 50\n\n0️⃣ Cancelar');return;}
     if(valor<10){await enviarTexto(from,'❌ Informe um valor mínimo de R$10.\n\nExemplo:\npagar 50');return;}
     await iniciarFluxoPagamento(from,{valor_pix:valor,tipo_pix:'SALDO'},cliente,async(m)=>enviarTexto(from,m),true);return;
+  }
+
+  // Anúncio WhatsApp SMS: abre seleção de países, sem comprar nem cobrar.
+  if(/^comprar (?:numero|numeros) whatsapp$/.test(normalizarFraseComercialAnuncio(textoOriginal).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase())){
+    await apagarSessaoPedido(from);
+    await heroSmsWaPaises(from,'WhatsApp','preco_asc',0,cliente);
+    return;
   }
 
   // V5.0 GGSOMA — link individual e limpo no WhatsApp.
@@ -14635,6 +14645,7 @@ async function opcoesDestinoCompraCentral(campanha=null){
   const premiums=await premium.products(true);
   const tipo=tipoCompraCampanha(campanha),ref=Number(campanha?.compra_ref||0);
   let html='<option value="">Sem compra direta</option>';
+  html+='<optgroup label="📱 WhatsApp SMS"><option value="herosms" '+(tipo==='HERO_SMS'?'selected':'')+'>WhatsApp SMS — Escolher país</option></optgroup>';
   html+='<optgroup label="🔎 ConsultaVIP"><option value="consultavip" '+(tipo==='CONSULTAVIP'?'selected':'')+'>ConsultaVIP — Telegram: 2º bot / WhatsApp: ConsultaVIP privado</option></optgroup>';
   if(premiums.length)html+='<optgroup label="⭐ Assinaturas Premium / GGSOMA">'+premiums.map(p=>`<option value="premium:${p.id}" ${((tipo==='PREMIUM'&&ref===Number(p.id))||(!campanha?.compra_tipo&&Number(campanha?.servico_id_compra)===Number(p.id)))?'selected':''}>${safeHtml(premium.customerTitle(p))} — ${brl(p.preco_padrao||0)} — estoque ${premium.stock(p)}</option>`).join('')+'</optgroup>';
   if(servicos.length)html+='<optgroup label="🛠 Serviços ativos">'+servicos.map(v=>`<option value="servico:${v.id}" ${((tipo==='SERVICO'&&ref===Number(v.id))||(!campanha?.compra_tipo&&Number(campanha?.servico_id_compra)===Number(v.id)))?'selected':''}>${safeHtml(nomeServicoWhatsApp(v))} — ${brl(v.preco_padrao||0)}</option>`).join('')+'</optgroup>';

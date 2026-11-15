@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.9 — correções consolidadas
+# CENTRALUNLOCKER 10.1.10 — correções consolidadas
 
 ## Pedido declarado como teste
 
@@ -175,7 +175,7 @@ O botão WhatsApp existente usa TG_ICON_WHATSAPP_SMS. A lista de ícones animado
 exibe WHATSAPP SMS, com captura do Custom Emoji e persistência pela configuração
 visual existente. TG_ICON_WHATSAPP continua exclusivo de Vincular WhatsApp.
 Sem ícone configurado, o botão mantém o emoji comum. Não cria outro botão nem
-altera compras, saldo ou anúncios. Compra direta Hero SMS em anúncios segue pendente.
+altera compras, saldo ou anúncios. Compra direta Hero SMS em anúncios foi adicionada na versão 10.1.10.
 
 ## Hero SMS compartilhada — 10.1.9
 
@@ -203,3 +203,19 @@ HTTP usando este módulo e os handlers reais de compra/troca/cancelamento com He
 simulada: confirmou múltiplos SMS, finalização por prazo e devolução no bot correto
 sem alterar carteira nativa. Startup do Central e páginas administrativas/API
 compartilhada foram verificadas em banco isolado. Não houve operações reais nem deploy.
+
+## Compra direta Hero SMS nos anúncios — 10.1.10
+
+O destino herosms é persistido como HERO_SMS, sem produto/serviço legado nem país
+fixo. O seletor do painel tem WhatsApp SMS — Escolher país tanto em criação quanto
+em edição; duplicação conserva as colunas de destino existentes. O Telegram usa o
+callback hero_sms_cat_whatsapp, que abre os países habilitados com preço do cliente.
+O WhatsApp gera wa.me do Bot de Serviços com a frase Comprar numero WhatsApp.
+A entrada reconhece também acentos/maiúsculas, limpa a navegação anterior e abre
+a seleção usando o cliente já identificado. Não chama checkout nem compra ao clicar.
+
+Novos destinos de anúncio não alteram cobranças nem preços. País e pagamento são
+escolhidos pelo cliente; oferta/estoque/preço são conferidos novamente ao pagar.
+141 testes Node aprovados, incluindo cobertura dos destinos antigos de eSIM,
+serviços e ConsultaVIP. Teste HTTP do painel verificou formulário, persistência,
+edição e duplicação como rascunhos, sem envio a nenhum canal. Sem deploy.

@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.9 + Telegramesim V22.0
+# CENTRALUNLOCKER 10.1.10 + Telegramesim V22.0
 
 A integração usa a URL e chave já configuradas para compartilhar eSIM. O Central
 é o único sistema com a credencial Hero. O consumidor tem seu próprio pagamento,
@@ -84,4 +84,5 @@ no Python. Para incluir o teste HTTP, configure HERO_CENTRAL_PROJECT com o camin
 do projeto Node já instalado com suas dependências. Sem ele, esse caso é ignorado.
 
 A configuração do ícone WhatsApp SMS da versão 10.1.8 está incluída.
-Compra direta Hero SMS nos anúncios automáticos do painel central segue pendente.
+Na versão 10.1.10, os anúncios do painel central oferecem WhatsApp SMS — Escolher país.
+O cliente abre os países e confirma o pagamento; clicar no anúncio não compra.
