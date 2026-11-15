@@ -1,4 +1,4 @@
-CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.5
+CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.7
 
 INSTALAR / ATUALIZAR
 1. Extraia o ZIP e atualize os arquivos de código do projeto.
@@ -6,7 +6,7 @@ INSTALAR / ATUALIZAR
    O pacote não inclui banco, senhas, sessões privadas ou node_modules.
 3. Instale as dependências com npm ci (ou o buildCommand já configurado no Render).
 4. Inicie com npm start.
-5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.5.
+5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.7.
 
 LIBERAR O PEDIDO #15 DECLARADO COMO TESTE
 No painel CENTRALUNLOCKER, abra Hero SMS > Pedidos > #15 — Abrir.
@@ -32,9 +32,52 @@ CORREÇÕES CONSOLIDADAS
 - Rota /health criada para corresponder à configuração do Render.
 
 VERIFICAÇÃO
-98 testes com SQLite e APIs/canais simulados passaram.
+127 testes com SQLite e APIs/canais simulados passaram.
 As verificações locais não são homologação com suas contas e não geraram
 cobranças, compras ou estornos reais.
 
-Leia CORRECOES-HERO-SMS.md para detalhes e limites, inclusive o mapeamento legado
-dos status numéricos do histórico que ainda requer confirmação da Hero SMS.
+Leia CORRECOES-HERO-SMS.md e FLUXO-HERO-SMS-APROVADO.md.
+O esquema ActivationHistoryStatus documenta 6=concluída, 8=cancelada, 10=reembolso.
+
+PAÍSES E MEUS NÚMEROS — 10.1.6
+Abra Hero SMS > Países (/admin/herosms/paises), sincronize e ative os países desejados.
+Novos países ficam ocultos até ativação. Países sem estoque não aparecem para compra.
+O preço individual atual é preservado; sem configuração individual, R$ 25.
+WhatsApp e Telegram: Comprar número abre os países habilitados.
+Meus números: selecionar um pedido abre o cartão visível com número e estado.
+Troca/cancelamento aparecem somente quando permitidos (sem SMS, após 120 segundos).
+O código recebido atualiza automaticamente o mesmo cartão.
+
+FLUXO COMPLETO — 10.1.7
+- Cartão entregue sem saldo/valor/forma de pagamento; saldo no menu e confirmação.
+- Expiração real da Hero, atualização periódica do tempo no mesmo cartão.
+- Todos os SMS persistidos e numerados; páginas de 8 SMS quando necessário.
+- Primeiro SMS, inclusive sem código, bloqueia troca e cancelamento no servidor.
+- Opção numérica 1 para finalizar após SMS, com confirmação e sem devolução.
+- Ao vencer: com SMS solicita finalização; sem SMS confere cancelamento/reembolso.
+- Finalização confirmada exibe 1 Comprar outro número.
+- Cancelamento manual na Hero: estado 8 aguarda; estado 10 confirma reembolso.
+- Devolução integral à carteira, única, inclusive em compras por Pix.
+- Débito de carteira e estado pago atômicos; recuperação de pago após reinício.
+- Teste #15 permanece encerrado, sem movimentação financeira.
+- Listas de pedidos e SMS paginadas nos dois canais.
+- Migrações criam campos/tabelas sem apagar os registros existentes.
+- WhatsApp: se a edição expirar, cria cartão substituto. Telegram: legenda longa vira texto.
+
+WEBHOOK OPCIONAL DE SMS
+As consultas automáticas continuam funcionando sem webhook.
+Para receber avisos mais rápidos, configure HERO_SMS_WEBHOOK_SECRET com um segredo
+aleatório de pelo menos 32 caracteres no servidor. Não use a chave da Hero como segredo.
+Gere um segredo com node -e "console.log(require('crypto').randomBytes(32).toString('hex'))".
+Cadastre na Hero, caso sua conta disponibilize a configuração de callback, a URL:
+https://SEU-DOMINIO/webhooks/herosms/SEU-SEGREDO
+O arquivo OpenAPI documenta o evento, mas não uma API para configurar o destino.
+A configuração da conta Hero precisa ser feita no provedor; não foi feita localmente.
+O endpoint só usa o aviso para consultar os SMS na API autenticada; não confia no
+código recebido pelo webhook e não executa operações financeiras pelo payload.
+Se não configurado, o endpoint fica indisponível. Não exponha essa URL com segredo.
+
+VERIFICAÇÃO DESTA ENTREGA
+127 testes locais com SQLite e APIs/canais simulados, incluindo migração e fluxos
+financeiros. Inicialização e páginas administrativas verificadas com banco de teste.
+Nenhuma operação real na Hero/gateway e nenhuma implantação na hospedagem do usuário.

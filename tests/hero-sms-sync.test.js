@@ -15,7 +15,7 @@ async function fixture(t){
   const get=(sql,args=[])=>new Promise((resolve,reject)=>db.get(sql,args,(e,r)=>e?reject(e):resolve(r)));
   const all=(sql,args=[])=>new Promise((resolve,reject)=>db.all(sql,args,(e,r)=>e?reject(e):resolve(r)));
   const sent=[];
-  const ctx=vm.createContext({run,get,all,heroProtocol:protocol,renderOrderCard,createOrderMessenger,console,URLSearchParams,Date,Number,Map,Set,JSON,String,
+  const ctx=vm.createContext({run,get,all,createHeroLifecycle:require('../hero-sms-lifecycle').createHeroLifecycle,heroProtocol:protocol,renderOrderCard,createOrderMessenger,console,URLSearchParams,Date,Number,Map,Set,JSON,String,
     enviarTexto:async(jid,msg)=>{sent.push({jid,msg});return {transport:'test',messageId:sent.length};},
     isTgJid:jid=>String(jid).startsWith('tg:'),tgIdFromJid:jid=>String(jid).slice(3),salvarSessaoPedido:async()=>{},
     addColumnIfMissing:async()=>{},heroSmsV1:async()=>({data:[],meta:{hasMore:false}}),
@@ -26,12 +26,14 @@ async function fixture(t){
   vm.runInContext(section('let heroOrderMessenger=null;','async function heroWhatsListarPedidos('),ctx);
   ctx.heroEditOrderMessage=async(reference,card)=>sent.push({reference,msg:card.text,edit:true});
   await ctx.heroPedidosInit();
+  await run('CREATE TABLE revendas(id INTEGER PRIMARY KEY,saldo REAL,atualizado_em TEXT)');
+  await run('INSERT INTO revendas(id,saldo) VALUES(1,50)');
   await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method,activation_id,phone,status) VALUES(1,'test','wa','73',25,1,'saldo','123','5511000000000','number_received')");
   return {ctx,run,get,all,sent};
 }
 test('real replacement handler saves the documented array response and sends line breaks',async t=>{
   const f=await fixture(t);
-  f.ctx.heroSmsV1=async(method,path)=>{assert.equal(method,'POST');assert.equal(path,'/activations/123/replace');return {data:[{id:123,phone:'5511999999999'}]};};
+  f.ctx.heroSmsV1=async(method,path)=>{if(method==='GET')return {data:[],meta:{hasMore:false}};assert.equal(method,'POST');assert.equal(path,'/activations/123/replace');return {data:[{id:123,phone:'5511999999999'}]};};
   const text=await f.ctx.heroReplaceOrder('test',1);
   const o=await f.get('SELECT * FROM hero_sms_orders WHERE id=1');
   assert.equal(o.phone,'5511999999999');assert.equal(o.activation_id,'123');assert.equal(o.status,'number_received');
@@ -39,7 +41,7 @@ test('real replacement handler saves the documented array response and sends lin
 });
 test('ambiguous replacement is held for reconciliation and cannot be repeated',async t=>{
   const f=await fixture(t);let calls=0;
-  f.ctx.heroSmsV1=async()=>{calls++;return {data:[{id:999,phone:'5511999999999'},{id:1000,phone:'5511888888888'}]};};
+  f.ctx.heroSmsV1=async(method)=>{if(method==='GET')return {data:[],meta:{hasMore:false}};calls++;return {data:[{id:999,phone:'5511999999999'},{id:1000,phone:'5511888888888'}]};};
   await f.ctx.heroReplaceOrder('test',1);
   assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'replace_uncertain');
   await assert.rejects(f.ctx.heroReplaceOrder('test',1));assert.equal(calls,1);
@@ -82,16 +84,16 @@ test('an existing order card is edited when polling receives the SMS',async t=>{
   assert.equal(f.sent.filter(x=>!x.edit).length,1);
   assert.equal(f.sent.filter(x=>x.edit).length,1);
   assert.match(f.sent.find(x=>x.edit).msg,/012345/);
-  assert.equal((await f.get('SELECT delivered FROM hero_sms_notifications WHERE order_id=1')).delivered,1);
+  assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);
 });
 test('a failed channel send keeps SMS pending and retries after reconnect',async t=>{
   const f=await fixture(t);const send=f.ctx.enviarTexto;
   f.ctx.heroSmsApi=async()=> 'STATUS_OK:012345';f.ctx.enviarTexto=async()=>false;
   await f.ctx.heroPollSms();
-  const pending=await f.get('SELECT delivered,attempts FROM hero_sms_notifications WHERE order_id=1');
-  assert.equal(pending.delivered,0);assert.equal(pending.attempts,1);
+  const pending=await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1');
+  assert.equal(pending.delivered,0);
   f.ctx.enviarTexto=send;await f.ctx.heroPollSms();
-  assert.equal((await f.get('SELECT delivered FROM hero_sms_notifications WHERE order_id=1')).delivered,1);
+  assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);
   assert.equal(f.sent.length,1);
 });
 
@@ -155,8 +157,8 @@ test('manual reconciliation rejects an activation already linked to another orde
   assert.equal((await f.get('SELECT activation_id FROM hero_sms_orders WHERE id=1')).activation_id,'123');
 });
 test('an unsuccessful cancellation notification remains queued for retry',async t=>{
-  const f=await fixture(t);f.ctx.heroSmsApi=async()=> 'STATUS_CANCEL';await f.ctx.heroPollSms();
-  const send=f.ctx.enviarTexto;f.ctx.enviarTexto=async()=>false;await f.ctx.heroStatusUpdates();
+  const f=await fixture(t);const send=f.ctx.enviarTexto;f.ctx.enviarTexto=async()=>false;
+  f.ctx.heroSmsApi=async()=> 'STATUS_CANCEL';await f.ctx.heroPollSms();
   assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,0);
   f.ctx.enviarTexto=send;await f.ctx.heroStatusUpdates();assert.equal(f.sent.length,1);
   assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);

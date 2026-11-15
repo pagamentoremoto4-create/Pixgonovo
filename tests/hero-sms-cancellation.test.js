@@ -17,11 +17,12 @@ async function fixture(t,{method='saldo',customer=true}={}){
  const get=(sql,args=[])=>new Promise((resolve,reject)=>db.get(sql,args,(e,row)=>e?reject(e):resolve(row)));
  const all=(sql,args=[])=>new Promise((resolve,reject)=>db.all(sql,args,(e,row)=>e?reject(e):resolve(row)));
  let calls=0;
- const ctx=vm.createContext({run,get,all,DB_PATH:filename,creditHeroRefund,heroProtocol:require('../hero-sms-protocol'),addColumnIfMissing:async()=>{},brl:v=>'R$ '+v,heroSmsApi:async(action,p)=>{assert.equal(action,'setStatus');assert.equal(p.status,8);calls++;return 'ACCESS_CANCEL';}});
+ const ctx=vm.createContext({run,get,all,URLSearchParams,DB_PATH:filename,creditHeroRefund,createHeroLifecycle:require('../hero-sms-lifecycle').createHeroLifecycle,heroSmsV1:async()=>({data:[],meta:{hasMore:false}}),heroProtocol:require('../hero-sms-protocol'),addColumnIfMissing:async()=>{},brl:v=>'R$ '+v,heroSmsApi:async(action,p)=>{if(action==='getStatus')return 'STATUS_WAIT_CODE';assert.equal(action,'setStatus');assert.equal(p.status,8);calls++;return 'ACCESS_CANCEL';}});
  vm.runInContext(section('async function heroPedidosInit(){','async function heroCatalogInit(){'),ctx);
  vm.runInContext(section('async function heroCancelOrder(','let heroOrderMessenger=null;'),ctx);
  vm.runInContext(section('async function heroCreditConfirmedRefund(','let heroSyncExternalRunning'),ctx);
  await ctx.heroPedidosInit();
+ const realLifecycle=ctx.heroLifecycle;ctx.heroLifecycle=()=>{const lifecycle=realLifecycle();return {...lifecycle,preflight:async o=>{await lifecycle.otp(o);return get('SELECT * FROM hero_sms_orders WHERE id=?',[o.id]);}};};
  await run('CREATE TABLE revendas(id INTEGER PRIMARY KEY,saldo REAL,atualizado_em TEXT)');
  if(customer)await run('INSERT INTO revendas(id,saldo) VALUES(1,50)');
  await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method,activation_id,phone,status,created_at,number_received_at) VALUES(1,'wa:5511','wa','73',25,1,?,'123','5511999999999','number_received',datetime('now','-1 hour'),datetime('now','-3 minutes'))",[method]);

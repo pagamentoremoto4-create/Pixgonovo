@@ -43,7 +43,7 @@ test('Telegram buttons disappear after receiving a code and after cancellation',
  const o={id:123,status:'number_received',phone:'5511999999999'};
  assert.equal(renderOrderCard(o,0,true).buttons.length,3);
  assert.equal(renderOrderCard(o,120,true).buttons.length,1);
- o.status='sms_received';o.sms_code='001234';assert.equal(renderOrderCard(o,0,true).buttons.length,1);
+ o.status='sms_received';o.sms_code='001234';assert.equal(renderOrderCard(o,0,true).buttons.length,2);
  o.status='canceled';o.sms_code=null;o.refund_status='credited';
  assert.match(renderOrderCard(o,0,true).text,/devolvido à sua carteira/);
 });
@@ -61,4 +61,20 @@ test('explicit navigation adopts the current Telegram message, and future SMS ed
  await f.messenger.update(1,{reference:{transport:'telegram',messageId:77,kind:'caption'}});
  f.order.status='sms_received';f.order.sms_code='012345';await f.messenger.update(1);
  assert.equal(f.calls.send.length,1);assert.equal(f.calls.edit.length,2);assert.equal(f.calls.edit[1].r.messageId,77);
+});
+
+test('opening an order adopts the visible WhatsApp list even when its old card has unchanged content',async()=>{
+ const f=fixture();await f.messenger.update(1);
+ const list={transport:'whatsapp',key:{id:'visible-list'},sentAt:Date.now()};
+ await f.messenger.update(1,{reference:list});
+ assert.equal(f.calls.send.length,1);assert.equal(f.calls.edit.length,1);
+ assert.equal(f.calls.edit[0].r.key.id,'visible-list');
+ assert.match(f.calls.edit[0].c.text,/Número: \+5511999999999/);
+ assert.match(f.calls.edit[0].c.text,/Solicitar troca/);assert.match(f.calls.edit[0].c.text,/Solicitar cancelamento/);
+ f.order.status='sms_received';f.order.sms_code='789012';await f.messenger.update(1);
+ assert.equal(f.calls.edit[1].r.key.id,'visible-list');
+});
+test('older sessions without a list reference open a fresh card once and reuse it for automatic updates',async()=>{
+ const f=fixture();await f.messenger.update(1);await f.messenger.update(1,{forceNewMessage:true});
+ assert.equal(f.calls.send.length,2);await f.messenger.update(1);assert.equal(f.calls.send.length,2);
 });

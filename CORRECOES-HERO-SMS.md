@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.5 — correções consolidadas
+# CENTRALUNLOCKER 10.1.7 — correções consolidadas
 
 ## Pedido declarado como teste
 
@@ -87,11 +87,11 @@ Há um formulário separado para associar o ID exato de uma ativação cancelada
 manualmente, após declaração do administrador e confirmação `STATUS_CANCEL` do
 fornecedor. Não cancela novamente e não credita saldo sozinho.
 
-**Limitação herdada:** o histórico REST continua com a interpretação legada de 8
-como cancelamento, 6 como finalização e 10 como reembolso. O OpenAPI fornecido lista
-o enum sem definir cada significado. A interpretação financeira de status 10
-precisa de homologação com a Hero SMS; o ledger impede repetição, mas não comprova
-o significado desse código. Fechar teste não utiliza essa inferência.
+O esquema `ActivationHistoryStatus` do OpenAPI enviado define expressamente
+6=concluída, 8=cancelada e 10=reembolso. A definição genérica de status não
+repete as descrições. O reembolso 10 é registrado como prova para a ativação
+exata antes do crédito; 8/STATUS_CANCEL isolados aguardam confirmação financeira.
+A consulta inclui pedidos antigos pendentes, sem cortar a busca em 30 dias.
 
 ## Catálogo e Render
 
@@ -101,7 +101,7 @@ calculados sobre todo o catálogo. Testes com 15 mil ofertas verificam busca ap�
 os primeiros 10 mil registros e navegação. Nomes vindos da busca são escapados.
 
 `render.yaml` apontava healthCheckPath=/health, mas essa rota não existia. A versão
-cria `/health`, verifica a conexão do banco e informa versão 10.1.5. O serviço de
+cria `/health`, verifica a conexão do banco e informa versão 10.1.7. O serviço de
 produção respondeu 200 na página inicial e 401 no catálogo sem login na checagem
 pública feita após o relato de 502. Não foi possível atribuir aquele 502 a uma causa
 única sem logs do Render; a paginação reduz a carga da rota, mas não comprova sozinha
@@ -109,7 +109,7 @@ que não ocorrerão falhas da hospedagem.
 
 ## Verificação e pacote
 
-98 testes passaram com SQLite e respostas simuladas. Incluem compra REST, troca
+127 testes passaram com SQLite e respostas simuladas. Incluem compra REST, troca
 com novo ID, Telegram com texto/legenda, valor e ID do Pix, saldo, cancelamento,
 filas, teste encerrado, repetição de operações e catálogo com 15 mil registros.
 Não foram feitas operações financeiras reais nem deploy na conta do usuário.
@@ -117,3 +117,54 @@ O ZIP completo preserva código, imagens, módulos e testes, sem .env privado,
 banco local, sessões, chaves geradas ou node_modules. Configure seu ambiente e
 preserve o DATA_DIR existente na atualização. O projeto declara Node 20.x; os testes
 locais foram executados no Node 24.22.1.
+
+## Países e abertura de pedidos — 10.1.6
+
+Sincronização via GET /api/v1/activations/offers/sms?services=wa, com snapshot validado e transação própria. Países novos começam ocultos e as escolhas administrativas são preservadas. O painel /admin/herosms/paises permite sincronizar e ativar cada país. WhatsApp e Telegram exibem países habilitados com estoque e mantêm o preço individual existente, com padrão R$ 25.
+
+Selecionar um pedido na lista do WhatsApp transforma a mensagem visível da lista no cartão do pedido; sessões antigas recebem um cartão novo. Atualizações automáticas posteriores usam esse cartão. Troca e cancelamento continuam condicionados ao estado, ausência de SMS e espera de 120 segundos.
+
+Validação local com testes automatizados e respostas simuladas. Não foram realizadas compras, pagamentos nem implantação na hospedagem.
+
+## Fluxo completo — 10.1.7
+
+O módulo hero-sms-lifecycle.js persiste snapshot de compra/troca com expiração,
+custo/moeda e estado do fornecedor; recupera todos os SMS paginados por ativação;
+deduplica eventos por ID e concilia o código provisório da API compatível.
+Mensagens sem código também bloqueiam troca/cancelamento. Os handlers consultam
+SMS/status antes de executar essas ações e usam trava condicional no banco.
+
+O cartão apresenta prazo em minutos, códigos numerados com horários de Brasília,
+páginas de 8 mensagens e opções elegíveis. Saldo e pagamento ficam fora do cartão
+entregue; saldo aparece no menu/checkout e na devolução concluída. Ao abrir Meus
+números, o cartão visível é adotado. Listas de pedidos têm paginação. WhatsApp
+respeita seu limite de edição; legendas Telegram longas migram para texto.
+
+Finalização usa POST /activations/{id}/finish, com resposta 204 esperada. A opção
+é numérica no WhatsApp e botão no Telegram; exige SMS e confirmação do cliente.
+Ao expirar, consulta o fornecedor: com SMS finaliza se ainda ativa; sem SMS,
+solicita cancelamento quando possível e aguarda prova de reembolso. Falha de rede
+não confirma finalização nem autoriza crédito. Histórico 6 resolve finalização
+pendente; uma listagem ativa autenticada permite nova tentativa da finalização
+pendente que falhou. Nunca se repete compra incerta.
+
+A fila de conciliação seleciona pendentes por última verificação, incluindo
+cancelados não creditados antigos. Reembolso 10 e ACCESS_CANCEL têm comprovantes
+persistidos; falha no crédito preserva a prova para recuperação. Transação de
+carteira e ledger impedem crédito duplicado. Pedido com SMS exige conferência,
+sem crédito automático. Encerrar ativação com sucesso não devolve valor.
+
+Débito de saldo e estado pago são gravados em uma transação SQLite própria,
+com ledger único. Reinício antes da compra recupera apenas pedidos ainda pagos,
+nunca purchasing/uncertain. Clientes não recebem cobrança dupla na recuperação.
+
+Webhook opcional POST /webhooks/herosms/:token usa HERO_SMS_WEBHOOK_SECRET
+(min. 32 caracteres) e consulta a API autenticada antes de aceitar SMS. Valida país,
+serviço e vínculo da ativação. Sem segredo fica desabilitado. O cadastro da URL no
+provedor depende de recurso da conta Hero; não há endpoint de configuração na
+especificação enviada. Polling continua como recuperação independente do webhook.
+
+Testes: 127 casos com banco isolado e fornecedores/canais simulados. Health 200
+com versão 10.1.7 e páginas administrativas verificadas; migração de schema antigo
+confirmada, preservando pedido #15 test_closed/refund none. Node local 24.22.1;
+o projeto mantém declaração de Node 20.x. Sem compras/pagamentos reais ou deploy.
