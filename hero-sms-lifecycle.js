@@ -6,7 +6,7 @@ function createHeroLifecycle({run,get,all,api,compat,credit,notify=async()=>{},n
  async function sms(order,entry){
   if(entry.type&&entry.type!=='sms')return false;
   const current=await get('SELECT status,refund_status,activation_id FROM hero_sms_orders WHERE id=?',[order.id]);
-  if(!current||current.status==='test_closed'||current.refund_status==='credited'||String(current.activation_id)!==String(order.activation_id))return false;
+  if(!current||current.status==='test_closed'||['credited','external_pending','credited_external'].includes(current.refund_status)||String(current.activation_id)!==String(order.activation_id))return false;
   const code=entry.smsCode??entry.code??null,text=entry.smsText??entry.text??null;
   if(!String(code??'').trim()&&!String(text??'').trim())return false;
   const activation=String(order.activation_id),realId=entry.id!=null?String(entry.id):null;
@@ -82,7 +82,7 @@ function createHeroLifecycle({run,get,all,api,compat,credit,notify=async()=>{},n
  async function sync(){
   if(syncing)return;syncing=true;
   try{
-   const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status!='test_closed' AND (status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','finish_pending','uncertain','purchasing') OR (status='canceled' AND refund_status!='credited')) ORDER BY COALESCE(last_reconciled_at,''),id LIMIT 50");
+   const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status!='test_closed' AND (status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','finish_pending','uncertain','purchasing') OR (status='canceled' AND refund_status NOT IN ('credited','external_pending','credited_external'))) ORDER BY COALESCE(last_reconciled_at,''),id LIMIT 50");
    if(!orders.length)return;
    const map=new Map(orders.map(o=>[String(o.activation_id),o]));
    for(const o of orders)await run('UPDATE hero_sms_orders SET last_reconciled_at=? WHERE id=?',[new Date(now()).toISOString(),o.id]);

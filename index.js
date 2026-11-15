@@ -1,10 +1,11 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.8';
+const APP_RELEASE='10.1.9';
 const heroProtocol = require('./hero-sms-protocol');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
 const {creditHeroRefund,debitHeroOrder}=require('./hero-sms-refunds');
 const {createHeroLifecycle,createHeroWebhook}=require('./hero-sms-lifecycle');
+const {createSharedHeroService,mountSharedHeroRoutes}=require('./hero-sms-shared');
 const {checkoutError,checkoutMessage,checkoutDiagnostic}=require('./hero-sms-checkout-errors');
 const {validateHeroPix,heroPixValidation,parseHeroPixContext,heroPixDelivered}=require('./hero-sms-pix');
 
@@ -3667,7 +3668,7 @@ async function heroBuyPaid(id){
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
   try{
     if(!heroValidCountry(o.country)||String(o.service).toLowerCase()!=='wa')throw new Error('Pedido com país ou serviço inválido.');
-    const response=await heroSmsV1('POST','/activations',{service:o.service,country:Number(o.country),amount:1,verificationType:'sms',resellerUserId:'client_'+o.customer_id,...(Number(o.cost_at_quote)>0?{maxPrice:Number(o.cost_at_quote)}:{})});
+    const response=await heroSmsV1('POST','/activations',{service:o.service,country:Number(o.country),amount:1,verificationType:'sms',resellerUserId:o.payment_method==='external'?'shared_'+o.id:'client_'+o.customer_id,...(Number(o.cost_at_quote)>0?{maxPrice:Number(o.cost_at_quote)}:{})});
     const {activationId:activation,phoneNumber:phone}=heroProtocol.parsePurchasedActivation(response);
     await run('UPDATE hero_sms_orders SET activation_id=? WHERE id=? AND activation_id IS NULL',[activation,id]);
     if(!phone)throw new Error('Hero SMS retornou a ativação '+activation+' sem número confirmado; conferir no fornecedor.');
@@ -3677,8 +3678,9 @@ async function heroBuyPaid(id){
     const diagnostic=checkoutDiagnostic(e,'HERO-PURCHASE-'+id);
     console.log('HERO_PURCHASE',JSON.stringify(diagnostic));
     await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=?",[diagnostic.message,id]);
-    await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');return;
+    if(o.payment_method!=='external')await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');return;
   }
+  if(o.payment_method==='external')return;
   try{await heroWhatsMenuPedido(o.customer_jid,id);}
   catch(e){await run('UPDATE hero_sms_orders SET last_error=? WHERE id=?',['Número comprado; entrega da mensagem pendente: '+String(e.message).slice(0,250),id]);}
 }
@@ -3768,6 +3770,7 @@ async function heroEditOrderMessage(reference,card){
 }
 async function heroUpdateOrderCard(id,options={}){
   await heroPedidosInit();
+  if((await get('SELECT payment_method FROM hero_sms_orders WHERE id=?',[Number(id)]))?.payment_method==='external')return false;
   if(!heroOrderMessenger)heroOrderMessenger=createOrderMessenger({
     loadOrder:async orderId=>{
       const order=await get('SELECT o.*,c.name AS country_name FROM hero_sms_orders o LEFT JOIN hero_sms_country_names c ON c.id=o.country WHERE o.id=?',[orderId]);
@@ -3946,6 +3949,7 @@ async function heroRecoverPix(){
 // Legacy history mapping: 8=cancelled, 10=refunded, 6=finished.
 // ActivationHistoryStatus in the supplied OpenAPI explicitly defines these meanings.
 async function heroCreditConfirmedRefund(o,requireReceipt=false){
+  if((await get('SELECT payment_method FROM hero_sms_orders WHERE id=?',[o.id]))?.payment_method==='external')return heroSharedService().confirmRefund(o.id,requireReceipt);
   return creditHeroRefund(DB_PATH,o.id,{requireReceipt});
 }
 async function heroCloseTestOrder(id){
@@ -3961,8 +3965,8 @@ async function heroCloseTestOrder(id){
   return 'Pedido #'+order.id+' marcado como teste encerrado. Bloqueio deste pedido removido. Pix e saldo não foram alterados.';
 }
 async function heroQueueExternalUpdate(id){
-  const order=await get('SELECT status,phone,refund_status FROM hero_sms_orders WHERE id=?',[id]);
-  if(!order)return;
+  const order=await get('SELECT status,phone,refund_status,payment_method FROM hero_sms_orders WHERE id=?',[id]);
+  if(!order||order.payment_method==='external')return;
   const state=JSON.stringify(order);
   await run(`INSERT INTO hero_sms_external_events(order_id,state) VALUES(?,?)
     ON CONFLICT(order_id) DO UPDATE SET state=excluded.state,
@@ -3988,6 +3992,12 @@ async function heroReconcileExternalCancellation(orderId,activationId){
   await heroQueueExternalUpdate(id);
   return 'Cancelamento confirmado na Hero SMS e atualização do cliente colocada na fila. O reembolso confirmado no histórico libera o crédito na carteira automaticamente.';
 }
+let heroSharedInstance=null;
+function heroSharedService(){
+  if(!heroSharedInstance)heroSharedInstance=createSharedHeroService({filename:DB_PATH,run,get,all,ensureOrders:heroPedidosInit,
+    catalog:async()=>await heroSmsVisivel('whatsapp')?heroSmsVitrine('WhatsApp'):[],purchase:heroBuyPaid,cancel:heroCancelOrder,replace:heroReplaceOrder,finish:heroFinishOrder});
+  return heroSharedInstance;
+}
 let heroLifecycleInstance=null;
 function heroLifecycle(){
   if(!heroLifecycleInstance)heroLifecycleInstance=createHeroLifecycle({run,get,all,api:(...args)=>heroSmsV1(...args),compat:(...args)=>heroSmsApi(...args),credit:(o,requireReceipt)=>heroCreditConfirmedRefund(o,requireReceipt),notify:heroQueueExternalUpdate});
@@ -4012,7 +4022,7 @@ async function heroStatusUpdates(){
     for(const o of historyRefunds)try{await heroCreditConfirmedRefund(o,false);}catch(e){console.log('Hero reembolso pendente #'+o.id,String(e.message).slice(0,120));}
     const legacyPending=await all('SELECT order_id FROM hero_sms_notifications WHERE delivered=0 LIMIT 100');
     for(const notification of legacyPending)await heroQueueExternalUpdate(notification.order_id);
-    const orders=await all("SELECT o.id,o.status,e.state AS event_state,e.delivered AS event_delivered FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id LEFT JOIN hero_sms_external_events e ON e.order_id=o.id WHERE (o.activation_id IS NOT NULL OR e.delivered=0) AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending','finish_pending','test_closed') AND (r.order_id IS NOT NULL OR o.status='number_received' OR e.delivered=0) ORDER BY o.id DESC LIMIT 300");
+    const orders=await all("SELECT o.id,o.status,e.state AS event_state,e.delivered AS event_delivered FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id LEFT JOIN hero_sms_external_events e ON e.order_id=o.id WHERE o.payment_method!='external' AND (o.activation_id IS NOT NULL OR e.delivered=0) AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending','finish_pending','test_closed') AND (r.order_id IS NOT NULL OR o.status='number_received' OR e.delivered=0) ORDER BY o.id DESC LIMIT 300");
     for(const o of orders){
       try{
         await heroUpdateOrderCard(o.id,{createIfMissing:o.status==='number_received'||o.event_delivered===0});
@@ -4030,6 +4040,7 @@ setInterval(()=>heroSyncExternal().catch(e=>console.log('Hero SMS external sync'
 setTimeout(()=>heroRecoverPix().catch(e=>console.log('HERO_PIX_RECOVERY',e.message)),20000);
 setInterval(()=>heroRecoverPix().catch(e=>console.log('HERO_PIX_RECOVERY',e.message)),60000).unref?.();
 setInterval(()=>heroRecoverPaidWallet().catch(e=>console.log('HERO_WALLET_RECOVERY',e.message)),30000).unref?.();
+setInterval(()=>heroSharedService().recover().catch(e=>console.log('HERO_SHARED_RECOVERY',e.code||'TEMPORARY')),30000).unref?.();
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
   let texto=`🌐 *SERVIÇOS ONLINE*\n\n1️⃣ 📩 *RECEBER SMS*\n`;
@@ -13696,6 +13707,8 @@ app.use('/admin', basicAuth);
 const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
+// Hero SMS compartilhada: mesma URL/chave do estoque eSIM; habilitação independente.
+mountSharedHeroRoutes(app,{service:heroSharedService(),authorized:async req=>await sharedEsimAuthorized(req)&&((await getConfig('hero_sms_shared_enabled','0'))==='1'||req.path.startsWith('/api/shared-herosms/orders/')),catalog:async()=>await heroSmsVisivel('whatsapp')?heroSmsVitrine('WhatsApp'):[]});
 // GGSOMA compartilhada: a credencial fica somente no Pixgonovo central.
 app.get('/api/shared-ggsoma/health', async (req,res)=>{
   if (!(await sharedEsimAuthorized(req))) return res.status(401).json({ok:false,error:'unauthorized_or_disabled'});
@@ -17304,6 +17317,17 @@ app.post('/admin/herosms/pedidos/:id/conferir-cancelamento',async(req,res)=>{
     res.redirect('/admin/herosms/pedidos/'+id+'?erro='+encodeURIComponent(message));
   }
 });
+app.get('/admin/herosms/compartilhado',async(req,res)=>{
+  await heroSharedService().init();
+  const enabled=(await getConfig('hero_sms_shared_enabled','0'))==='1';
+  const orders=await all('SELECT s.source,s.external_id,s.customer_id,o.status,o.refund_status,o.phone FROM hero_sms_shared_orders s JOIN hero_sms_orders o ON o.id=s.order_id ORDER BY o.id DESC LIMIT 100');
+  const rows=orders.map(o=>`<tr><td>${safeHtml(o.source)}</td><td>${safeHtml(o.external_id)}</td><td>${safeHtml(o.customer_id)}</td><td>${safeHtml(o.status)}</td><td>${safeHtml(o.refund_status)}</td><td>${safeHtml(o.phone||'—')}</td></tr>`).join('');
+  res.send(page('Hero SMS compartilhado',`<h1>🔗 Hero SMS — outros bots</h1><div class="card"><p>Usa a mesma URL e chave de Estoque eSIM compartilhado. A chave Hero permanece somente neste servidor. O outro bot cobra e devolve na própria carteira; nenhum saldo local é creditado por esses pedidos.</p><form method="post"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label><input type="checkbox" name="enabled" value="1" ${enabled?'checked':''}> Permitir vendas de números pelos bots conectados</label><button>Salvar</button></form><p><a href="/admin/esim-compartilhado">Configurar URL/chave</a> · <a href="/admin/herosms/paises">Países habilitados</a></p></div><table><tr><th>Bot</th><th>Pedido externo</th><th>Cliente externo</th><th>Ativação</th><th>Devolução</th><th>Número</th></tr>${rows}</table>`));
+});
+app.post('/admin/herosms/compartilhado',async(req,res)=>{
+  if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página antes de salvar.');
+  await setConfig('hero_sms_shared_enabled',req.body.enabled==='1'?'1':'0');res.redirect('/admin/herosms/compartilhado');
+});
 app.get('/admin/herosms/pedidos/:id',async(req,res)=>{
   try{
     const id=Number(req.params.id);
@@ -17334,7 +17358,7 @@ app.get('/admin/herosms',async(req,res)=>{
     const configurada=!!(await heroSmsChave());
     const aviso=req.query.ok?`<p style="color:#22c55e">${safeHtml(String(req.query.ok))}</p>`:'';
     const erro=req.query.erro?`<p style="color:#ef4444">${safeHtml(String(req.query.erro))}</p>`:'';
-    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p>Configuração segura da API — CENTRALUNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/paises">🌎 Sincronizar e ativar países para clientes</a></p><p><a href="/admin/herosms/catalogo">📦 Gerenciar catálogo</a></p><p><a href="/admin/herosms/pedidos">📋 Pedidos Hero SMS</a></p><p><a href="/admin/herosms/teste-compra">🧪 Teste de compra REAL (somente administrador)</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Confira compras, PIX e entrega automatica antes de liberar o uso em producao.</p></div>`));
+    res.send(page('Hero SMS',`<div class="hero"><h1>📱 Hero SMS</h1><p><a href="/admin/herosms/compartilhado">🔗 Compartilhar números com outros bots</a></p><p>Configuração segura da API — CENTRALUNLOCKER</p></div>${aviso}${erro}<div class="card"><h3>Chave API</h3><p>${configurada?'✅ Chave cadastrada':'⚠️ Chave não cadastrada'}</p><form method="post" action="/admin/herosms/config"><label>Nova chave API</label><input type="password" name="api_key" required autocomplete="off" placeholder="Cole sua chave aqui"><button type="submit">Salvar chave</button></form><form method="post" action="/admin/herosms/testar"><button type="submit">Testar conexão e consultar saldo</button></form><p><a href="/admin/herosms/paises">🌎 Sincronizar e ativar países para clientes</a></p><p><a href="/admin/herosms/catalogo">📦 Gerenciar catálogo</a></p><p><a href="/admin/herosms/pedidos">📋 Pedidos Hero SMS</a></p><p><a href="/admin/herosms/teste-compra">🧪 Teste de compra REAL (somente administrador)</a></p><h3>Diagnosticos da API (sem comprar numeros)</h3><p>Consulte saldo, paises, servicos e precos para validar a conexao antes de habilitar vendas.</p><form method="post" action="/admin/herosms/diagnostico"><select name="acao"><option value="getBalance">Saldo</option><option value="getCountries">Paises</option><option value="getServicesList">Servicos</option><option value="getPrices">Precos</option></select><button type="submit">Consultar API</button></form><p>⚠️ Esta versao e destinada a testes de conectividade. Confira compras, PIX e entrega automatica antes de liberar o uso em producao.</p></div>`));
   }catch(e){res.status(500).send('Erro ao abrir configuração Hero SMS');}
 });
 app.post('/admin/herosms/config',async(req,res)=>{

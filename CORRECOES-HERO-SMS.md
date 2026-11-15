@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.8 — correções consolidadas
+# CENTRALUNLOCKER 10.1.9 — correções consolidadas
 
 ## Pedido declarado como teste
 
@@ -176,3 +176,30 @@ exibe WHATSAPP SMS, com captura do Custom Emoji e persistência pela configuraç
 visual existente. TG_ICON_WHATSAPP continua exclusivo de Vincular WhatsApp.
 Sem ícone configurado, o botão mantém o emoji comum. Não cria outro botão nem
 altera compras, saldo ou anúncios. Compra direta Hero SMS em anúncios segue pendente.
+
+## Hero SMS compartilhada — 10.1.9
+
+Novo hero-sms-shared.js expõe catálogo, compra, consulta, ações e confirmação de
+crédito externo em /api/shared-herosms. Requer a chave da conexão eSIM e habilitação
+independente no painel. Compartilhamento desabilitado por padrão; o administrador
+habilita vendas em /admin/herosms/compartilhado. Consultas e ações de pedidos já
+aceitos permanecem disponíveis ao desabilitar somente novas vendas de números.
+
+Pedido externo tem identidade persistente por origem/ID externo/cliente, país e
+preço congelados. A transação SQLite própria cria mapeamento e pedido pago juntos.
+O claim paid->purchasing evita nova compra em repetição. Rejeição definitiva de
+estoque é registrada por ID externo, impedindo compra tardia após devolução local.
+Ações também têm ID único; falha incerta não é repetida como compra nova.
+
+Pagamento external não envia cartão/mensagem pelos canais do Central, não debita
+revendas nem usa o ledger de crédito local. Reembolso confirmado cria comprovante
+externo com referência única e valor da venda. O parceiro credita sua carteira
+local transacionalmente e só depois confirma o recebimento. A repetição do ACK não
+movimenta saldo. SMS, prazo e regras de troca/finalização são os mesmos do fluxo
+nativo. O identificador resellerUserId de externos é shared_<pedido central>.
+
+135 testes Node aprovados. 19 testes Python do outro bot incluem uma integração
+HTTP usando este módulo e os handlers reais de compra/troca/cancelamento com Hero
+simulada: confirmou múltiplos SMS, finalização por prazo e devolução no bot correto
+sem alterar carteira nativa. Startup do Central e páginas administrativas/API
+compartilhada foram verificadas em banco isolado. Não houve operações reais nem deploy.

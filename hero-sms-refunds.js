@@ -13,6 +13,7 @@ async function creditHeroRefund(filename,orderId,{requireReceipt=true}={}){
     const order=await get('SELECT * FROM hero_sms_orders WHERE id=?',[orderId]);
     if(!order)throw new Error('Pedido não encontrado.');
     if(order.refund_status==='credited'){await run('COMMIT');transaction=false;return {credited:true,alreadyCredited:true,amount:order.price_brl};}
+    if(order.payment_method==='external')throw new Error('Pedido externo: devolução deve ocorrer no bot de origem.');
     if(order.status==='test_closed'||order.sms_received||order.sms_code)throw new Error('Pedido com SMS ou teste encerrado exige conferência; crédito automático bloqueado.');
     if(requireReceipt){
       const receipt=await get('SELECT activation_id FROM hero_sms_cancel_receipts WHERE order_id=?',[orderId]);

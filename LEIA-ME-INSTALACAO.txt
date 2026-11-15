@@ -1,4 +1,4 @@
-CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.8
+CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.9
 
 INSTALAR / ATUALIZAR
 1. Extraia o ZIP e atualize os arquivos de código do projeto.
@@ -6,7 +6,7 @@ INSTALAR / ATUALIZAR
    O pacote não inclui banco, senhas, sessões privadas ou node_modules.
 3. Instale as dependências com npm ci (ou o buildCommand já configurado no Render).
 4. Inicie com npm start.
-5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.8.
+5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.9.
 
 LIBERAR O PEDIDO #15 DECLARADO COMO TESTE
 No painel CENTRALUNLOCKER, abra Hero SMS > Pedidos > #15 — Abrir.
@@ -88,3 +88,20 @@ Envie o Custom Emoji/Premium diretamente pelo seletor do Telegram.
 O ícone será salvo e usado no botão WhatsApp já existente na HOME, sem duplicá-lo.
 Vincular WhatsApp mantém sua própria configuração. Abra novamente a HOME para visualizar.
 A integração de compra direta Hero SMS nos anúncios continua pendente nesta versão.
+
+HERO SMS NO OUTRO BOT TELEGRAM — 10.1.9
+Abra Hero SMS > Compartilhar números com outros bots (/admin/herosms/compartilhado).
+Habilite as vendas e mantenha Estoque eSIM compartilhado ativo.
+O outro bot usa a mesma URL/chave, sem receber a chave Hero.
+Instale também o ZIP Telegramesim V22.0, abra /admin/herosms no outro painel,
+teste a conexão, sincronize os países e habilite a exibição do serviço.
+O cliente paga e recebe devolução na carteira do próprio outro bot.
+Nenhum saldo de revenda local é movimentado por pedidos externos.
+País novo no outro bot: R$ 25, editável em Produtos sem ser sobrescrito pelo sync.
+O custo da compra continua sendo debitado pela Hero do saldo Hero deste Central.
+Pedidos antigos aceitos continuam consultáveis quando você desabilita só novas
+vendas de números; a conexão compartilhada geral precisa continuar ativa.
+135 testes Node e 19 testes Python, incluindo HTTP entre os dois projetos,
+passaram com fornecedores, pagamentos e Telegram simulados.
+Leia INTEGRACAO-HERO-SMS-COM-OUTRO-BOT.md para instalação e protocolo.
+A compra direta Hero SMS nos anúncios automáticos deste painel continua pendente.
