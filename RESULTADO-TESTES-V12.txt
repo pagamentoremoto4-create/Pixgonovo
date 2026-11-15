@@ -1,0 +1,48 @@
+Hero SMS: 8 verificações aprovadas
+✔ tests/hero-sms-order-guard.test.js (75.406717ms)
+✔ idempotência do pedido e saldo, compra e reembolso (1.439092ms)
+✔ PIX só libera compra com confirmação do gateway (0.374886ms)
+✔ cancelamento confirmado permite um único estorno de saldo (0.38481ms)
+✔ PIX não é estornado artificialmente em saldo (0.278242ms)
+✔ V12: estorno simultâneo credita exatamente uma vez no SQLite (48.749574ms)
+✔ V12: falha na conta desfaz estorno e preserva pedido (39.400749ms)
+✔ V12: SMS recebido impede estorno (37.974917ms)
+✔ V12: prazo contado da entrega e reiniciado na troca (21.444929ms)
+✔ V12: compra incerta não é repetida; falha no envio preserva número (25.394263ms)
+✔ V12: timeout de compra fica incerto sem segunda chamada (24.604102ms)
+Hero SMS notificação #1 Canal indisponível; aviso pendente
+✔ V12: falha booleana de envio SMS permanece pendente e reenvia (46.55338ms)
+✔ V12: cancelamento concorrente ao polling não envia SMS obsoleto (43.918905ms)
+Hero status notification #1 Canal indisponível; aviso pendente
+✔ V12: aviso cancelamento falhou, mesma alteração é reenviada (35.56852ms)
+✔ V12: cancelamento genérico concorrente estorna uma vez e registra auditoria (44.026324ms)
+✔ V12: pedido cancelado não pode ser finalizado nem cobrado (41.082101ms)
+✔ V12: história extrai OTP real e não ressuscita pedido cancelado (27.35611ms)
+✔ V12: migração repetida preserva dados existentes (24.638433ms)
+✔ V12: pagamento duplicado concorrente gera um crédito e um lançamento (63.209312ms)
+✔ V12: confirmação Mercado Pago rejeita ID, moeda e valor divergentes (24.771018ms)
+✔ V12: MisticPay exige valor real, depósito PIX e mesma transação (26.557737ms)
+✔ V12: lote eSIM concorrente não vende unidade duas vezes nem perde saldo (48.081013ms)
+✔ V12: lote sem saldo não reserva estoque e não gera pedidos (25.215728ms)
+✔ V12: entrega eSIM falha e reenvia o mesmo item sem cobrança (29.127285ms)
+✔ V12: cancelar exige dono, espera, confirmação explícita e estorna uma vez (41.82415ms)
+✔ V12: timeout no cancelamento não credita nem repete chamada (24.994701ms)
+✔ V12: troca substitui ativação sem nova cobrança, espera e sem escape literal (24.500829ms)
+✔ V12: troca incerta fica bloqueada e não solicita outro número (23.900629ms)
+✔ V12: primeiro aviso terminal também é enviado sem baseline anterior (23.810466ms)
+✔ V12: 14 menus da V11 preservados byte a byte (42.441736ms)
+✔ V12: retorno false do envio WhatsApp eSIM não confirma entrega (24.342094ms)
+✔ V12: assinatura concorrente renova uma vez e guarda aviso privado (44.67793ms)
+✔ V12: falha da fila de assinatura reverte licença e permite repetir com segurança (43.214009ms)
+✔ V12: IMEI repetido no mesmo lote cobra somente um pedido (44.381701ms)
+✔ V12: IMEI com pedido ativo não gera débito nem novo pedido (41.335546ms)
+❌ Entrega eSIM PIX pendente: Estoque alterado
+✔ V12: PIX eSIM repetido consome uma unidade e preserva carteira (50.057743ms)
+ℹ tests 36
+ℹ suites 0
+ℹ pass 36
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1273.695514
