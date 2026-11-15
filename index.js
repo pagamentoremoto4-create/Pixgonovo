@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.7';
+const APP_RELEASE='10.1.8';
 const heroProtocol = require('./hero-sms-protocol');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
@@ -5402,6 +5402,7 @@ async function menuLayoutTelegramAdmin(chatId){
 async function menuIconesAnimadosTelegram(chatId){
   await carregarVisualTelegram();
   const itens=[
+    ['whatsapp_sms','WHATSAPP SMS','TG_ICON_WHATSAPP_SMS','📱'],
     ['esim','COMPRA eSIM','TG_ICON_ESIM','📱'],['servicos','SERVIÇOS','TG_ICON_SERVICOS','🛠️'],['premium','ASSINATURA PREMIUM','TG_ICON_PREMIUM','👑'],
     ['carteira','Conta / Saldo','TG_ICON_CARTEIRA','💰'],['pedidos','Meus pedidos','TG_ICON_PEDIDOS','📦'],['pagar','ADICIONAR SALDO','TG_ICON_PAGAR','💵'],
     ['pix','CADASTRAR PIX','TG_ICON_PIX','💠'],['suporte','SUPORTE','TG_ICON_SUPORTE','🎧'],['whatsapp','VINCULAR WHATSAPP','TG_ICON_WHATSAPP','🔗'],
@@ -5412,7 +5413,7 @@ async function menuIconesAnimadosTelegram(chatId){
   kb.push([{text:'⬅️ Layout',callback_data:'admin_layout_tg'}]);
   return tgBot.sendMessage(chatId,'✨ *ÍCONES ANIMADOS*\n\nEscolha a função e depois envie 1 Custom Emoji/Premium pelo seletor do Telegram. O bot captura o ID automaticamente.',{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
 }
-const TG_ICON_ADMIN_MAP={esim:'TG_ICON_ESIM',servicos:'TG_ICON_SERVICOS',premium:'TG_ICON_PREMIUM',carteira:'TG_ICON_CARTEIRA',pedidos:'TG_ICON_PEDIDOS',pagar:'TG_ICON_PAGAR',pix:'TG_ICON_PIX',suporte:'TG_ICON_SUPORTE',whatsapp:'TG_ICON_WHATSAPP',admin:'TG_ICON_ADMIN',comprar:'TG_ICON_COMPRAR',voltar:'TG_ICON_VOLTAR',tim:'TG_ICON_TIM',claro:'TG_ICON_CLARO',vivo:'TG_ICON_VIVO'};
+const TG_ICON_ADMIN_MAP={whatsapp_sms:'TG_ICON_WHATSAPP_SMS',esim:'TG_ICON_ESIM',servicos:'TG_ICON_SERVICOS',premium:'TG_ICON_PREMIUM',carteira:'TG_ICON_CARTEIRA',pedidos:'TG_ICON_PEDIDOS',pagar:'TG_ICON_PAGAR',pix:'TG_ICON_PIX',suporte:'TG_ICON_SUPORTE',whatsapp:'TG_ICON_WHATSAPP',admin:'TG_ICON_ADMIN',comprar:'TG_ICON_COMPRAR',voltar:'TG_ICON_VOLTAR',tim:'TG_ICON_TIM',claro:'TG_ICON_CLARO',vivo:'TG_ICON_VIVO'};
 async function editarVisualCategoria(chatId,slug){
   const nomes={home:'HOME',esim:'COMPRA eSIM',servicos:'SERVIÇOS',premium:'ASSINATURA PREMIUM'};
   return tgBot.sendMessage(chatId,`🎨 *${nomes[slug]||slug}*\n\nEscolha o item para configurar.`,{parse_mode:'Markdown',reply_markup:{inline_keyboard:[
@@ -5455,6 +5456,7 @@ const TG_DEFAULT_ANIMATED_ICONS = {
   TG_ICON_PIX: '',
   TG_ICON_SUPORTE: '',
   TG_ICON_WHATSAPP: '',
+  TG_ICON_WHATSAPP_SMS: '',
   TG_ICON_ADMIN: '',
   TG_ICON_COMPRAR: '',
   TG_ICON_VOLTAR: '',
@@ -5477,7 +5479,7 @@ async function tecladoTelegramMenu(cliente) {
     linhas.push([tgBtn(String(c.nome||'CATEGORIA').toUpperCase(), c.callback_data||`homecat_${c.id}`, c.estilo||'primary', c.icon_key||'', c.fallback_emoji||'📂')]);
   }
   // V271: acesso direto ao catálogo Hero SMS no menu principal Telegram.
-  linhas.unshift([tgBtn('WhatsApp', 'hero_sms_apps', 'primary', '', '📱')]);
+  linhas.unshift([tgBtn('WhatsApp', 'hero_sms_apps', 'primary', 'TG_ICON_WHATSAPP_SMS', '📱')]);
   linhas.push([tgBtn('Conta / Saldo', 'menu_conta', 'success', 'TG_ICON_CARTEIRA', '💰'), tgBtn('Meus pedidos', 'menu_historico', 'success', 'TG_ICON_PEDIDOS', '📦')]);
   linhas.push([tgBtn('ADICIONAR SALDO', 'menu_pagar', 'success', 'TG_ICON_PAGAR', '💵')]);
   linhas.push([tgBtn('CADASTRAR PIX', 'menu_cadastrar_pix', 'primary', 'TG_ICON_PIX', '💠'), tgBtn('SUPORTE', 'menu_suporte', 'danger', 'TG_ICON_SUPORTE', '👨‍💻')]);
@@ -8536,7 +8538,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         scm=data.match(/^admlay_svcat_icon_(\d+)$/);if(scm){const c=await get('SELECT * FROM servicos_categorias WHERE id=?',[Number(scm[1])]);if(!c)return;adminSessao.set(adminKey,{etapa:'layout_servicecat_icon',category_id:c.id});await tgBot.sendMessage(chatId,`✨ Envie 1 Custom Emoji/Premium para o botão *${c.nome}*.`,{parse_mode:'Markdown'});return;}
         if(data==='admlay_services'){await listarServicosLayout(chatId);return;}
         if(data==='admlay_icons_all'){await menuIconesAnimadosTelegram(chatId);return;}
-        lm=data.match(/^admlay_seticon_(esim|servicos|premium|carteira|pedidos|pagar|pix|suporte|whatsapp|admin|comprar|voltar|tim|claro|vivo)$/);if(lm){const nomes={esim:'COMPRA eSIM',servicos:'SERVIÇOS',premium:'ASSINATURA PREMIUM',carteira:'Conta / Saldo',pedidos:'Meus pedidos',pagar:'ADICIONAR SALDO',pix:'CADASTRAR PIX',suporte:'SUPORTE',whatsapp:'VINCULAR WHATSAPP',admin:'ADMINISTRAÇÃO',comprar:'COMPRAR',voltar:'VOLTAR',tim:'TIM',claro:'CLARO',vivo:'VIVO'};adminSessao.set(adminKey,{etapa:'layout_icon_global',slug:lm[1],nome:nomes[lm[1]]});await tgBot.sendMessage(chatId,`✨ Envie agora 1 Custom Emoji/Premium para *${nomes[lm[1]]}*.\n\nEnvie diretamente pelo seletor do Telegram. O ID será capturado automaticamente.\n\n/cancelar para sair.`,{parse_mode:'Markdown'});return;}
+        lm=data.match(/^admlay_seticon_(whatsapp_sms|esim|servicos|premium|carteira|pedidos|pagar|pix|suporte|whatsapp|admin|comprar|voltar|tim|claro|vivo)$/);if(lm){const nomes={whatsapp_sms:'WHATSAPP SMS',esim:'COMPRA eSIM',servicos:'SERVIÇOS',premium:'ASSINATURA PREMIUM',carteira:'Conta / Saldo',pedidos:'Meus pedidos',pagar:'ADICIONAR SALDO',pix:'CADASTRAR PIX',suporte:'SUPORTE',whatsapp:'VINCULAR WHATSAPP',admin:'ADMINISTRAÇÃO',comprar:'COMPRAR',voltar:'VOLTAR',tim:'TIM',claro:'CLARO',vivo:'VIVO'};adminSessao.set(adminKey,{etapa:'layout_icon_global',slug:lm[1],nome:nomes[lm[1]]});await tgBot.sendMessage(chatId,`✨ Envie agora 1 Custom Emoji/Premium para *${nomes[lm[1]]}*.\n\nEnvie diretamente pelo seletor do Telegram. O ID será capturado automaticamente.\n\n/cancelar para sair.`,{parse_mode:'Markdown'});return;}
         if(data==='admlay_esims'){await listarEsimsLayout(chatId);return;}
         lm=data.match(/^admlay_esim_(\d+)$/);if(lm){const p=await get('SELECT id,nome_plano FROM esim_planos WHERE id=?',[Number(lm[1])]);if(!p)return;adminSessao.set(adminKey,{etapa:'layout_esim_media',esim_id:p.id});await tgBot.sendMessage(chatId,`🎬 Envie o GIF, vídeo MP4 ou foto para o card de:\n\n*${p.nome_plano}*`,{parse_mode:'Markdown'});return;}
         lm=data.match(/^admlay_media_(home|esim|servicos|premium)$/);if(lm){adminSessao.set(adminKey,{etapa:'layout_media',slug:lm[1]});await tgBot.sendMessage(chatId,lm[1]==='home'?'🎬 Envie agora o GIF ou vídeo MP4 da HOME.\n\n📱 Para preencher melhor a tela do celular, use formato vertical *9:16* (recomendado: 1080 × 1920).\n\n/cancelar para sair.':'🎬 Envie agora o GIF, vídeo MP4 ou foto que será o card.\n\n/cancelar para sair.',{parse_mode:'Markdown'});return;}

@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.7 — correções consolidadas
+# CENTRALUNLOCKER 10.1.8 — correções consolidadas
 
 ## Pedido declarado como teste
 
@@ -168,3 +168,11 @@ Testes: 127 casos com banco isolado e fornecedores/canais simulados. Health 200
 com versão 10.1.7 e páginas administrativas verificadas; migração de schema antigo
 confirmada, preservando pedido #15 test_closed/refund none. Node local 24.22.1;
 o projeto mantém declaração de Node 20.x. Sem compras/pagamentos reais ou deploy.
+
+## Ícone do WhatsApp na HOME — 10.1.8
+
+O botão WhatsApp existente usa TG_ICON_WHATSAPP_SMS. A lista de ícones animados
+exibe WHATSAPP SMS, com captura do Custom Emoji e persistência pela configuração
+visual existente. TG_ICON_WHATSAPP continua exclusivo de Vincular WhatsApp.
+Sem ícone configurado, o botão mantém o emoji comum. Não cria outro botão nem
+altera compras, saldo ou anúncios. Compra direta Hero SMS em anúncios segue pendente.

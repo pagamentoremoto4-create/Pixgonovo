@@ -1,4 +1,4 @@
-CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.7
+CENTRALUNLOCKER — VERSÃO CONSOLIDADA 10.1.8
 
 INSTALAR / ATUALIZAR
 1. Extraia o ZIP e atualize os arquivos de código do projeto.
@@ -6,7 +6,7 @@ INSTALAR / ATUALIZAR
    O pacote não inclui banco, senhas, sessões privadas ou node_modules.
 3. Instale as dependências com npm ci (ou o buildCommand já configurado no Render).
 4. Inicie com npm start.
-5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.7.
+5. Abra /health no seu domínio. A resposta desta versão contém version: 10.1.8.
 
 LIBERAR O PEDIDO #15 DECLARADO COMO TESTE
 No painel CENTRALUNLOCKER, abra Hero SMS > Pedidos > #15 — Abrir.
@@ -81,3 +81,10 @@ VERIFICAÇÃO DESTA ENTREGA
 127 testes locais com SQLite e APIs/canais simulados, incluindo migração e fluxos
 financeiros. Inicialização e páginas administrativas verificadas com banco de teste.
 Nenhuma operação real na Hero/gateway e nenhuma implantação na hospedagem do usuário.
+
+ÍCONE WHATSAPP SMS — 10.1.8
+No Telegram, abra Administração > Layout do Telegram > Ícones animados > WHATSAPP SMS.
+Envie o Custom Emoji/Premium diretamente pelo seletor do Telegram.
+O ícone será salvo e usado no botão WhatsApp já existente na HOME, sem duplicá-lo.
+Vincular WhatsApp mantém sua própria configuração. Abra novamente a HOME para visualizar.
+A integração de compra direta Hero SMS nos anúncios continua pendente nesta versão.
