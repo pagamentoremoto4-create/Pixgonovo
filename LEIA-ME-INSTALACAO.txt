@@ -1,0 +1,28 @@
+CENTRALUNLOCKER — PACOTE COMPLETO ATUALIZADO
+
+Inclui o projeto completo, assets, testes e correções da integração Hero SMS.
+
+INSTALAÇÃO
+1. Extraia o ZIP.
+2. Instale as dependências com npm ci.
+3. Configure as variáveis a partir de .env.example ou mantenha as variáveis
+   que você já usa na hospedagem. O arquivo .env privado não faz parte do ZIP.
+4. Execute npm run test:hero para conferir os testes.
+5. Inicie com npm start.
+
+Na atualização de uma instalação existente, mantenha o banco e as sessões no
+DATA_DIR persistente já configurado. O pacote contém código; não contém banco,
+senhas, sessões WhatsApp, node_modules ou dados locais de teste.
+
+A documentação detalhada está em CORRECOES-HERO-SMS.md.
+41 testes locais passaram com o provedor e os canais simulados.
+
+O SMS atualiza o card automaticamente por consulta a cada 20 segundos.
+Quando a edição não for possível, é enviada uma mensagem substituta.
+
+Cancelamentos confirmados pelo bot devolvem o preço integral à carteira,
+inclusive para compras pagas por Pix. Não há estorno bancário do Pix nesse fluxo.
+
+PENDÊNCIA: o mapeamento legado status 10 do histórico como reembolso ainda
+precisa de confirmação do fornecedor; o OpenAPI enviado não define o significado
+dos números do enum. Leia a auditoria antes de ativar vendas em produção.
