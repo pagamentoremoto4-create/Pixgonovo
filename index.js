@@ -2,6 +2,7 @@ require('dotenv').config();
 const heroProtocol = require('./hero-sms-protocol');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
 const {creditHeroRefund}=require('./hero-sms-refunds');
+const {checkoutError,checkoutMessage,checkoutDiagnostic}=require('./hero-sms-checkout-errors');
 
 const express = require('express');
 const http = require('http');
@@ -3507,34 +3508,39 @@ async function heroSmsWaOferta(from,key){
 // Hero SMS: checkout with the existing eSIM wallet and Pix gateway.
 // Aguardando Pix nao impede uma nova tentativa; ativacao ja entregue tambem nao.
 // O bloqueio se aplica somente a compras pagas sem conclusao conhecida.
+function heroReportCheckoutError(error){
+  const reference='HERO-'+crypto.randomBytes(4).toString('hex').toUpperCase();
+  console.log('HERO_CHECKOUT',JSON.stringify(checkoutDiagnostic(error,reference)));
+  return checkoutMessage(error,reference);
+}
 const heroCheckoutInFlight = new Set();
 async function heroCheckout(jid,cliente,key,method){
-  if(heroCheckoutInFlight.has(jid))throw new Error('Uma compra está sendo processada. Aguarde alguns segundos.');
+  if(heroCheckoutInFlight.has(jid))throw checkoutError('CHECKOUT_BUSY','Uma compra está sendo processada. Aguarde alguns segundos.');
   heroCheckoutInFlight.add(jid);
   try {
   await heroPedidosInit();
-  if(!cliente?.id)throw new Error('Cliente não identificado.');
+  if(!cliente?.id)throw checkoutError('CUSTOMER_NOT_FOUND','Não foi possível identificar seu cadastro. Digite menu para iniciar novamente.');
   const offer=(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service));
-  if(!offer||!offer.stock)throw new Error('Oferta sem estoque.');
-  if(!heroBrasilPermitido(offer.country))throw new Error('A venda Hero SMS está disponível somente para Brasil (DDD aleatório).');
-  if(String(offer.service).toLowerCase()!=='wa'&&!/whats\s?app/i.test(String(offer.nome||'')))throw new Error('Somente números WhatsApp estão disponíveis.');
+  if(!offer||!offer.stock)throw checkoutError('OUT_OF_STOCK','Essa oferta está sem estoque. Volte ao menu para escolher novamente.');
+  if(!heroBrasilPermitido(offer.country))throw checkoutError('COUNTRY_NOT_ALLOWED','A venda está disponível somente para Brasil, com DDD aleatório.');
+  if(String(offer.service).toLowerCase()!=='wa'&&!/whats\s?app/i.test(String(offer.nome||'')))throw checkoutError('SERVICE_NOT_ALLOWED','Somente números WhatsApp estão disponíveis.');
   const amount=await heroPrecoCliente(cliente.id);
   // Nao bloquear por Pix pendente nem por numero ja entregue.
   // Uma compra paga em processamento/incerta exige conciliacao antes de outra.
   const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain') ORDER BY id DESC LIMIT 1",[jid]);
-  if(active)throw new Error('Pedido #'+active.id+' com pagamento ou compra em verificacao. Consulte o historico ou suporte antes de comprar novamente.');
+  if(active)throw checkoutError('ORDER_RECONCILIATION','Pedido #'+active.id+' com pagamento ou compra em verificação. Confira seus pedidos antes de comprar novamente.');
   const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),method]);
   const id=r.lastID;
   if(method==='saldo'){
     const debit=await run('UPDATE revendas SET saldo=saldo-?,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND saldo>=?',[amount,cliente.id,amount]);
-    if(!debit?.changes){await run("UPDATE hero_sms_orders SET status='insufficient_balance' WHERE id=?",[id]);throw new Error('Saldo insuficiente. Use Pix ou adicione saldo.');}
+    if(!debit?.changes){await run("UPDATE hero_sms_orders SET status='insufficient_balance' WHERE id=?",[id]);throw checkoutError('INSUFFICIENT_BALANCE','Saldo insuficiente para pagar '+brl(amount)+'. Seu saldo atual é '+brl((await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]))?.saldo||0)+'. Escolha Pix ou adicione saldo.');}
     await run("UPDATE hero_sms_orders SET status='paid' WHERE id=?",[id]);
     await heroBuyPaid(id);return id;
   }
   const gateway=(await gatewayPagamentoCliente(cliente))?.gateway;
-  if(!gateway)throw new Error('Gateway Pix indisponível.');
+  if(!gateway)throw checkoutError('PIX_UNAVAILABLE','Pagamento Pix indisponível no momento. Nenhum número foi comprado.');
   const pix=await gerarPix(amount,'Hero SMS #'+id,'',gateway);
-  if(!pix?.paymentId||!pix?.qrCode){await run("UPDATE hero_sms_orders SET status='payment_failed' WHERE id=?",[id]);throw new Error('Falha ao gerar Pix.');}
+  if(!pix?.paymentId||!pix?.qrCode){await run("UPDATE hero_sms_orders SET status='payment_failed' WHERE id=?",[id]);throw checkoutError('PIX_CREATION_FAILED','Não foi possível gerar o Pix. Confira seus pedidos antes de tentar novamente.');}
   const context=JSON.stringify({tipoCompra:'HERO_SMS',heroOrderId:id});
   await run("INSERT INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','SERVICO',?,?)",[pix.paymentId,cliente.id,jid,jid,amount,context,gateway]);
   await run('UPDATE hero_sms_orders SET payment_id=? WHERE id=?',[pix.paymentId,id]);
@@ -3701,8 +3707,10 @@ async function heroSmsV1(method,path){
     headers:{Authorization:'ApiKey '+key},timeout:18000,
     validateStatus:()=>true});
   if(response.status<200||response.status>=300){
-    const reason=typeof response.data==='object'?JSON.stringify(response.data):String(response.data||'');
-    const error=new Error('Hero SMS recusou a operação (HTTP '+response.status+'): '+reason.slice(0,160));
+    const reason=response.status===422&&response.data?.errors
+      ? JSON.stringify(response.data.errors)
+      : (typeof response.data==='object'?JSON.stringify(response.data):String(response.data||''));
+    const error=new Error('Hero SMS recusou a operação (HTTP '+response.status+'): '+reason.slice(0,600));
     error.httpStatus=response.status;
     throw error;
   }
@@ -3759,8 +3767,8 @@ async function heroSyncExternal(){
   if(!orders.length)return;
   const byId=new Map(orders.map(o=>[String(o.activation_id),o]));
   const oldest=Math.min(...orders.map(o=>Date.parse(String(o.created_at).replace(' ','T')+'Z')).filter(Number.isFinite));
-  const from=new Date(Math.max(Date.now()-30*86400000,Number.isFinite(oldest)?oldest-86400000:Date.now()-7*86400000)).toISOString();
-  const to=new Date(Date.now()+60000).toISOString();
+  const from=heroProtocol.apiDate(Math.max(Date.now()-30*86400000,Number.isFinite(oldest)?oldest-86400000:Date.now()-7*86400000));
+  const to=heroProtocol.apiDate(Date.now());
   // Active lookup must not prevent cancellation/refund reconciliation.
   try {
   for(let activePage=1;activePage<=20;activePage++){
@@ -7572,8 +7580,10 @@ ${descricao}`);}catch(_){}
       await heroSmsWaMenu(from);return;
     }
     if(opcao==='1'||opcao==='2'){
-      const cliente=await get("SELECT * FROM revendas WHERE (jid=? OR whatsapp=?) AND status != 'REMOVIDA'",[from,jidToNumber(from)]);
-      try{await heroCheckout(from,cliente,sess.heroOferta,opcao==='1'?'saldo':'pix');}catch(e){await enviarTexto(from,'⚠️ Não foi possível concluir a operação. Tente novamente ou contate o suporte.');}return;
+      // Reuse the customer already identified and authorized by this handler.
+      // A second phone/JID lookup can miss formatted numbers or select a duplicate.
+      try{await heroCheckout(from,cliente,sess.heroOferta,opcao==='1'?'saldo':'pix');}
+      catch(e){await enviarTexto(from,heroReportCheckoutError(e));}return;
     }
     await enviarTexto(from,'Digite 1 (saldo), 2 (Pix) ou 0 (voltar).');return;
   }
@@ -8512,7 +8522,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           if(ss?.etapa!=='hero_tg_offer'||!ss.heroOferta)return atualizarCardTelegram(chatId,q.message,'Oferta expirada.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
           try{const id=await heroCheckout(from,cliente,ss.heroOferta,data.endsWith('saldo')?'saldo':'pix');await apagarSessaoPedido(from);
             return atualizarCardTelegram(chatId,q.message,'✅ Pedido de número WhatsApp #'+id+' registrado. Confira as mensagens neste chat.',[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
-          }catch(e){return atualizarCardTelegram(chatId,q.message,'⚠️ Não foi possível concluir a operação. Tente novamente ou contate o suporte.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);}
+          }catch(e){return atualizarCardTelegram(chatId,q.message,heroReportCheckoutError(e),[[tgBtn('Voltar','hero_sms_apps','danger')]]);}
         }
         if (data === 'menu_servicos') {
           pedidoSessao.set(from, { etapa: 'servico_escolha' });

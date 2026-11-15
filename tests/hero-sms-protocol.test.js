@@ -30,3 +30,8 @@ test('pagination: uses hasMore or total, and tolerates absent metadata',()=>{
   assert.equal(protocol.hasMore({},1,25,25),true);
   assert.equal(protocol.hasMore({},1,25,3),false);
 });
+
+test('API dates use the documented UTC second precision, without milliseconds',()=>{
+  assert.equal(protocol.apiDate('2026-11-15T00:54:22.336Z'),'2026-11-15T00:54:22Z');
+  assert.throws(()=>protocol.apiDate('not a date'));
+});

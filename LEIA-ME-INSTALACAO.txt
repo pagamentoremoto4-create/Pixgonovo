@@ -15,7 +15,7 @@ DATA_DIR persistente já configurado. O pacote contém código; não contém ban
 senhas, sessões WhatsApp, node_modules ou dados locais de teste.
 
 A documentação detalhada está em CORRECOES-HERO-SMS.md.
-41 testes locais passaram com o provedor e os canais simulados.
+47 testes locais passaram com o provedor e os canais simulados.
 
 O SMS atualiza o card automaticamente por consulta a cada 20 segundos.
 Quando a edição não for possível, é enviada uma mensagem substituta.
@@ -26,3 +26,6 @@ inclusive para compras pagas por Pix. Não há estorno bancário do Pix nesse fl
 PENDÊNCIA: o mapeamento legado status 10 do histórico como reembolso ainda
 precisa de confirmação do fornecedor; o OpenAPI enviado não define o significado
 dos números do enum. Leia a auditoria antes de ativar vendas em produção.
+
+Pacote V10.1.1: correção da identificação do cliente no checkout, mensagens de erro
+específicas e datas do histórico no formato documentado. Consulte CORRECOES-HERO-SMS.md.

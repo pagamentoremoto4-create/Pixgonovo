@@ -4,6 +4,11 @@ function parseJson(value) {
   if (typeof value !== 'string') return value;
   try { return JSON.parse(value); } catch { return value.trim(); }
 }
+function apiDate(value) {
+  const date=new Date(value);
+  if(!Number.isFinite(date.getTime()))throw new Error('Data inválida para consulta Hero SMS.');
+  return date.toISOString().replace(/\.\d{3}Z$/,'Z');
+}
 function compatibilityText(value) {
   const parsed=parseJson(value);
   if(parsed==null)return '';
@@ -41,4 +46,4 @@ function hasMore(response, page, size, count) {
   if (meta?.total != null && Number.isFinite(Number(meta.total))) return page * size < Number(meta.total);
   return count === size;
 }
-module.exports = {parseReplacement, smsCode, historySmsCode, hasMore, compatibilityText};
+module.exports = {parseReplacement, smsCode, historySmsCode, hasMore, compatibilityText, apiDate};

@@ -100,3 +100,28 @@ ACCESS_CANCEL local. O ledger impede crédito repetido, mas não comprova o sign
 desse status. O documento fornecido não define os rótulos dos valores do enum do
 histórico. Essa interpretação precisa de homologação com a Hero SMS antes de produção.
 O status 8 do histórico apenas marca cancelamento, sem crédito por si só.
+
+
+## Correção de compra com saldo e diagnóstico — pacote V10.1.1
+
+- O WhatsApp reutiliza o cadastro identificado/autorizado no início do atendimento.
+  A confirmação da compra não faz nova busca simplificada por telefone/JID, que
+  podia retornar nenhum cliente ou selecionar um cadastro duplicado.
+- Saldo insuficiente mostra preço e saldo real atual, sem comprar número.
+- Pedido em verificação mostra o ID que está impedindo outra compra.
+- Falhas inesperadas mostram referência HERO-... e geram log HERO_CHECKOUT com
+  diagnóstico limitado; URLs e parâmetros de credenciais são omitidos.
+- O Telegram também usa mensagens específicas de checkout.
+- Datas from/to do histórico usam YYYY-MM-DDTHH:MM:SSZ, sem milissegundos;
+  to passa a representar o momento atual, sem um minuto no futuro.
+- Erros HTTP 422 do cliente REST priorizam os campos rejeitados na mensagem do log,
+  para que o motivo completo do erro from possa ser investigado sem truncamento precoce.
+
+47 testes aprovados, incluindo checkout com saldo real em SQLite, saldo insuficiente,
+cliente com telefone formatado, pedido em verificação e formato de datas.
+
+Limite da investigação: os logs enviados mostram erro 422 no campo from, mas cortam
+seu motivo completo. O erro da tentativa de compra não foi registrado pela versão
+anterior. As correções acima precisam ser testadas na hospedagem do usuário; não
+comprovam retrospectivamente qual condição causou a mensagem genérica original.
+Nenhum saldo, pedido real ou credencial do usuário foi acessado ou alterado aqui.
