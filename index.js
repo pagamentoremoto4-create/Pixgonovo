@@ -3,6 +3,7 @@ const heroProtocol = require('./hero-sms-protocol');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
 const {creditHeroRefund}=require('./hero-sms-refunds');
 const {checkoutError,checkoutMessage,checkoutDiagnostic}=require('./hero-sms-checkout-errors');
+const {validateHeroPix,parseHeroPixContext,heroPixDelivered}=require('./hero-sms-pix');
 
 const express = require('express');
 const http = require('http');
@@ -3508,6 +3509,40 @@ async function heroSmsWaOferta(from,key){
 // Hero SMS: checkout with the existing eSIM wallet and Pix gateway.
 // Aguardando Pix nao impede uma nova tentativa; ativacao ja entregue tambem nao.
 // O bloqueio se aplica somente a compras pagas sem conclusao conhecida.
+async function heroHandlePixDocument(jid,cliente,session,text){
+  if(session?.etapa!=='hero_cpf_pix')return false;
+  if(['0','cancelar','sair','voltar'].includes(String(text||'').trim().toLowerCase())){
+    await apagarSessaoPedido(jid);await enviarTexto(jid,'✅ Geração do Pix cancelada. Nenhuma cobrança foi criada.');return true;
+  }
+  if(Number(session.heroCustomerId)!==Number(cliente?.id)||Date.now()-Number(session.requestedAt||0)>10*60*1000){
+    await apagarSessaoPedido(jid);await enviarTexto(jid,'⌛ A solicitação expirou. Abra o menu para escolher a oferta novamente.');return true;
+  }
+  const documento=onlyDigits(text);
+  if(!documentoPixValido(documento)){await enviarTexto(jid,'❌ CPF/CNPJ inválido. Confira os números ou digite 0 para cancelar.');return true;}
+  await run('UPDATE revendas SET pix_documento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[documento,cliente.id]);
+  try{
+    const id=await heroCheckout(jid,cliente,session.heroOferta,'pix');
+    if(id)await apagarSessaoPedido(jid);
+  }catch(e){await enviarTexto(jid,heroReportCheckoutError(e));}
+  return true;
+}
+async function heroSendPixImage(jid,buffer){
+  if(isTgJid(jid)||/^\d+$/.test(String(jid))){
+    if(!tgBot)throw new Error('Telegram indisponível.');
+    return tgBot.sendPhoto(isTgJid(jid)?tgIdFromJid(jid):String(jid),buffer,{caption:'📷 Escaneie o QR Code para pagar'});
+  }
+  if(!WHATSAPP_ENABLED)throw new Error('WhatsApp desativado.');
+  const raw=String(jid).startsWith('wa:')?String(jid).slice(3):jidToNumber(jid);
+  const number=normalizarNumeroWhatsApp(raw);
+  const preferredId=whatsappSessaoPorNumeroCliente.get(number);
+  const preferred=preferredId?whatsappSessoes.get(Number(preferredId)):null;
+  const session=preferred?.funcaoBot&&preferred?.conectado&&preferred?.socket?preferred:await obterSessaoBotConectada();
+  const sock=session?.socket||(conectado?whatsappSocket:null);
+  if(!sock)throw new Error('Sessão WhatsApp indisponível.');
+  const destination=await resolverJidWhatsAppEnvio(number,sock);
+  if(!destination)throw new Error('Destino WhatsApp indisponível.');
+  return sock.sendMessage(destination,{image:buffer,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
+}
 function heroReportCheckoutError(error){
   const reference='HERO-'+crypto.randomBytes(4).toString('hex').toUpperCase();
   console.log('HERO_CHECKOUT',JSON.stringify(checkoutDiagnostic(error,reference)));
@@ -3524,10 +3559,25 @@ async function heroCheckout(jid,cliente,key,method){
   if(!offer||!offer.stock)throw checkoutError('OUT_OF_STOCK','Essa oferta está sem estoque. Volte ao menu para escolher novamente.');
   if(!heroBrasilPermitido(offer.country))throw checkoutError('COUNTRY_NOT_ALLOWED','A venda está disponível somente para Brasil, com DDD aleatório.');
   if(String(offer.service).toLowerCase()!=='wa'&&!/whats\s?app/i.test(String(offer.nome||'')))throw checkoutError('SERVICE_NOT_ALLOWED','Somente números WhatsApp estão disponíveis.');
+  if(!['saldo','pix'].includes(method))throw checkoutError('INVALID_METHOD','Forma de pagamento inválida.');
   const amount=await heroPrecoCliente(cliente.id);
+  let gateway=null,documento='';
+  if(method==='pix'){
+    const paymentConfig=await gatewaysPagamentoAtivos();
+    gateway=paymentConfig.lista.includes(paymentConfig.padrao)?paymentConfig.padrao:null;
+    if(!gateway)throw checkoutError('PIX_UNAVAILABLE','O gateway padrão do painel está indisponível. Nenhum Pix foi criado.');
+    if(gateway==='depixpay'){
+      documento=await documentoPixCliente(cliente);
+      if(!documento){
+        await salvarSessaoPedido(jid,{etapa:'hero_cpf_pix',heroOferta:key,heroCustomerId:cliente.id,requestedAt:Date.now()});
+        await enviarTexto(jid,TEXTO_CPF_PAGAMENTO_V257+'\n\n0️⃣ Cancelar');
+        return null;
+      }
+    }
+  }
   // Nao bloquear por Pix pendente nem por numero ja entregue.
   // Uma compra paga em processamento/incerta exige conciliacao antes de outra.
-  const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain') ORDER BY id DESC LIMIT 1",[jid]);
+  const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain','payment_creating','payment_reconciliation') ORDER BY id DESC LIMIT 1",[jid]);
   if(active)throw checkoutError('ORDER_RECONCILIATION','Pedido #'+active.id+' com pagamento ou compra em verificação. Confira seus pedidos antes de comprar novamente.');
   const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),method]);
   const id=r.lastID;
@@ -3537,32 +3587,34 @@ async function heroCheckout(jid,cliente,key,method){
     await run("UPDATE hero_sms_orders SET status='paid' WHERE id=?",[id]);
     await heroBuyPaid(id);return id;
   }
-  const gateway=(await gatewayPagamentoCliente(cliente))?.gateway;
-  if(!gateway)throw checkoutError('PIX_UNAVAILABLE','Pagamento Pix indisponível no momento. Nenhum número foi comprado.');
-  const pix=await gerarPix(amount,'Hero SMS #'+id,'',gateway);
-  if(!pix?.paymentId||!pix?.qrCode){await run("UPDATE hero_sms_orders SET status='payment_failed' WHERE id=?",[id]);throw checkoutError('PIX_CREATION_FAILED','Não foi possível gerar o Pix. Confira seus pedidos antes de tentar novamente.');}
+  await run("UPDATE hero_sms_orders SET status='payment_creating' WHERE id=?",[id]);
+  let pix;
+  try{pix=await gerarPix(amount,String(cliente.nome||'Cliente'),documento,gateway,{throwOnError:true});}
+  catch(e){
+    const rejected=[400,401,403,404,409,422].includes(Number(e.response?.status));
+    await run('UPDATE hero_sms_orders SET status=?,last_error=? WHERE id=?',[rejected?'payment_failed':'payment_reconciliation',JSON.stringify(checkoutDiagnostic(e,'HERO-'+id)),id]);
+    throw checkoutError('PIX_CREATION_FAILED',rejected?'O provedor recusou gerar o Pix. Confira a configuração do pagamento.':'A criação do Pix ficou sem confirmação. Pedido #'+id+' em conferência; não gere outro pagamento até verificar.');
+  }
+  if(!pix?.paymentId||!pix?.qrCode){await run("UPDATE hero_sms_orders SET status='payment_reconciliation',last_error='Resposta incompleta ao criar Pix' WHERE id=?",[id]);throw checkoutError('PIX_CREATION_FAILED','A geração do Pix não retornou os dados completos. Pedido #'+id+' em conferência.');}
   const context=JSON.stringify({tipoCompra:'HERO_SMS',heroOrderId:id});
-  await run("INSERT INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','SERVICO',?,?)",[pix.paymentId,cliente.id,jid,jid,amount,context,gateway]);
-  await run('UPDATE hero_sms_orders SET payment_id=? WHERE id=?',[pix.paymentId,id]);
+  try{await run("INSERT INTO pix_pedidos(payment_id,revenda_id,revenda_jid,cliente_jid,valor,status,tipo_pagamento,contexto_json,gateway) VALUES(?,?,?,?,?,'pending','SERVICO',?,?)",[String(pix.paymentId),cliente.id,jid,jid,amount,context,gateway]);}
+  catch(e){await run("UPDATE hero_sms_orders SET payment_id=?,status='payment_reconciliation',last_error='Pix criado; registro local pendente' WHERE id=?",[String(pix.paymentId),id]);throw e;}
+  try{
+    await run("UPDATE hero_sms_orders SET payment_id=?,status='awaiting_payment' WHERE id=? AND status='payment_creating'",[String(pix.paymentId),id]);
+  }catch(e){
+    await run("UPDATE hero_sms_orders SET status='payment_reconciliation',last_error='Pix criado; vínculo do pagamento pendente' WHERE id=?",[id]);throw e;
+  }
   verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
   // Mesmo layout do checkout eSIM: informativo, QR como imagem e copia-e-cola isolado.
   const heroPixCode=String(pix.qrCode).replace(/[\r\n\t]/g,'').trim();
-  await enviarTexto(jid,'🔓 CENTRALUNLOCKER — HERO SMS\n💳 PAGAMENTO VIA PIX\n\n📦 Pedido #'+id+'\n🇧🇷 WhatsApp Brasil — DDD aleatório\n💰 Valor: '+brl(amount)+'\n⏳ Aguardando pagamento.\n\nA compra do número ocorre somente após confirmação.');
+  await enviarTexto(jid,'🔓 CENTRALUNLOCKER — HERO SMS\n💳 PAGAMENTO VIA PIX\n\n📦 Pedido #'+id+'\n🇧🇷 WhatsApp Brasil — DDD aleatório\n💰 Valor: '+brl(amount)+'\n⏳ Aguardando pagamento.\n\nA compra do número ocorre somente após confirmação.'+avisoTokenizacaoPix(gateway));
   try {
     const heroPixB64=String(pix.qrCodeBase64||'').replace(/^data:image\/[^;]+;base64,/,'').replace(/\s+/g,'');
     const heroPixBuffer=heroPixB64 && ['mercadopago','misticpay'].includes(gateway)
       ? Buffer.from(heroPixB64,'base64')
       : await QRCode.toBuffer(heroPixCode,{width:620,margin:2,errorCorrectionLevel:'M'});
     if(!heroPixBuffer.length)throw new Error('QR Code vazio');
-    if(isTgJid(jid) || /^\d+$/.test(String(jid))){
-      const heroChatId=isTgJid(jid)?tgIdFromJid(jid):String(jid);
-      if(!tgBot)throw new Error('Telegram indisponível');
-      await tgBot.sendPhoto(heroChatId,heroPixBuffer,{caption:'📷 Escaneie o QR Code para pagar'});
-    }else{
-      if(!whatsappSocket||!conectado)throw new Error('WhatsApp desconectado');
-      const heroNumero=String(jid).startsWith('wa:')?String(jid).slice(3):String(jid).includes('@s.whatsapp.net')?jidToNumber(jid):String(jid);
-      await whatsappSocket.sendMessage(numberToJid(normalizarNumeroWhatsApp(heroNumero)),{image:heroPixBuffer,mimetype:'image/png',caption:'📷 Escaneie o QR Code para pagar'});
-    }
+    await heroSendPixImage(jid,heroPixBuffer);
   }catch(heroPixQrErr){console.log('⚠️ HERO SMS QR Pix não enviado:',heroPixQrErr.message);}
   await enviarTexto(jid,'📋 PIX Copia e Cola:');
   await enviarTexto(jid,heroPixCode);
@@ -3576,9 +3628,15 @@ async function heroBuyPaid(id){
     if(!heroBrasilPermitido(o.country)||String(o.service).toLowerCase()!=='wa')throw new Error('Compra bloqueada: somente WhatsApp Brasil.');
     const raw=await heroSmsApi('getNumberV2',{service:o.service,country:o.country});let v;try{v=JSON.parse(raw);}catch{}
     const activation=v?.activationId??v?.activation_id??v?.id,phone=v?.phoneNumber??v?.phone_number??v?.phone;
+    if(/^\d{1,30}$/.test(String(activation||'')))await run('UPDATE hero_sms_orders SET activation_id=? WHERE id=? AND activation_id IS NULL',[String(activation),id]);
     if(!activation||!phone)throw new Error('Resposta incerta do fornecedor: '+raw.slice(0,100));
     await run("UPDATE hero_sms_orders SET activation_id=?,phone=?,status='number_received',number_received_at=CURRENT_TIMESTAMP WHERE id=?",[String(activation),String(phone),id]);
-  }catch(e){await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=?",[e.message.slice(0,400),id]);await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');return;}
+  }catch(e){
+    const diagnostic=checkoutDiagnostic(e,'HERO-PURCHASE-'+id);
+    console.log('HERO_PURCHASE',JSON.stringify(diagnostic));
+    await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=?",[diagnostic.message,id]);
+    await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');return;
+  }
   try{await heroWhatsMenuPedido(o.customer_jid,id);}
   catch(e){await run('UPDATE hero_sms_orders SET last_error=? WHERE id=?',['Número comprado; entrega da mensagem pendente: '+String(e.message).slice(0,250),id]);}
 }
@@ -3744,11 +3802,51 @@ async function heroOrderHistory(jid){
   const orders=await all('SELECT id,status,phone,sms_code,refund_status FROM hero_sms_orders WHERE customer_jid=? ORDER BY id DESC LIMIT 10',[jid]);
   return '📋 *CENTRALUNLOCKER — PEDIDOS WHATSAPP*\n\n'+(orders.map(o=>'#'+o.id+' • '+o.status+(o.phone?' • +'+o.phone:'')+(o.sms_code?' • Código: '+o.sms_code:'')+(o.refund_status==='credited'?' • Reembolsado':'')).join('\n')||'Nenhum pedido.')+'\n\nPara trocar: *trocar número 123*. Para cancelar: *cancelar número 123* (substitua 123 pelo ID do pedido).';
 }
-async function heroPixConfirmed(paymentId,ctx){
-  const id=Number(ctx.heroOrderId);const o=await get('SELECT id FROM hero_sms_orders WHERE id=? AND payment_id=?',[id,String(paymentId)]);
-  if(!o)throw new Error('Pagamento não corresponde ao pedido Hero SMS.');
-  const claim=await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status='awaiting_payment'",[id]);
-  if(claim?.changes)await heroBuyPaid(id);
+async function heroPixConfirmed(paymentId,ctx,verification=null){
+  await heroPedidosInit();
+  const context=parseHeroPixContext(ctx);
+  if(!context)throw new Error('Contexto Pix Hero SMS inválido.');
+  const payment=await get('SELECT * FROM pix_pedidos WHERE payment_id=?',[String(paymentId)]);
+  const o=await get('SELECT * FROM hero_sms_orders WHERE id=? AND payment_id=?',[Number(context.heroOrderId),String(paymentId)]);
+  const verified=verification||await consultarStatus(String(paymentId),payment?.gateway);
+  const allowDelayed=payment?.gateway==='depixpay'&&(await depixDelayedElegivel(paymentId)||['completed','delivery_pending','delivered'].includes(payment.status));
+  if(!validateHeroPix(payment,o,verified,{allowDelayed}))throw new Error('Pix não confirmado: identificador, valor ou vínculo do cliente divergente/ausente.');
+  const storedContext=parseHeroPixContext(payment.contexto_json);
+  if(Number(storedContext?.heroOrderId)!==Number(o.id)||payment.tipo_pagamento!=='SERVICO')throw new Error('Contexto local do Pix não corresponde ao pedido.');
+  await run(`INSERT INTO hero_sms_pix_receipts(payment_id,order_id,gateway,amount_brl,provider_status) VALUES(?,?,?,?,?) ON CONFLICT(payment_id) DO NOTHING`,[String(paymentId),o.id,payment.gateway,Number(payment.valor),verified.data.status]);
+  await run("UPDATE pix_pedidos SET status='completed' WHERE payment_id=? AND status IN ('pending','expired')",[String(paymentId)]);
+  await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status IN ('awaiting_payment','payment_expired')",[o.id]);
+  // An order left in paid before a restart is safe to claim. Purchasing/uncertain
+  // are never automatically retried: the provider may already have executed it.
+  await heroBuyPaid(o.id);
+  const fresh=await get('SELECT * FROM hero_sms_orders WHERE id=?',[o.id]);
+  const delivered=heroPixDelivered(fresh);
+  if(delivered)await run("UPDATE pix_pedidos SET status='delivered' WHERE payment_id=? AND status IN ('completed','delivery_pending','delivered')",[String(paymentId)]);
+  else await run("UPDATE pix_pedidos SET status='delivery_pending' WHERE payment_id=? AND status IN ('completed','delivery_pending')",[String(paymentId)]);
+  return delivered;
+}
+let heroPixRecoveryRunning=false;
+async function heroRecoverPix(){
+  if(heroPixRecoveryRunning)return;
+  heroPixRecoveryRunning=true;
+  try{
+    await heroPedidosInit();
+    const rows=await all(`SELECT p.* FROM pix_pedidos p JOIN hero_sms_orders o ON o.payment_id=p.payment_id WHERE o.payment_method='pix' AND p.status IN ('pending','expired','completed','delivery_pending') AND o.status IN ('awaiting_payment','payment_expired','paid','purchasing','uncertain','number_received','sms_received','finished') ORDER BY p.criado_em DESC LIMIT 50`);
+    for(const p of rows){
+      const context=parseHeroPixContext(p.contexto_json);if(!context)continue;
+      try{
+        const verified=await consultarStatus(p.payment_id,p.gateway);
+        if(!verified?.success)continue;
+        const status=verified.data?.status;
+        if(status==='completed'||(p.gateway==='depixpay'&&status==='delayed')){
+          await heroPixConfirmed(p.payment_id,context,verified);
+        }else if(['expired','cancelled','refunded'].includes(status)){
+          await run("UPDATE pix_pedidos SET status=? WHERE payment_id=? AND status IN ('pending','expired')",[status,p.payment_id]);
+          await run("UPDATE hero_sms_orders SET status='payment_expired' WHERE payment_id=? AND status='awaiting_payment'",[p.payment_id]);
+        }
+      }catch(e){console.log('HERO_PIX_RECOVERY',JSON.stringify(checkoutDiagnostic(e,'HERO-PIX-'+p.payment_id)));}
+    }
+  }finally{heroPixRecoveryRunning=false;}
 }
 // Reconciles operations made directly in Hero SMS dashboard, not only local bot actions.
 // Legacy history mapping: 8=cancelled, 10=refunded, 6=finished.
@@ -3757,13 +3855,41 @@ async function heroPixConfirmed(paymentId,ctx){
 async function heroCreditConfirmedRefund(o,requireReceipt=false){
   return creditHeroRefund(DB_PATH,o.id,{requireReceipt});
 }
+async function heroQueueExternalUpdate(id){
+  const order=await get('SELECT status,phone,refund_status FROM hero_sms_orders WHERE id=?',[id]);
+  if(!order)return;
+  const state=JSON.stringify(order);
+  await run(`INSERT INTO hero_sms_external_events(order_id,state) VALUES(?,?)
+    ON CONFLICT(order_id) DO UPDATE SET state=excluded.state,
+    delivered=CASE WHEN hero_sms_external_events.state=excluded.state THEN hero_sms_external_events.delivered ELSE 0 END,
+    updated_at=CURRENT_TIMESTAMP`,[id,state]);
+}
+async function heroReconcileExternalCancellation(orderId,activationId){
+  await heroPedidosInit();
+  const id=Number(orderId),activation=String(activationId||'').trim();
+  if(!Number.isSafeInteger(id)||id<1||!/^\d{1,30}$/.test(activation))throw new Error('Informe o ID válido da ativação na Hero SMS.');
+  const order=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
+  if(!order)throw new Error('Pedido não encontrado.');
+  if(order.activation_id&&String(order.activation_id)!==activation)throw new Error('Este pedido já está vinculado a outra ativação.');
+  if(order.sms_code)throw new Error('O pedido tem código recebido e exige conferência administrativa.');
+  if(!['uncertain','purchasing','paid','number_received','cancel_pending','canceled'].includes(order.status))throw new Error('Estado do pedido incompatível com esta conferência.');
+  const linked=await get('SELECT id FROM hero_sms_orders WHERE activation_id=? AND id!=?',[activation,id]);
+  if(linked)throw new Error('Essa ativação já está vinculada ao pedido #'+linked.id+'.');
+  // Read-only provider confirmation. This never sends another cancellation.
+  const status=heroProtocol.compatibilityText(await heroSmsApi('getStatus',{id:activation}));
+  if(status!=='STATUS_CANCEL')throw new Error('A Hero SMS não confirmou STATUS_CANCEL para essa ativação. Nenhum estado ou saldo foi alterado.');
+  const saved=await run("UPDATE hero_sms_orders SET activation_id=?,status='canceled',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND (activation_id IS NULL OR activation_id=?) AND sms_code IS NULL AND status IN ('uncertain','purchasing','paid','number_received','cancel_pending','canceled')",[activation,id,activation]);
+  if(!saved?.changes)throw new Error('O pedido mudou durante a conferência. Atualize a página.');
+  await heroQueueExternalUpdate(id);
+  return 'Cancelamento confirmado na Hero SMS e atualização do cliente colocada na fila. Crédito na carteira exige confirmação própria.';
+}
 let heroSyncExternalRunning=false;
 async function heroSyncExternal(){
   if(heroSyncExternalRunning)return;
   heroSyncExternalRunning=true;
   try {
   await heroPedidosInit();
-  const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','canceled') ORDER BY id DESC LIMIT 500");
+  const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','canceled','uncertain','purchasing') ORDER BY id DESC LIMIT 500");
   if(!orders.length)return;
   const byId=new Map(orders.map(o=>[String(o.activation_id),o]));
   const oldest=Math.min(...orders.map(o=>Date.parse(String(o.created_at).replace(' ','T')+'Z')).filter(Number.isFinite));
@@ -3778,11 +3904,11 @@ async function heroSyncExternal(){
       const o=byId.get(String(entry.id));if(!o)continue;
       const phone=String(entry.phone||'').trim();
       if(phone&&phone!==String(o.phone||'')&&o.status!=='canceled'&&!o.sms_code){
-        await run("UPDATE hero_sms_orders SET phone=?,status='number_received',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain')",[phone,o.id]);
+        await run("UPDATE hero_sms_orders SET phone=?,status='number_received',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain','uncertain','purchasing')",[phone,o.id]);
       }
       const code=heroProtocol.smsCode(entry);
       if(code&&o.status!=='canceled'){
-        const saved=await run("UPDATE hero_sms_orders SET sms_code=?,status='sms_received',updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain','cancel_pending') AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id)",[code,o.id]);
+        const saved=await run("UPDATE hero_sms_orders SET sms_code=?,status='sms_received',updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain','cancel_pending','uncertain') AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id)",[code,o.id]);
         if(saved?.changes)await run('INSERT OR IGNORE INTO hero_sms_notifications(order_id,code) VALUES(?,?)',[o.id,code]);
       }
     }
@@ -3801,17 +3927,19 @@ async function heroSyncExternal(){
       const phone=String(item.phone||'').trim();
       // Only update when API returns a real phone for the exact activation ID.
       if(phone&&phone!==String(o.phone||'')&&![8,10].includes(providerStatus)){
-        await run("UPDATE hero_sms_orders SET phone=?,status='number_received',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain')",[phone,o.id]);
+        await run("UPDATE hero_sms_orders SET phone=?,status='number_received',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND sms_code IS NULL AND status IN ('number_received','replace_pending','replace_uncertain','uncertain','purchasing')",[phone,o.id]);
       }
       if(providerStatus===10){
         // Legacy status-10 interpretation; not established by the supplied OpenAPI.
-        try{await heroCreditConfirmedRefund(o);}
+        try{const result=await heroCreditConfirmedRefund(o);if(!result.alreadyCredited)await heroQueueExternalUpdate(o.id);}
         catch(e){await run('UPDATE hero_sms_orders SET last_error=? WHERE id=?',['Reembolso externo pendente: '+String(e.message).slice(0,200),o.id]);}
       }else if(providerStatus===8){
         // Cancellation alone does not prove a provider refund.
-        await run("UPDATE hero_sms_orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='canceled'",[o.id]);
+        const changed=await run("UPDATE hero_sms_orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status!='canceled'",[o.id]);
+        if(changed?.changes)await heroQueueExternalUpdate(o.id);
       }else if(providerStatus===6){
-        await run("UPDATE hero_sms_orders SET status='finished',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('canceled','finished')",[o.id]);
+        const changed=await run("UPDATE hero_sms_orders SET status='finished',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('canceled','finished')",[o.id]);
+        if(changed?.changes)await heroQueueExternalUpdate(o.id);
       }
       if(item.moreCodes&&![8,10].includes(providerStatus)&&!o.sms_code){
         // History may contain arbitrary SMS text, not a guaranteed numeric OTP.
@@ -3833,12 +3961,14 @@ async function heroStatusUpdates(){
   heroStatusUpdatesRunning=true;
   try{
     await heroPedidosInit();
-    const confirmed=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_cancel_receipts c ON c.order_id=o.id AND c.activation_id=o.activation_id WHERE o.refund_status='none' AND o.status='cancel_pending' LIMIT 100");
+    const confirmed=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_cancel_receipts c ON c.order_id=o.id AND c.activation_id=o.activation_id WHERE o.refund_status='none' AND o.status IN ('cancel_pending','canceled') LIMIT 100");
     for(const o of confirmed)try{await heroCreditConfirmedRefund(o,true);}catch(e){console.log('Hero estorno pendente #'+o.id,String(e.message).slice(0,120));}
-    const orders=await all("SELECT o.id,o.status FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id WHERE o.activation_id IS NOT NULL AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending') AND (r.order_id IS NOT NULL OR o.status='number_received') ORDER BY o.id DESC LIMIT 300");
+    const orders=await all("SELECT o.id,o.status,e.state AS event_state,e.delivered AS event_delivered FROM hero_sms_orders o LEFT JOIN hero_sms_message_refs r ON r.order_id=o.id LEFT JOIN hero_sms_external_events e ON e.order_id=o.id WHERE o.activation_id IS NOT NULL AND o.status IN ('number_received','sms_received','canceled','finished','replace_pending','replace_uncertain','cancel_pending') AND (r.order_id IS NOT NULL OR o.status='number_received' OR e.delivered=0) ORDER BY o.id DESC LIMIT 300");
     for(const o of orders){
-      try{await heroUpdateOrderCard(o.id,{createIfMissing:o.status==='number_received'});}
-      catch(e){console.log('Hero card #'+o.id,String(e.message).slice(0,120));}
+      try{
+        await heroUpdateOrderCard(o.id,{createIfMissing:o.status==='number_received'||o.event_delivered===0});
+        if(o.event_delivered===0)await run('UPDATE hero_sms_external_events SET delivered=1 WHERE order_id=? AND state=?',[o.id,o.event_state]);
+      }catch(e){console.log('Hero card #'+o.id,String(e.message).slice(0,120));}
     }
   }finally{heroStatusUpdatesRunning=false;}
 }
@@ -3848,12 +3978,17 @@ async function heroPollSms(){
   heroPollSmsRunning=true;
   try {
   await heroPedidosInit();
-  const orders=await all("SELECT * FROM hero_sms_orders WHERE status IN ('number_received','cancel_pending') AND activation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id) ORDER BY id ASC LIMIT 200");
+  const orders=await all("SELECT * FROM hero_sms_orders WHERE status IN ('number_received','cancel_pending','uncertain') AND activation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id) ORDER BY id ASC LIMIT 200");
   for(const o of orders)try{
-    const status=await heroSmsApi('getStatus',{id:o.activation_id});
+    const status=heroProtocol.compatibilityText(await heroSmsApi('getStatus',{id:o.activation_id}));
+    if(status==='STATUS_CANCEL'){
+      const changed=await run("UPDATE hero_sms_orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND activation_id=? AND status IN ('number_received','cancel_pending','uncertain')",[o.id,String(o.activation_id)]);
+      if(changed?.changes)await heroQueueExternalUpdate(o.id);
+      continue;
+    }
     if(!status.startsWith('STATUS_OK:'))continue;
     const code=status.slice(10).trim();if(!code)continue;
-    const saved=await run("UPDATE hero_sms_orders SET sms_code=?,status='sms_received' WHERE id=? AND status IN ('number_received','cancel_pending') AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id)",[code,o.id]);
+    const saved=await run("UPDATE hero_sms_orders SET sms_code=?,status='sms_received' WHERE id=? AND status IN ('number_received','cancel_pending','uncertain') AND NOT EXISTS(SELECT 1 FROM hero_sms_cancel_receipts WHERE order_id=hero_sms_orders.id)",[code,o.id]);
     if(saved?.changes)await run("INSERT OR IGNORE INTO hero_sms_notifications(order_id,code) VALUES(?,?)",[o.id,code]);
   }catch(e){console.log('Hero SMS SMS #'+o.id,e.message);}
   // Recover an OTP saved before a restart interrupted insertion into the outbox.
@@ -3871,6 +4006,8 @@ async function heroPollSms(){
 setInterval(()=>heroPollSms().catch(e=>console.log('Hero SMS polling',e.message)),20000).unref?.();
 setInterval(()=>heroStatusUpdates().catch(e=>console.log('Hero SMS status updates',e.message)),30000).unref?.();
 setInterval(()=>heroSyncExternal().catch(e=>console.log('Hero SMS external sync',e.message)),45000).unref?.();
+setTimeout(()=>heroRecoverPix().catch(e=>console.log('HERO_PIX_RECOVERY',e.message)),20000);
+setInterval(()=>heroRecoverPix().catch(e=>console.log('HERO_PIX_RECOVERY',e.message)),60000).unref?.();
 async function listarServicosOnlineTexto(){
   const cats=await categoriasDhruWhatsApp();
   let texto=`🌐 *SERVIÇOS ONLINE*\n\n1️⃣ 📩 *RECEBER SMS*\n`;
@@ -5729,6 +5866,7 @@ Envie este código para o WhatsApp da CentralUnlocker:
   }
 
   const sessHeroTelegram=await carregarSessaoPedido(from);
+  if(await heroHandlePixDocument(from,cliente,sessHeroTelegram,textoOriginal))return;
   if(sessHeroTelegram?.etapa==='hero_tg_search'){
     const busca=String(textoOriginal||'').trim().slice(0,60);
     if(busca.length<2)return tgBot.sendMessage(msg.chat.id,'🔎 Digite pelo menos 2 caracteres para pesquisar.');
@@ -7135,6 +7273,7 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   }
 
   let sess = await carregarSessaoPedido(from);
+  if(await heroHandlePixDocument(from,cliente,sess,textoOriginal))return;
 
   if(sess?.etapa==='hub_menu'){
     const itensMenu=(await menuWhatsAppItens()).filter(x=>x.ativo);
@@ -8520,7 +8659,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
         if(data==='hero_sms_pay_saldo'||data==='hero_sms_pay_pix'){
           const ss=await carregarSessaoPedido(from);
           if(ss?.etapa!=='hero_tg_offer'||!ss.heroOferta)return atualizarCardTelegram(chatId,q.message,'Oferta expirada.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
-          try{const id=await heroCheckout(from,cliente,ss.heroOferta,data.endsWith('saldo')?'saldo':'pix');await apagarSessaoPedido(from);
+          try{const id=await heroCheckout(from,cliente,ss.heroOferta,data.endsWith('saldo')?'saldo':'pix');if(!id)return;await apagarSessaoPedido(from);
             return atualizarCardTelegram(chatId,q.message,'✅ Pedido de número WhatsApp #'+id+' registrado. Confira as mensagens neste chat.',[[tgBtn('📋 Meus pedidos','hero_sms_orders','primary')]]);
           }catch(e){return atualizarCardTelegram(chatId,q.message,heroReportCheckoutError(e),[[tgBtn('Voltar','hero_sms_apps','danger')]]);}
         }
@@ -10114,7 +10253,7 @@ async function gerarPixMercadoPago(valor, cliente) {
   };
 }
 
-async function gerarPix(valor, cliente, documento, gateway=null) {
+async function gerarPix(valor, cliente, documento, gateway=null, options={}) {
   try {
     if (!gateway) throw new Error('Gateway nao selecionado');
     if (gateway === 'mercadopago') return await gerarPixMercadoPago(valor, cliente);
@@ -10123,6 +10262,7 @@ async function gerarPix(valor, cliente, documento, gateway=null) {
     throw new Error('Gateway indisponível ou desativado');
   } catch (e) {
     console.log(`ERRO ${nomeGateway(gateway).toUpperCase()}:`, e.response?.data || e.message);
+    if(options.throwOnError)throw e;
     return null;
   }
 }
@@ -10243,7 +10383,7 @@ async function consultarStatus(paymentId, gateway='pixgo') {
       const d = (await api.post('/transactions/check', { transactionId: paymentId }, { timeout: 15000 })).data;
       const raw = String(d?.transaction?.transactionState || '').toUpperCase();
       const status = raw === 'COMPLETO' ? 'completed' : (['FALHA','CANCELADO'].includes(raw) ? 'expired' : 'pending');
-      return { success: true, data: { status, raw_status: raw } };
+      return { success: true, data: { status, raw_status: raw, payment_id:String(d?.transaction?.transactionId||''), amount:d?.transaction?.amount??d?.transaction?.transactionAmount } };
     }
     if (gateway === 'mercadopago') {
       const mp = clienteMercadoPago();
@@ -10252,7 +10392,7 @@ async function consultarStatus(paymentId, gateway='pixgo') {
         timeout: 15000
       })).data;
       const status = d?.status === 'approved' ? 'completed' : (['cancelled','rejected','refunded','charged_back'].includes(d?.status) ? 'expired' : d?.status);
-      return { success: true, data: { status, raw_status: d?.status } };
+      return { success: true, data: { status, raw_status: d?.status, payment_id:String(d?.id||''), amount:d?.transaction_amount } };
     }
     return (await axios.get(`${PIXGO_API}/payment/${paymentId}/status`, {
       headers: { 'X-API-Key': process.env.PIXGO_API_KEY }, timeout: 15000
@@ -10485,6 +10625,19 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
     let status;
     try { status = await consultarStatus(paymentId, gateway); }
     catch(e) { console.error('⚠️ PIX POLLING:',gateway,String(paymentId).slice(0,24),e.message); return; }
+    const heroContext=String(tipoPagamento||'').toUpperCase()==='SERVICO'?parseHeroPixContext(contextoJson):null;
+    if(heroContext){
+      if(status?.success&&(status.data?.status==='completed'||(gateway==='depixpay'&&status.data?.status==='delayed'))){
+        try{await heroPixConfirmed(paymentId,heroContext,status);clearInterval(interval);finalizarVerificacao();}
+        catch(e){console.log('HERO_PIX_CONFIRM',JSON.stringify(checkoutDiagnostic(e,'HERO-PIX-'+paymentId)));}
+      }else if(status?.success&&['expired','cancelled','refunded'].includes(status.data?.status)){
+        await run("UPDATE pix_pedidos SET status=? WHERE payment_id=? AND status IN ('pending','expired')",[status.data.status,paymentId]);
+        await run("UPDATE hero_sms_orders SET status='payment_expired' WHERE payment_id=? AND status='awaiting_payment'",[paymentId]);
+        clearInterval(interval);finalizarVerificacao();
+      }
+      if(tentativas>=40){clearInterval(interval);finalizarVerificacao();}
+      return;
+    }
     if (status?.success && (status.data?.status === 'completed' ||
        (gateway==='depixpay' && status.data?.status === 'delayed' && await depixDelayedElegivel(paymentId)))) {
        if(gateway==='depixpay')console.log('✅ V250 DEPIX: pagamento confirmado para entrega:',String(paymentId).slice(0,24),status.data.status);
@@ -10510,10 +10663,6 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       }
        let contextoEsim=null;
        try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
-       if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='HERO_SMS') {
-         await heroPixConfirmed(paymentId,contextoEsim);
-         await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',['delivered',paymentId]);return;
-       }
        if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
          await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
          const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim);
@@ -10593,7 +10742,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
     }
     if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); } // Worker persistente DePix retoma cobranças após este período ou restart.
   };
-  const interval = setInterval(executarConsultaPagamento, 30000);
+  const interval = setInterval(()=>executarConsultaPagamento().catch(e=>console.log('PIX_POLLING_ERROR',JSON.stringify(checkoutDiagnostic(e,'PIX-'+paymentId)))),30000);
   setTimeout(() => executarConsultaPagamento().catch(e => console.error('⚠️ PIX CONSULTA IMEDIATA:', e.message)), 500);
 
 }
@@ -16788,6 +16937,14 @@ async function heroPedidosInit(){
     order_id INTEGER PRIMARY KEY, code TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_external_events(
+    order_id INTEGER PRIMARY KEY, state TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_pix_receipts(
+    payment_id TEXT PRIMARY KEY, order_id INTEGER NOT NULL UNIQUE, gateway TEXT NOT NULL,
+    amount_brl REAL NOT NULL, provider_status TEXT NOT NULL, verified_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_cancel_receipts(
     order_id INTEGER PRIMARY KEY, activation_id TEXT NOT NULL, confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
@@ -17003,11 +17160,40 @@ app.post('/admin/herosms/teste-compra/acao',async(req,res)=>{
   }catch(e){res.redirect('/admin/herosms/teste-compra?erro='+encodeURIComponent(heroAdminTestError(e)));}
 });
 
+const heroAdminReconcileToken=crypto.randomBytes(24).toString('hex');
+app.post('/admin/herosms/pedidos/:id/conferir-cancelamento',async(req,res)=>{
+  const id=Number(req.params.id);
+  if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página do pedido antes de confirmar.');
+  try{
+    if(req.body?.confirmar_vinculo!=='sim')throw new Error('Confirme que o ID informado pertence a este pedido.');
+    const message=await heroReconcileExternalCancellation(id,req.body?.activation_id);
+    res.redirect('/admin/herosms/pedidos/'+id+'?ok='+encodeURIComponent(message));
+  }catch(e){
+    if(!Number.isSafeInteger(id)||id<1)return res.status(400).send('Pedido inválido');
+    const message=checkoutDiagnostic(e,'HERO-MANUAL-'+id).message;
+    res.redirect('/admin/herosms/pedidos/'+id+'?erro='+encodeURIComponent(message));
+  }
+});
+app.get('/admin/herosms/pedidos/:id',async(req,res)=>{
+  try{
+    const id=Number(req.params.id);
+    if(!Number.isSafeInteger(id)||id<1)return res.status(400).send('Pedido inválido');
+    await heroPedidosInit();
+    const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
+    if(!o)return res.status(404).send('Pedido não encontrado');
+    const diagnostic=o.last_error?checkoutDiagnostic({message:o.last_error},'HERO-PURCHASE-'+id).message:'Nenhum erro registrado.';
+    const payment=o.payment_id?await get('SELECT status,gateway,valor FROM pix_pedidos WHERE payment_id=?',[o.payment_id]):null;
+    const notice=req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:req.query.erro?`<p>${safeHtml(req.query.erro)}</p>`:'';
+    const canReconcile=!o.sms_code&&['uncertain','purchasing','paid','number_received','cancel_pending','canceled'].includes(o.status);
+    const syncForm=canReconcile?`<h3>Cancelado manualmente na Hero SMS?</h3><p>Informe o ID da ativação no fornecedor. Esta ação consulta o cancelamento e atualiza o cliente, sem executar outro cancelamento nem creditar saldo automaticamente.</p><form method="post" action="/admin/herosms/pedidos/${id}/conferir-cancelamento"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label>ID da ativação Hero SMS</label><input name="activation_id" value="${safeHtml(o.activation_id||'')}" inputmode="numeric" pattern="[0-9]{1,30}" required><label><input type="checkbox" name="confirmar_vinculo" value="sim" required> Confirmo que esta ativação pertence ao pedido #${id}</label><button type="submit">Conferir cancelamento e atualizar cliente</button></form>`:'';
+    res.send(page('Pedido Hero SMS #'+id,`<div class="hero"><h1>📦 Pedido Hero SMS #${id}</h1></div><div class="card">${notice}<p><a href="/admin/herosms/pedidos">Voltar aos pedidos</a></p><p><b>Estado:</b> ${safeHtml(o.status)}</p><p><b>Pagamento:</b> ${safeHtml(o.payment_method)} • ${brl(o.price_brl)}</p><p><b>Ativação:</b> ${safeHtml(o.activation_id||'Não registrada')}</p><p><b>Número:</b> ${safeHtml(o.phone||'Não registrado')}</p><p><b>Crédito na carteira:</b> ${safeHtml(o.refund_status)}</p>${payment?`<p><b>Pix:</b> ${safeHtml(payment.gateway)} • ${safeHtml(payment.status)} • ${brl(payment.valor)}</p>`:''}<h3>Motivo registrado</h3><pre style="white-space:pre-wrap">${safeHtml(diagnostic)}</pre><p>Se o pedido estiver em verificação, confira o histórico da Hero SMS antes de repetir a compra ou liberar saldo.</p>${syncForm}</div>`));
+  }catch(e){res.status(500).send('Erro ao abrir diagnóstico do pedido Hero SMS');}
+});
 app.get('/admin/herosms/pedidos',async(req,res)=>{
   try{
     await heroPedidosInit();
     const pedidos=await all('SELECT id,service,country,price_brl,payment_method,status,refund_status,created_at FROM hero_sms_orders ORDER BY id DESC LIMIT 100');
-    const linhas=pedidos.map(x=>`<tr><td>${x.id}</td><td>${safeHtml(x.service)}</td><td>${safeHtml(x.country)}</td><td>${brl(x.price_brl)}</td><td>${safeHtml(x.payment_method)}</td><td>${safeHtml(x.status)}</td><td>${safeHtml(x.refund_status)}</td><td>${safeHtml(x.created_at)}</td></tr>`).join('');
+    const linhas=pedidos.map(x=>`<tr><td><a href="/admin/herosms/pedidos/${x.id}">#${x.id} — Abrir</a></td><td>${safeHtml(x.service)}</td><td>${safeHtml(x.country)}</td><td>${brl(x.price_brl)}</td><td>${safeHtml(x.payment_method)}</td><td>${safeHtml(x.status)}</td><td>${safeHtml(x.refund_status)}</td><td>${safeHtml(x.created_at)}</td></tr>`).join('');
     res.send(page('Hero SMS — Pedidos',`<div class="hero"><h1>📋 Pedidos Hero SMS</h1></div><div class="card"><a href="/admin/herosms">Voltar</a><p>Pedidos registrados pelo checkout Hero SMS.</p><table><tr><th>ID</th><th>Aplicativo</th><th>País</th><th>Preço</th><th>Pagamento</th><th>Estado</th><th>Reembolso</th><th>Data</th></tr>${linhas}</table></div>`));
   }catch(e){res.status(500).send('Erro ao listar pedidos Hero SMS');}
 });

@@ -125,3 +125,82 @@ seu motivo completo. O erro da tentativa de compra não foi registrado pela vers
 anterior. As correções acima precisam ser testadas na hospedagem do usuário; não
 comprovam retrospectivamente qual condição causou a mensagem genérica original.
 Nenhum saldo, pedido real ou credencial do usuário foi acessado ou alterado aqui.
+
+
+## Revisão Pix e diagnóstico de pedidos pendentes — pacote V10.1.2
+
+Regra solicitada: o checkout Hero SMS usa exclusivamente o gateway PADRÃO ATIVO
+no painel, no WhatsApp e Telegram. A preferência individual da revenda não interfere
+nesse checkout. Se o padrão estiver inativo, não escolhe outro gateway nem cria Pix.
+Cobranças já geradas continuam consultadas no gateway registrado em cada cobrança.
+
+Correções:
+- DePix Pay recebe CPF/CNPJ salvo no cadastro. Sem documento válido, solicita o
+  cadastro antes de criar pedido/cobrança, preserva a oferta e retoma o checkout Hero.
+  Documento inválido, cancelamento e expiração da coleta não geram cobrança.
+- QR Code no WhatsApp usa a sessão de atendimento e o destino LID resolvido,
+  inclusive quando a conexão principal não está disponível.
+- Falha incerta ao criar Pix preserva payment_reconciliation e bloqueia uma nova
+  geração automática; recusa HTTP explícita fica registrada como payment_failed.
+- Compra do número exige consulta autenticada com status elegível, ID e valor
+  correspondentes, vínculo do cliente e contexto correto do pedido.
+- Mercado Pago e MisticPay passam a fornecer ID e valor no retorno normalizado de
+  consultarStatus. Se esses dados estiverem ausentes/divergentes, não libera compra.
+  Os campos MisticPay utilizados são transaction.transactionId e amount ou
+  transactionAmount; o formato real precisa ser homologado na conta do usuário.
+- Comprovante local de verificação em hero_sms_pix_receipts e recuperação periódica
+  de cobranças Hero SMS após reinício, para os gateways configurados.
+- Pix só recebe estado delivered após a ativação/número estar persistida. Compra
+  de resultado incerto fica delivery_pending, sem nova compra automática.
+- Confirmações repetidas não duplicam a compra e não creditam/debitam a carteira.
+- Preserva a regra legada DePix para delayed e mantém a consulta autenticada como
+  fonte da confirmação. Notificação de webhook isolada não libera número.
+- Estados pendentes agora têm textos específicos no card do cliente.
+- Painel Hero SMS > Pedidos > Abrir mostra motivo registrado, estado do pedido,
+  ativação, número, método de pagamento e situação do Pix. É somente leitura.
+- Falhas futuras da compra geram log HERO_PURCHASE com referência ao pedido.
+
+Sobre o pedido #15 mostrado na conversa: ele permanece protegido contra uma nova
+compra. Esta atualização não altera esse registro na hospedagem do usuário. Após
+atualizar, abra /admin/herosms/pedidos/15 e confira o motivo salvo e o histórico do
+fornecedor antes de decidir pela recuperação ou pelo crédito. Ausência de número
+local não comprova que o fornecedor deixou de executar a operação.
+
+Verificação: 70 testes passaram com SQLite e provedor/canais simulados, incluindo
+Pix com/sem documento, retomada por CPF, QR em múltiplas sessões, confirmação duplicada,
+valor/ID divergentes, pedido incerto, expiração, recuperação e gateway padrão.
+Não foram geradas cobranças nem executadas compras reais nesta revisão.
+
+
+## Cancelamento manual no fornecedor — pacote V10.1.3
+
+- Polling compatível passa a tratar a resposta documentada STATUS_CANCEL e marcar
+  o pedido cancelado. Esse caminho é independente do endpoint REST de histórico.
+- Pedidos uncertain com ID conhecido continuam sendo acompanhados; pedidos sem ID
+  não são associados por suposição, telefone aproximado, valor ou horário.
+- ID de ativação recebido em uma resposta incompleta de compra é preservado,
+  mesmo se o número vier ausente e o resultado exigir conferência.
+- Sincronização REST inclui compras incertas com ID conhecido e permite recuperar
+  o telefone pelo ID exato quando a ativação ainda está ativa.
+- Cancelamento/finalização/reembolso externo gera evento persistente. A atualização
+  do cliente não depende de existir um card anterior. Estado já comunicado não é
+  enviado novamente; falha de canal mantém o evento pendente para nova tentativa.
+- Tela administrativa do pedido possui formulário para associar/conferir o ID da
+  ativação de um cancelamento manual. Requer autenticação, token de formulário e
+  confirmação explícita do administrador de que a ativação pertence ao pedido.
+  O fornecedor precisa responder STATUS_CANCEL em consulta GET getStatus.
+  ID divergente, ativação já vinculada a outro pedido, estado incompatível e
+  cancelamento não confirmado são rejeitados sem mudar o saldo.
+- O formulário não executa setStatus/cancelamento novamente e não credita carteira.
+  Cancelamento e confirmação financeira de estorno continuam sendo eventos distintos.
+  O caminho legado status 10 do histórico permanece sujeito à homologação já descrita.
+
+Para recuperar o pedido #15 na hospedagem do usuário: após atualizar, abra
+Hero SMS > Pedidos > #15 > Cancelado manualmente na Hero SMS?, informe o ID exato
+obtido no fornecedor e confirme o vínculo. A fila atualiza o cliente no próximo
+ciclo (até cerca de 30 segundos, sujeito à conexão do canal).
+O registro real não foi acessado nem alterado durante o desenvolvimento.
+
+Verificação: 79 testes simulados aprovados, incluindo STATUS_CANCEL, compra incerta,
+ID ausente, ID associado a outro pedido, falha de notificação e reconciliação
+administrativa somente após confirmação do fornecedor.

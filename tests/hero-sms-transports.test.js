@@ -35,3 +35,16 @@ test('Telegram unchanged content is success, missing message permits fallback, n
  f.ctx.tgBot.editMessageText=async()=>{throw new Error('Bad Request: message to edit not found');};await assert.rejects(f.ctx.heroEditOrderMessage(ref,{text:'SMS'}),e=>e.cannotEdit===true);
  f.ctx.tgBot.editMessageText=async()=>{throw new Error('ECONNRESET');};await assert.rejects(f.ctx.heroEditOrderMessage(ref,{text:'SMS'}),e=>!e.cannotEdit);
 });
+
+test('Pix QR image uses the customer service session and resolved LID even without a primary socket',async()=>{
+ const sent=[];const preferred={funcaoBot:true,conectado:true,socket:{sendMessage:async(...args)=>{sent.push(args);return {key:{id:'qr'}};}}};
+ const ctx=vm.createContext({WHATSAPP_ENABLED:true,conectado:false,whatsappSocket:null,whatsappSessaoPorNumeroCliente:new Map([['5511999999999',7]]),whatsappSessoes:new Map([[7,preferred]]),isTgJid:j=>j.startsWith('tg:'),normalizarNumeroWhatsApp:x=>x,jidToNumber:x=>x,obterSessaoBotConectada:async()=>assert.fail('must reuse preferred session'),resolverJidWhatsAppEnvio:async(number,socket)=>{assert.equal(number,'5511999999999');assert.equal(socket,preferred.socket);return '12345@lid';}});
+ const i=source.indexOf('async function heroSendPixImage('),j=source.indexOf('function heroReportCheckoutError(',i);
+ vm.runInContext(source.slice(i,j),ctx);const image=Buffer.from('image');await ctx.heroSendPixImage('wa:5511999999999',image);
+ assert.equal(sent.length,1);assert.equal(sent[0][0],'12345@lid');assert.equal(sent[0][1].image,image);
+});
+test('Pix QR image on Telegram uses the customer chat and buffer',async()=>{
+ const sent=[];const ctx=vm.createContext({isTgJid:j=>j.startsWith('tg:'),tgIdFromJid:j=>j.slice(3),tgBot:{sendPhoto:async(...args)=>sent.push(args)}});
+ const i=source.indexOf('async function heroSendPixImage('),j=source.indexOf('function heroReportCheckoutError(',i);
+ vm.runInContext(source.slice(i,j),ctx);const image=Buffer.from('image');await ctx.heroSendPixImage('tg:123',image);assert.equal(sent[0][0],'123');assert.equal(sent[0][1],image);
+});

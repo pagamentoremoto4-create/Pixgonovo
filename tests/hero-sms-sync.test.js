@@ -109,3 +109,55 @@ test('a confirmed provider cancellation is excluded from SMS delivery while its 
   let calls=0;f.ctx.heroSmsApi=async()=>{calls++;return 'STATUS_OK:012345';};await f.ctx.heroPollSms();
   assert.equal(calls,0);assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'cancel_pending');
 });
+
+test('provider STATUS_CANCEL updates the existing client card once without crediting a refund',async t=>{
+  const f=await fixture(t);await f.ctx.heroUpdateOrderCard(1);
+  f.ctx.heroSmsApi=async()=> 'STATUS_CANCEL';
+  await f.ctx.heroPollSms();await f.ctx.heroStatusUpdates();await f.ctx.heroStatusUpdates();
+  const o=await f.get('SELECT status,refund_status FROM hero_sms_orders WHERE id=1');
+  assert.equal(o.status,'canceled');assert.equal(o.refund_status,'none');
+  assert.equal(f.sent.filter(x=>!x.edit).length,1);assert.equal(f.sent.filter(x=>x.edit).length,1);
+  assert.match(f.sent.find(x=>x.edit).msg,/ATIVAÇÃO CANCELADA/);
+});
+test('external history cancellation notifies an order with no existing message reference',async t=>{
+  const f=await fixture(t);
+  f.ctx.heroSmsV1=async(method,path)=>path.startsWith('/activations/history?')?{data:[{id:123,status:8}],meta:{hasMore:false}}:{data:[],meta:{hasMore:false}};
+  await f.ctx.heroSyncExternal();await f.ctx.heroStatusUpdates();await f.ctx.heroSyncExternal();await f.ctx.heroStatusUpdates();
+  assert.equal(f.sent.length,1);assert.match(f.sent[0].msg,/ATIVAÇÃO CANCELADA/);
+  assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);
+});
+test('an uncertain purchase with a known activation id is checked for external cancellation',async t=>{
+  const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='uncertain',phone=NULL WHERE id=1");
+  f.ctx.heroSmsApi=async()=> 'STATUS_CANCEL';await f.ctx.heroPollSms();await f.ctx.heroStatusUpdates();
+  assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'canceled');assert.equal(f.sent.length,1);
+});
+test('a missing activation id is never guessed from unrelated supplier orders',async t=>{
+  const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='uncertain',phone=NULL,activation_id=NULL WHERE id=1");
+  let calls=0;f.ctx.heroSmsApi=async()=>{calls++;return 'STATUS_CANCEL';};await f.ctx.heroPollSms();await f.ctx.heroSyncExternal();
+  assert.equal(calls,0);assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'uncertain');assert.equal(f.sent.length,0);
+});
+test('an admin-supplied activation id is linked only after read-only provider cancellation confirmation',async t=>{
+  const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='uncertain',phone=NULL,activation_id=NULL WHERE id=1");
+  let calls=0;f.ctx.heroSmsApi=async(action,params)=>{assert.equal(action,'getStatus');assert.equal(params.id,'123');calls++;return 'STATUS_CANCEL';};
+  await f.ctx.heroReconcileExternalCancellation(1,'123');await f.ctx.heroStatusUpdates();
+  const o=await f.get('SELECT activation_id,status,refund_status FROM hero_sms_orders WHERE id=1');
+  assert.equal(o.activation_id,'123');assert.equal(o.status,'canceled');assert.equal(o.refund_status,'none');assert.equal(calls,1);assert.equal(f.sent.length,1);
+});
+test('unconfirmed manual reconciliation preserves the order and its balance state',async t=>{
+  const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='uncertain',activation_id=NULL WHERE id=1");
+  f.ctx.heroSmsApi=async()=> 'STATUS_WAIT_CODE';await assert.rejects(f.ctx.heroReconcileExternalCancellation(1,'123'));
+  const o=await f.get('SELECT activation_id,status,refund_status FROM hero_sms_orders WHERE id=1');assert.equal(o.activation_id,null);assert.equal(o.status,'uncertain');assert.equal(o.refund_status,'none');
+});
+test('manual reconciliation rejects an activation already linked to another order',async t=>{
+  const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='uncertain' WHERE id=1");
+  await f.run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method,activation_id,status) VALUES(1,'test','wa','73',25,1,'saldo','999','number_received')");
+  await assert.rejects(f.ctx.heroReconcileExternalCancellation(1,'999'));
+  assert.equal((await f.get('SELECT activation_id FROM hero_sms_orders WHERE id=1')).activation_id,'123');
+});
+test('an unsuccessful cancellation notification remains queued for retry',async t=>{
+  const f=await fixture(t);f.ctx.heroSmsApi=async()=> 'STATUS_CANCEL';await f.ctx.heroPollSms();
+  const send=f.ctx.enviarTexto;f.ctx.enviarTexto=async()=>false;await f.ctx.heroStatusUpdates();
+  assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,0);
+  f.ctx.enviarTexto=send;await f.ctx.heroStatusUpdates();assert.equal(f.sent.length,1);
+  assert.equal((await f.get('SELECT delivered FROM hero_sms_external_events WHERE order_id=1')).delivered,1);
+});

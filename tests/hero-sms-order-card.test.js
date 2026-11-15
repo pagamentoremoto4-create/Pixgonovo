@@ -47,3 +47,11 @@ test('Telegram buttons disappear after receiving a code and after cancellation',
  o.status='canceled';o.sms_code=null;o.refund_status='credited';
  assert.match(renderOrderCard(o,0,true).text,/devolvido à sua carteira/);
 });
+
+test('unresolved purchase and payment states explain the block without offering cancellation or another payment',()=>{
+ for(const status of ['uncertain','payment_reconciliation']){
+  const card=renderOrderCard({id:15,status,refund_status:'none'},0);
+  assert.match(card.text,/#15/);assert.match(card.text,/confer|verifica/i);assert.match(card.text,/administrador/);
+  assert.ok(!card.text.includes('Solicitar cancelamento'));assert.ok(!card.text.includes('Pagar'));
+ }
+});
