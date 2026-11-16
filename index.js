@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.15';
+const APP_RELEASE='10.1.16';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -3637,9 +3637,11 @@ async function heroCheckout(jid,cliente,key,method){
     await heroBuyPaid(id);return id;
   }
   await run("UPDATE hero_sms_orders SET status='payment_creating' WHERE id=?",[id]);
+  const heroPixProgress=String(jid).startsWith('wa:')?await whatsappMenu.pixBegin?.(String(jid).slice(3)):null;
   let pix;
   try{pix=await gerarPix(amount,String(cliente.nome||'Cliente'),documento,gateway,{throwOnError:true});}
   catch(e){
+    if(heroPixProgress)await whatsappMenu.pixEndProgress(String(jid).slice(3),heroPixProgress);
     const rejected=[400,401,403,404,409,422].includes(Number(e.response?.status));
     await run('UPDATE hero_sms_orders SET status=?,last_error=? WHERE id=?',[rejected?'payment_failed':'payment_reconciliation',JSON.stringify(checkoutDiagnostic(e,'HERO-'+id)),id]);
     throw checkoutError('PIX_CREATION_FAILED',rejected?'O provedor recusou gerar o Pix. Confira a configuração do pagamento.':'A criação do Pix ficou sem confirmação. Pedido #'+id+' em conferência; não gere outro pagamento até verificar.');
@@ -3654,7 +3656,13 @@ async function heroCheckout(jid,cliente,key,method){
     await run("UPDATE hero_sms_orders SET status='payment_reconciliation',last_error='Pix criado; vínculo do pagamento pendente' WHERE id=?",[id]);throw e;
   }
   verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
-  // Mesmo layout do checkout eSIM: informativo, QR como imagem e copia-e-cola isolado.
+  if(String(jid).startsWith('wa:')){
+    const phone=String(jid).slice(3);
+    if(await whatsappMenu.pixReady?.(phone,{paymentId:pix.paymentId,gateway,amount,code:pix.qrCode,progress:heroPixProgress,detail:'📦 Pedido #'+id+' • '+offer.pais+'\nA compra do número ocorre após a confirmação.'}))return id;
+    if(heroPixProgress)await whatsappMenu.pixEndProgress(phone,heroPixProgress);
+  }
+  // Formato anterior preservado como alternativa.
+
   const heroPixCode=String(pix.qrCode).replace(/[\r\n\t]/g,'').trim();
   await enviarTexto(jid,'🔓 CENTRALUNLOCKER — HERO SMS\n💳 PAGAMENTO VIA PIX\n\n📦 Pedido #'+id+'\n🌎 País: '+offer.pais+'\n💰 Valor: '+brl(amount)+'\n⏳ Aguardando pagamento.\n\nA compra do número ocorre somente após confirmação.'+avisoTokenizacaoPix(gateway));
   try {
@@ -3923,6 +3931,7 @@ async function heroPixConfirmed(paymentId,ctx,verification=null){
   await run(`INSERT INTO hero_sms_pix_receipts(payment_id,order_id,gateway,amount_brl,provider_status) VALUES(?,?,?,?,?) ON CONFLICT(payment_id) DO NOTHING`,[String(paymentId),o.id,payment.gateway,Number(payment.valor),verified.data.status]);
   await run("UPDATE pix_pedidos SET status='completed' WHERE payment_id=? AND status IN ('pending','expired')",[String(paymentId)]);
   await run("UPDATE hero_sms_orders SET status='paid',last_error=NULL WHERE id=? AND status IN ('awaiting_payment','payment_expired')",[o.id]);
+  if(String(o.customer_jid).startsWith('wa:'))await whatsappMenu.pixUpdate?.(String(o.customer_jid).slice(3),payment.gateway,String(paymentId));
   // An order left in paid before a restart is safe to claim. Purchasing/uncertain
   // are never automatically retried: the provider may already have executed it.
   await heroBuyPaid(o.id);
@@ -10474,10 +10483,12 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   const gateway = preferenciaV257.gateway;
   if (!gateway) { await enviarMensagem('⚠️ A forma de pagamento configurada para sua conta está indisponível. Contate o suporte.'); return false; }
   const ehTelegram = String(chave).startsWith('tg:') || String(chave).startsWith('cvtg:');
-  if (!ehTelegram) await enviarMensagem('⏳ Gerando PIX...');
+  const progressPix=!ehTelegram?await whatsappMenu.pixBegin?.(String(chave).replace(/^wa:/,'')):null;
+  if (!ehTelegram&&!progressPix) await enviarMensagem('⏳ Gerando PIX...');
   const documento = gateway === 'depixpay' ? String(sess.documento_pix || '') : '';
   const pix = await gerarPix(sess.valor_pix, `${ehTelegram ? 'Telegram' : 'WhatsApp'} ${cliente.nome}`, documento, gateway);
   if (!pix) {
+    if(progressPix)await whatsappMenu.pixEndProgress(String(chave).replace(/^wa:/,''),progressPix);
     await enviarMensagem(`❌ Não foi possível gerar o PIX. Tente novamente ou contate o suporte.`);
     return false;
   }
@@ -10496,6 +10507,12 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   // Apagar somente apos o pagamento ter sido gerado e registrado.
   // Se o gateway falhar, o cliente pode tentar novamente sem perder o pedido.
   await apagarSessaoPedido(chave);
+
+  if(!ehTelegram&&String(chave).startsWith('wa:')){
+    const phone=String(chave).slice(3);
+    if(await whatsappMenu.pixReady?.(phone,{paymentId,gateway,amount:valor,code:qrCode,progress:progressPix}))return true;
+    if(progressPix)await whatsappMenu.pixEndProgress(phone,progressPix);
+  }
 
   // Telegram: checkout PIX visual — QR grande + valor + botão nativo COPIAR PIX.
   // O código PIX não é mais despejado como uma mensagem enorme no chat.
@@ -10835,6 +10852,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       }else if(status?.success&&['expired','cancelled','refunded'].includes(status.data?.status)){
         await run("UPDATE pix_pedidos SET status=? WHERE payment_id=? AND status IN ('pending','expired')",[status.data.status,paymentId]);
         await run("UPDATE hero_sms_orders SET status='payment_expired' WHERE payment_id=? AND status='awaiting_payment'",[paymentId]);
+        if(String(jid).startsWith('wa:'))await whatsappMenu.pixUpdate?.(String(jid).slice(3),gateway,String(paymentId));
         clearInterval(interval);finalizarVerificacao();
       }
       if(tentativas>=40){clearInterval(interval);finalizarVerificacao();}
@@ -10848,6 +10866,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       // Processa cada PIX apenas uma vez, mesmo que a consulta de status se repita.
       const marcado = await run('UPDATE pix_pedidos SET status="completed" WHERE payment_id=? AND status IN ("pending","expired")', [paymentId]);
       if (!marcado?.changes) return;
+      const pixCardUpdated=String(jid).startsWith('wa:')?await whatsappMenu.pixUpdate?.(String(jid).slice(3),gateway,String(paymentId)):false;
 
       let novo = null;
       const tipoPagamentoUpper = String(tipoPagamento || '').toUpperCase();
@@ -10866,7 +10885,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
        let contextoEsim=null;
        try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
        if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
-         await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
+         if(!pixCardUpdated)await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
          const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim);
          await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',[ok?'delivered':'delivery_pending',paymentId]);
          return;
@@ -10888,7 +10907,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
       await enviarAvisoDestinatarios('PAGAMENTO', `💰 *Pagamento confirmado*\n\n💵 Valor: ${brl(valorPix)}\n📌 Tipo: ${pagamentoServico ? 'Pagamento de serviço' : 'Adição de saldo'}\n🏢 Centralunlocker`);
 
       if (pagamentoServico) {
-        await enviarTexto(jid, `✅ Pagamento confirmado
+        if(!pixCardUpdated)await enviarTexto(jid, `✅ Pagamento confirmado
 
 💰 Valor pago: ${brl(valorPix)}
 
@@ -10925,7 +10944,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
 💵 Saldo disponível: ${brl(Number(contaAtual?.saldo || novo || 0))}
 📦 Pedidos em aberto: ${Number(pedidosAbertos?.total || 0)}`;
         }
-        await enviarTexto(jid, mensagemConfirmacao);
+        if(!pixCardUpdated)await enviarTexto(jid, mensagemConfirmacao);
       }
     }
     if (status?.success && status.data?.status === 'expired') {
@@ -10939,7 +10958,8 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
         [paymentId]
       );
       if (Number(marcadoExpirado?.changes || 0) > 0) {
-        await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
+        const edited=String(jid).startsWith('wa:')?await whatsappMenu.pixUpdate?.(String(jid).slice(3),gateway,String(paymentId)):false;
+        if(!edited)await enviarTexto(jid, '⌛ PIX expirado. Digite pagar valor para gerar outro.');
       }
     }
     if (tentativas >= 40) { clearInterval(interval); finalizarVerificacao(); } // Worker persistente DePix retoma cobranças após este período ou restart.
@@ -13853,6 +13873,7 @@ async function whatsappMenuConnection(phone){
  const socket=session?.socket||(conectado?whatsappSocket:null);return socket?{id:session?.id||'services',socket}:null;
 }
 const whatsappMenu=createWhatsAppMenu({run,get,all,getConfig,setConfig,brl,html:safeHtml,
+ qrBuffer:code=>QRCode.toBuffer(code,{width:620,margin:2,errorCorrectionLevel:'M'}),
  assets:path.join(__dirname,'media','menu-modelos'),sdk:()=>import('@whiskeysockets/baileys'),
  connection:whatsappMenuConnection,resolve:resolverJidWhatsAppEnvio,
  sameNumber:(a,b)=>variantesNumero(a).some(n=>variantesNumero(b).includes(n)),

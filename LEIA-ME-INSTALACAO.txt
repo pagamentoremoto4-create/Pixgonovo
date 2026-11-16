@@ -1,3 +1,10 @@
+ATUALIZAÇÃO 10.1.16 — TESTE IPHONE E PIX COMPACTO
+Painel: /admin/menu-whatsapp/modelos
+Use Teste somente no seu número, Lista sem imagem e Pix compacto.
+Formatos anteriores e ativação existente são preservados.
+Leia MENU-WHATSAPP-IPHONE-E-PIX.md antes de testar.
+Não foi implantado no servidor; compatibilidade visual precisa do celular.
+
 ATUALIZAÇÃO 10.1.15 — MENU VISUAL PREMIUM WHATSAPP
 Quatro modelos, desativados por padrão.
 Painel: /admin/menu-whatsapp/modelos

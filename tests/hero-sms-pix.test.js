@@ -199,3 +199,12 @@ test('closed test is excluded from Pix recovery and does not block a new purchas
  f.ctx.gerarPix=async()=>({paymentId:'pix-2',qrCode:'000201-PIX2'});assert.equal(await f.buy(),2);
  assert.equal((await f.get('SELECT status FROM hero_sms_orders WHERE id=1')).status,'test_closed');
 });
+
+test('compact Hero Pix uses the existing single charge and skips the old multipart presentation',async t=>{
+ const f=await fixture(t);const cards=[];f.ctx.whatsappMenu.pixReady=async(phone,data)=>{cards.push({phone,data});return true;};
+ assert.equal(await f.buy(),1);assert.equal(f.charges.length,1);assert.equal(cards.length,1);assert.equal(cards[0].data.paymentId,'pix-1');assert.equal(cards[0].data.gateway,'depixpay');assert.equal(cards[0].data.amount,25);assert.equal(f.images.length,0);assert.equal(f.messages.length,0);assert.equal((await f.get('SELECT saldo FROM revendas')).saldo,50);assert.equal(f.purchases.length,0);assert.equal(f.starts(),1);
+});
+test('compact presentation failure falls back without regenerating or recharging Hero Pix',async t=>{
+ const f=await fixture(t);f.ctx.whatsappMenu.pixReady=async()=>false;
+ await f.buy();assert.equal(f.charges.length,1);assert.equal(f.images.length,1);assert(f.messages.some(m=>m.text==='000201-PIX'));assert.equal((await f.get('SELECT saldo FROM revendas')).saldo,50);assert.equal(f.purchases.length,0);
+});

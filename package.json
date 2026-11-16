@@ -1,6 +1,6 @@
 {
   "name": "centralunlocker-revendas",
-  "version": "10.1.15",
+  "version": "10.1.16",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -10,7 +10,7 @@
     "test:community": "node --test tests/community-hub.test.js",
     "test:billing": "node --test tests/customer-billing.test.js",
     "test:whatsapp-ui": "node --test tests/whatsapp-ui-test.test.js",
-    "test:menu": "node --test tests/whatsapp-menu-premium.test.js"
+    "test:menu": "node --test tests/whatsapp-menu-premium.test.js tests/whatsapp-pix-card.test.js"
   },
   "dependencies": {
     "axios": "^1.7.9",
