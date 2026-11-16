@@ -120,7 +120,8 @@ module.exports=function createPremium(d){
   const p=await product(id);if(!p?.ativo||!p.present){await d.enviarTexto(from,'Produto indisponível.');return;}
   const token=crypto.randomUUID();await d.salvarSessaoPedido(from,{etapa:'premium_product',productId:p.id,token});const text=await card(p,client),available=stock(p)>0;
   if(telegram){const image=productImage(p);if(image)await d.enviarImagem(from,image,'');return d.bot().sendMessage(d.tgId(from),text,{reply_markup:{inline_keyboard:[...(available?[[{text:'🛒 Comprar',callback_data:`prem_buy_${p.id}_${token}`}]]:[]),[{text:'⬅️ Voltar',callback_data:'menu_premium'}]]}});}
-  const image=productImage(p);if(image)await d.enviarImagem(from,image,'');
+  const image=productImage(p);if(d.visual&&await d.visual(from,text+(available?'\n\n1️⃣ Comprar\n0️⃣ Voltar':'\n\n⛔ Esgotado\n0️⃣ Voltar'),image))return;
+  if(image)await d.enviarImagem(from,image,'');
   await d.enviarTexto(from,text+(available?'\n\n1️⃣ Comprar\n0️⃣ Voltar':'\n\n⛔ Esgotado\n0️⃣ Voltar'));
  }
  async function confirm(from,client,id,token){

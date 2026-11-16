@@ -1,3 +1,10 @@
+ATUALIZAÇÃO 10.1.15 — MENU VISUAL PREMIUM WHATSAPP
+Quatro modelos, desativados por padrão.
+Painel: /admin/menu-whatsapp/modelos
+Escolha Somente teste, informe seu telefone e envie menu ao bot.
+O modo restrito usa os fluxos reais de compra. O laboratório v14 é separado.
+Leia MENU-WHATSAPP-PREMIUM.md. Preserve banco, disco persistente e sessões.
+
 ATUALIZAÇÃO 10.1.14 — TESTE PRIVADO DE BOTÕES WHATSAPP
 Nova página: /admin/menu-whatsapp/testes
 Menu de demonstração e Copiar Pix com texto sem cobrança.

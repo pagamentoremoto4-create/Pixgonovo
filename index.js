@@ -1,5 +1,6 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.14';
+const APP_RELEASE='10.1.15';
+const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
 const {createHub,allowedCallback:communityAllowedCallback}=require('./community-hub');
@@ -3665,7 +3666,7 @@ async function heroCheckout(jid,cliente,key,method){
     await heroSendPixImage(jid,heroPixBuffer);
   }catch(heroPixQrErr){console.log('⚠️ HERO SMS QR Pix não enviado:',heroPixQrErr.message);}
   await enviarTexto(jid,'📋 PIX Copia e Cola:');
-  await enviarTexto(jid,heroPixCode);
+  if(!String(jid).startsWith('wa:')||!await whatsappMenu.copyPix(String(jid).slice(3),heroPixCode))await enviarTexto(jid,heroPixCode);
   return id;
   } finally { heroCheckoutInFlight.delete(jid); }
 }
@@ -3815,6 +3816,13 @@ async function heroWhatsMenuPedido(jid,id,options={}){
   if(options.reference||options.forceNewMessage)await run('UPDATE hero_sms_orders SET display_sms_page=-1 WHERE id=?',[o.id]);
   await heroUpdateOrderCard(o.id,options);
   if(!isTgJid(jid))await salvarSessaoPedido(jid,{etapa:'hero_pedido_menu',heroPedidoId:o.id,heroCardVersion:3});
+  if(String(jid).startsWith('wa:')&&await whatsappMenu.enabled(String(jid).slice(3))){
+    const messages=await all('SELECT * FROM hero_sms_sms_events WHERE order_id=? AND activation_id=? ORDER BY received_at,id',[o.id,String(o.activation_id)]);
+    const card=renderOrderCard({...o,messages},heroWaitSeconds(o),false);
+    const controls=card.buttons.flat().map(b=>b.callback_data==='hero_sms_orders'?{title:b.text,action:{kind:'hero_orders'}}:{title:b.text,command:b.callback_data.startsWith('hero_sms_cancel_')?'2':b.callback_data.startsWith('hero_sms_codes_')?(b.text==='SMS anteriores'?'3':'4'):'1'});
+    controls.push({title:'🔄 Atualizar opções',action:{kind:'hero_order',id:o.id}});
+    await whatsappMenu.list(String(jid).slice(3),{body:'📦 Opções do pedido #'+o.id,options:controls,context:await carregarSessaoPedido(jid),search:false});
+  }
 }
 async function heroWhatsListarPedidos(jid,page=0){
   await heroPedidosInit();
@@ -3825,6 +3833,7 @@ async function heroWhatsListarPedidos(jid,page=0){
   await salvarSessaoPedido(jid,session);
   const reference=await enviarTexto(jid,'🔓 *CENTRALUNLOCKER*\n📋 *MEUS PEDIDOS* ('+(page+1)+'/'+pages+')\n\n'+(orders.map((o,i)=>(i+1)+'️⃣ Pedido #'+o.id+(o.phone?' • +'+o.phone:'')).join('\n')||'Nenhum pedido encontrado.')+(pages>1?'\n\nDigite próxima ou anterior para navegar.':'')+'\n\nEscolha o número da lista.\n0️⃣ Voltar',{messageReference:true});
   if(reference&&typeof reference==='object')await salvarSessaoPedido(jid,{...session,heroListReference:reference});
+  if(String(jid).startsWith('wa:')&&await whatsappMenu.enabled(String(jid).slice(3))){const controls=orders.map((o,i)=>(i+1)+'️⃣ Pedido #'+o.id+(o.phone?' • +'+o.phone:''));await whatsappMenu.explicit(String(jid).slice(3),'📱 Selecione seu número\n\n'+controls.join('\n')+'\n0️⃣ Voltar');}
 }
 async function heroShowOrder(jid,id){
   await heroPedidosInit();
@@ -4305,6 +4314,7 @@ async function enviarWhatsAppTexto(numero, text, opcoes = {}) {
       }
       const destino = await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
+      if(!opcoes.messageReference){try{const visual=await whatsappMenu.text(number,String(text||''),opcoes);if(visual.handled)return true;}catch(e){console.log('MENU_VISUAL_FALLBACK',e.code||'UNAVAILABLE');}}
       const envio = await sock.sendMessage(destino, { text: String(text || '') });
       if(opcoes.dhruPedidoId && envio?.key?.id){
         try{await setConfig(`dhru_v239_pendente_${opcoes.dhruPedidoId}_${number}`,JSON.stringify({key:envio.key,sessaoId:sessaoBot?.id||null,enviadoEm:Date.now(),texto:String(text||'')}));}
@@ -4367,6 +4377,7 @@ async function enviarImagemWhatsApp(numero, filePath, caption='') {
         ? entrada
         : await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário da imagem');
+      try{const visual=await whatsappMenu.text(number,String(caption||''),{imagePath:filePath});if(visual.handled)return true;}catch(e){console.log('MENU_PHOTO_FALLBACK',e.code||'UNAVAILABLE');}
       const envio = await sock.sendMessage(destino, {
         image: fs.readFileSync(filePath),
         caption: String(caption || '')
@@ -4627,6 +4638,8 @@ function textoConfirmacaoEsimWhatsApp(plano, ddd, saldo, unidades,modalidade='PR
 async function confirmarEsimTexto(from, plano, ddd, revenda) {
   const r=await get('SELECT saldo FROM revendas WHERE id=?',[revenda.id]);
   const qtd=await contarEsimPorDdd(plano,ddd);
+  const state=await carregarSessaoPedido(from),quantity=Math.max(1,Number(state?.quantidade||1));
+  if(quantity>1){const total=Number(plano.preco_revenda)*quantity,canPay=await modalidadeEsimRevenda(revenda)==='POS_PAGO'||Number(r?.saldo||0)>=total;await enviarTexto(from,`📱 ${plano.nome_plano}\n📍 DDD: ${ddd||'Aleatório'}\n📦 Quantidade: ${quantity}\n💰 Unitário: ${brl(plano.preco_revenda)}\n💵 Total: ${brl(total)}\n💳 Saldo: ${brl(r?.saldo||0)}\n\n${canPay?'1️⃣ '+(await modalidadeEsimRevenda(revenda)==='POS_PAGO'?'Confirmar pós-pago':'Pagar com saldo')+'\n2️⃣ Pagar Pix\n3️⃣ Trocar DDD':'1️⃣ Pagar Pix\n2️⃣ Trocar DDD'}\n0️⃣ Voltar`);return;}
   await enviarTexto(from,textoConfirmacaoEsimWhatsApp(plano,ddd,r?.saldo||0,qtd,await modalidadeEsimRevenda(revenda)));
 }
 async function pagarEsimDiretoPix(from, revenda, plano, ddd) {
@@ -4669,6 +4682,11 @@ async function enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, pedid
     await avisarAdminTelegram(`⚠️ Falha ao enviar QR do eSIM #${item.id} para ${destino}. Pedido preservado; reenviar o mesmo QR, sem nova cobrança.`);
     await enviarTexto(destino, `⚠️ O envio do QR Code falhou. Seu pedido foi salvo e não será cobrado novamente. Acione o suporte para reenviar o mesmo eSIM.`);
     return false;
+  }
+  if(String(destino).startsWith('wa:')&&await whatsappMenu.enabled(String(destino).slice(3))){
+    const previous=await carregarSessaoPedido(destino),ids=previous?.etapa==='esim_entregue'?(previous.esim_ids||[]):[];
+    await salvarSessaoPedido(destino,{etapa:'esim_entregue',esim_ids:[...new Set([...ids,Number(item.id)])]});
+    await enviarTexto(destino,`🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`);return true;
   }
   const textoEnviado = await enviarTexto(destino, `🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`);
   if (!textoEnviado) await avisarAdminTelegram(`⚠️ QR do eSIM #${item.id} enviado, mas falhou a mensagem de instalação para ${destino}.`);
@@ -6104,11 +6122,13 @@ Digite *menu* para voltar.`);
 
   if (sess?.etapa === 'esim_confirmar') {
     const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
-    const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
+    const unitario=await precoEsimDaRevenda(cliente.id,sess.plano.id),quantidade=Math.max(1,Number(sess.quantidade||1)),valor=unitario*quantidade;
     const temSaldo=await modalidadeEsimRevenda(r)==='POS_PAGO'||Number(r?.saldo||0)>=valor;
     if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
     if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
+    if(opcao==='1'&&temSaldo&&quantidade>1){await apagarSessaoPedido(from);return entregarEsimsQuantidade(cliente.id,from,{plano:{...sess.plano,preco_revenda:unitario},ddd:sess.ddd,quantidade,totalPedido:valor,origem:'SALDO'});}
     if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
+    if(opcao===(temSaldo?'2':'1')&&quantidade>1)return iniciarFluxoPagamento(from,{tipo_pix:'SERVICO',tipo_compra:'ESIM',valor_pix:valor,totalPedido:valor,plano:{...sess.plano,preco_revenda:unitario},ddd:sess.ddd,quantidade,saldo_usado:0},cliente,m=>enviarTexto(from,m));
     if(opcao===(temSaldo?'2':'1'))return pagarEsimDiretoPix(from,r||cliente,sess.plano,sess.ddd);
     await confirmarEsimTexto(from,sess.plano,sess.ddd,r||cliente);return;
   }
@@ -6282,7 +6302,7 @@ function extrairMensagemWhatsApp(body) {
     } catch (_) {}
   }
 
-  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || whatsAppUiTestReplyId(msg) || respostaInterativa || '';
+  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || whatsAppMenuReplyId(msg) || whatsAppUiTestReplyId(msg) || respostaInterativa || '';
   const fromMe = Boolean(key?.fromMe || data?.fromMe || body?.fromMe);
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
@@ -6615,10 +6635,16 @@ async function consultaVipExecutarYanPrivado(from,cliente,cmd){
   }catch(e){await consultaFalhar(r.lastID,e);}
 }
 
-async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false) {
+async function enviarMenuWhatsApp(from, cliente, primeiroAcesso=false, semSaudacao=false,options={}) {
   const p = await get('SELECT COUNT(*) qtd FROM pedidos WHERE revenda_id=? AND status IN ("PENDENTE", "EM PROCESSO")', [cliente.id]);
   const atual = await get('SELECT * FROM revendas WHERE id=?', [cliente.id]) || cliente;
   const texto = await menuWhatsAppTexto(atual, primeiroAcesso, Number(p?.qtd || 0), semSaudacao);
+  if(!options.plain&&String(from).startsWith('wa:')&&await whatsappMenu.enabled(String(from).slice(3))){
+   const items=await menuWhatsAppItens();let context=await carregarSessaoPedido(from);
+   if(context?.etapa!=='hub_menu'){await salvarSessaoPedido(from,{etapa:'hub_menu'});context=await carregarSessaoPedido(from);}
+   try{const visual=await whatsappMenu.main(String(from).slice(3),atual,items,context);if(visual.handled)return true;}catch(e){console.log('MENU_VISUAL_FALLBACK',e.code||'UNAVAILABLE');}
+  }
+
   // Menu principal unificado: foto configurável no painel + menu na mesma mensagem.
   // Mantém o banner embarcado como padrão até o administrador trocar/remover pelo painel.
   const fotoConfig = String(await getConfig('menu_principal_foto','')).trim();
@@ -6955,6 +6981,11 @@ async function prepararConfirmacaoServicoWhatsApp(from,cliente,servico,sess,entr
 async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null }) {
   const numeroNorm = normalizarNumeroWhatsApp(numero);
   if (!numeroNorm || !texto) return;
+  const visualInput=await whatsappMenu.consume({phone:numeroNorm,text:String(texto),sessionId:sessaoId});
+  if(visualInput.handled)return;
+  const premiumSelection=visualInput.action||null;
+  if(visualInput.command!=null)texto=String(visualInput.command);
+  else if(premiumSelection)texto='__visual_action__';
   const from = `wa:${numeroNorm}`;
   const textoOriginal = String(texto || '').trim();
   const lower = textoOriginal.toLowerCase();
@@ -7002,6 +7033,39 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   if (!Number(cliente?.bot_ativo || 0)) {
     if (novo) console.log('🔇 CLIENTE CADASTRADO COM BOT DESATIVADO:', numeroNorm);
     return;
+  }
+
+  if(premiumSelection){
+    if(premiumSelection.kind==='esim_quantity'){
+      const state=await carregarSessaoPedido(from);if(state?.etapa!=='esim_confirmar'||!state.plano)return;
+      const stock=await contarEsimPorDdd(state.plano,state.ddd);
+      await salvarSessaoPedido(from,{...state,etapa:'ui_esim_quantity'});await enviarTexto(from,'📦 Quantos eSIMs deseja comprar?\nDisponíveis: '+stock+'\n\nDigite a quantidade.\n0️⃣ Voltar à oferta');return;
+    }
+    if(premiumSelection.kind==='hero_order'){await heroWhatsMenuPedido(from,premiumSelection.id);return;}
+    if(premiumSelection.kind==='hero_orders'){await heroWhatsListarPedidos(from);return;}
+    if(premiumSelection.kind==='home'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente);return;}
+    if(premiumSelection.kind==='cancel_list'){await whatsappMenu.cancellation(numeroNorm,cliente,premiumSelection.type||null);return;}
+    if(premiumSelection.kind==='cancel_service'){
+      const order=await get('SELECT id,imei FROM pedidos WHERE id=? AND revenda_id=?',[premiumSelection.id,cliente.id]);
+      const results=order?.imei?await localizarPedidosCancelaveis(cliente.id,[order.imei]):[];
+      const valid=results.filter(r=>r.motivo==='OK'&&Number(r.pedido?.id)===Number(order?.id));
+      if(!valid.length){await enviarTexto(from,'Este pedido não permite cancelamento agora.');await whatsappMenu.cancellation(numeroNorm,cliente,'services');return;}
+      await salvarSessaoPedido(from,{etapa:'cancelamento_confirmar',resultados:valid});await enviarTexto(from,textoConfirmacaoCancelamento(valid));return;
+    }
+    if(premiumSelection.kind==='cancel_hero'){
+      const order=await get('SELECT * FROM hero_sms_orders WHERE id=? AND customer_jid=?',[premiumSelection.id,from]);
+      if(!order||order.status!=='number_received'||order.sms_code||order.sms_received||heroWaitSeconds(order)>0||(order.expires_at&&Date.parse(order.expires_at)<=Date.now())){await enviarTexto(from,'Esta ativação não permite cancelamento agora.');await whatsappMenu.cancellation(numeroNorm,cliente,'hero');return;}
+      await salvarSessaoPedido(from,{etapa:'hero_pedido_confirmar',heroPedidoId:order.id});await enviarTexto(from,'Cancelar ativação #'+order.id+'?\n\n1️⃣ Confirmar cancelamento\n0️⃣ Voltar');return;
+    }
+    if(premiumSelection.kind==='hero_country'){await heroSmsWaOferta(from,{country:premiumSelection.country,service:'wa'},cliente);return;}
+    if(premiumSelection.kind==='history'){await whatsappMenu.history(numeroNorm,cliente,premiumSelection.type||null);return;}
+    if(premiumSelection.kind==='order'){await whatsappMenu.order(numeroNorm,cliente,premiumSelection.id);return;}
+    if(premiumSelection.kind==='account'){await salvarSessaoPedido(from,{etapa:'conta_menu'});await enviarMenuMinhaContaWhatsApp(from,cliente);return;}
+    if(premiumSelection.kind==='support'){await salvarSessaoPedido(from,{etapa:'suporte_menu',origemMenu:'hub'});await enviarTexto(from,'👨‍💻 *CENTRAL DE ATENDIMENTO*\n\n1️⃣ Ajuda com consultas\n2️⃣ Ajuda com pedidos e pagamentos\n3️⃣ Guia de comandos\n4️⃣ Falar com atendente\n0️⃣ Voltar');return;}
+  }
+  if(textoOriginal.toLowerCase()==='menu texto'){
+    await whatsappMenu.preferText(numeroNorm,true);
+    await apagarSessaoPedido(from);await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,false,{plain:true});return;
   }
 
   // PAGAR prioritário: funciona antes da abertura automática do menu.
@@ -7122,6 +7186,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     .trim();
   const ehMenuGlobal = /^(?:\/?menu+|inicio)$/.test(comandoMenuGlobal);
   if (ehMenuGlobal) {
+    await whatsappMenu.preferText(numeroNorm,false);
     encerrarSessaoIAWhatsApp(numeroNorm);
     await apagarSessaoPedido(from);
     await salvarSessaoPedido(from, { etapa: 'hub_menu' });
@@ -7357,15 +7422,24 @@ function comandoSaidaIAWhatsApp(_texto) { return ''; }
   let sess = await carregarSessaoPedido(from);
   if(await heroHandlePixDocument(from,cliente,sess,textoOriginal))return;
 
+  if(sess?.etapa==='ui_esim_quantity'){
+    if(opcao==='0'){await salvarSessaoPedido(from,{...sess,etapa:'esim_confirmar'});await confirmarEsimTexto(from,sess.plano,sess.ddd,cliente);return;}
+    const quantity=Number(textoOriginal),stock=await contarEsimPorDdd(sess.plano,sess.ddd);
+    if(!/^\d+$/.test(textoOriginal)||!Number.isSafeInteger(quantity)||quantity<1||quantity>stock){await enviarTexto(from,'Quantidade inválida. Informe de 1 até '+stock+', ou 0 para voltar.');return;}
+    const unit=await precoEsimDaRevenda(cliente.id,sess.plano.id),plan={...sess.plano,preco_revenda:unit};
+    await salvarSessaoPedido(from,{...sess,etapa:'esim_confirmar',quantidade:quantity,plano:plan});await confirmarEsimTexto(from,plan,sess.ddd,cliente);return;
+  }
+  if(sess?.etapa?.startsWith('ui_')&&opcao==='0'){await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente);return;}
   if(sess?.etapa==='hub_menu'){
     const itensMenu=(await menuWhatsAppItens()).filter(x=>x.ativo);
-    const acaoMenu=/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null;
+    const acaoMenu=premiumSelection?.kind==='hub'?itensMenu.find(x=>x.id===premiumSelection.id)?.id:(/^[1-9]\d*$/.test(opcao)?itensMenu[Number(opcao)-1]?.id:null);
     if(acaoMenu==='consultas'){ await menuConsultasPrivado(from,cliente,true); return; }
     if(acaoMenu==='servicos'){ await abrirServicosDesbloqueiosWhatsApp(from,cliente); return; }
     if(acaoMenu==='hero_whatsapp'){ await heroSmsWaMenu(from); return; }
     if(acaoMenu==='esim'){ await salvarSessaoPedido(from,{etapa:'esim_escolha',voltarPara:'hub'}); await enviarListaEsim(from); return; }
     if(acaoMenu==='premium'){ await premium.list(from,cliente); return; }
     if(acaoMenu==='conta'){ await salvarSessaoPedido(from,{etapa:'conta_menu'}); await enviarMenuMinhaContaWhatsApp(from,cliente); return; }
+    if(acaoMenu==='cancelamento'&&await whatsappMenu.enabled(numeroNorm)){await whatsappMenu.cancellation(numeroNorm,cliente);return;}
     if(acaoMenu==='cancelamento'){ await salvarSessaoPedido(from,{etapa:'cancelamento_imeis',voltarPara:'hub'}); await enviarTexto(from,`❌ *CANCELAMENTO*
 
 Envie de 1 até 10 IMEIs.
@@ -7547,6 +7621,7 @@ ${dhruPromptCampo(fs[0],0,fs.length)}
     if(opcao==='0'||lower==='voltar'){ await salvarSessaoPedido(from,{etapa:'hub_menu'}); await enviarMenuWhatsApp(from,cliente,false,true); return; }
     if(opcao==='1'){ await salvarSessaoPedido(from,{etapa:'conta_dados'}); await enviarDadosContaWhatsApp(from,cliente); return; }
     if(opcao==='2'){ await salvarSessaoPedido(from,{etapa:'aguardando_valor_pix',tipo_pix:'SALDO',voltarPara:'conta'}); await enviarTexto(from,'💰 *Adicionar saldo*\n\n💳 Saldo atual: '+brl(cliente.saldo)+'\n\nDigite somente o valor que deseja adicionar.\n\nValor mínimo: R$ 10,00\nExemplo: 50\n\n0️⃣ Cancelar'); return; }
+    if(opcao==='3'&&await whatsappMenu.enabled(numeroNorm)){await whatsappMenu.history(numeroNorm,cliente);return;}
     if(opcao==='3'){ await salvarSessaoPedido(from,{etapa:'historico_menu',voltarPara:'conta'}); await enviarMenuHistoricoWhatsApp(from); return; }
     if(opcao==='4'){ await salvarSessaoPedido(from,{etapa:'pix_cadastro_menu',voltarPara:'conta'}); await enviarTexto(from,await textoCadastroPix(cliente)); return; }
     await cancelarFluxoSilenciosamente(from,numeroNorm,textoOriginal,'conta_menu'); return;
@@ -8013,11 +8088,13 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
 
   if (sess?.etapa === 'esim_confirmar') {
     const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
-    const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
+    const unitario=await precoEsimDaRevenda(cliente.id,sess.plano.id),quantidade=Math.max(1,Number(sess.quantidade||1)),valor=unitario*quantidade;
     const temSaldo=await modalidadeEsimRevenda(r)==='POS_PAGO'||Number(r?.saldo||0)>=valor;
     if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
     if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
+    if(opcao==='1'&&temSaldo&&quantidade>1){await apagarSessaoPedido(from);return entregarEsimsQuantidade(cliente.id,from,{plano:{...sess.plano,preco_revenda:unitario},ddd:sess.ddd,quantidade,totalPedido:valor,origem:'SALDO'});}
     if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
+    if(opcao===(temSaldo?'2':'1')&&quantidade>1)return iniciarFluxoPagamento(from,{tipo_pix:'SERVICO',tipo_compra:'ESIM',valor_pix:valor,totalPedido:valor,plano:{...sess.plano,preco_revenda:unitario},ddd:sess.ddd,quantidade,saldo_usado:0},cliente,m=>enviarTexto(from,m));
     if(opcao===(temSaldo?'2':'1'))return pagarEsimDiretoPix(from,r||cliente,sess.plano,sess.ddd);
     await confirmarEsimTexto(from,sess.plano,sess.ddd,r||cliente);return;
   }
@@ -10475,7 +10552,8 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
 
   await enviarMensagem('📋 PIX Copia e Cola:');
   const codigo = qrCode || 'PIX indisponível';
-  await enviarMensagem(qrCode ? String(codigo).replace(/[\r\n\t]/g, '').trim() : codigo);
+  const copyCode=qrCode?String(codigo).replace(/[\r\n\t]/g,'').trim():'';
+  if(!String(chave).startsWith('wa:')||!copyCode||!await whatsappMenu.copyPix(String(chave).slice(3),copyCode))await enviarMensagem(copyCode||codigo);
   return true;
 }
 
@@ -10961,7 +11039,7 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 
 
 function textoMensagemBaileys(message = {}) {
-  const testId=whatsAppUiTestReplyId(message);if(testId)return testId;
+  const menuId=whatsAppMenuReplyId(message);if(menuId)return menuId;  const testId=whatsAppUiTestReplyId(message);if(testId)return testId;
   // V96: mensagens enviadas pelo próprio celular podem chegar embrulhadas
   // em deviceSentMessage/ephemeral/viewOnce. Desembrulha antes de ler o texto.
   let m = message || {};
@@ -13768,6 +13846,33 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
+async function whatsappMenuConnection(phone){
+ const preferredId=whatsappSessaoPorNumeroCliente.get(normalizarNumeroWhatsApp(phone));
+ const preferred=preferredId?whatsappSessoes.get(Number(preferredId)):null;
+ const session=preferred?.funcaoBot&&preferred?.conectado&&preferred?.socket?preferred:await obterSessaoBotConectada();
+ const socket=session?.socket||(conectado?whatsappSocket:null);return socket?{id:session?.id||'services',socket}:null;
+}
+const whatsappMenu=createWhatsAppMenu({run,get,all,getConfig,setConfig,brl,html:safeHtml,
+ assets:path.join(__dirname,'media','menu-modelos'),sdk:()=>import('@whiskeysockets/baileys'),
+ connection:whatsappMenuConnection,resolve:resolverJidWhatsAppEnvio,
+ sameNumber:(a,b)=>variantesNumero(a).some(n=>variantesNumero(b).includes(n)),
+ loadSession:carregarSessaoPedido,saveSession:salvarSessaoPedido,
+ defaultNames:Object.fromEntries(MENU_WHATSAPP_PADRAO.map(x=>[x.id,x.nome])),
+ rawText:async(phone,text)=>{const c=await whatsappMenuConnection(phone);if(!c)return false;const to=await resolverJidWhatsAppEnvio(phone,c.socket);return c.socket.sendMessage(to,{text});},
+ countries:async(phone)=>{const customer=await getRevendaByJidOrNumber('wa:'+phone),price=await heroPrecoCliente(customer?.id);return (await heroSmsVitrine('WhatsApp')).filter(r=>String(r.service).toLowerCase()==='wa').map(r=>({country:r.country,name:r.pais,description:brl(price)+' • Estoque: '+r.stock}));},
+ openHeroOrders:heroWhatsListarPedidos,heroReady:heroPedidosInit,heroCanCancel:o=>heroWaitSeconds(o)<=0&&(!o.expires_at||Date.parse(o.expires_at)>Date.now()),
+ delivery:async(phone,customer,order)=>{
+  if(/^eSIM /i.test(order.servico_nome||'')){
+   const item=await get("SELECT * FROM esim_estoque WHERE pedido_id=? AND revenda_id=? AND status='VENDIDO'",[order.id,customer.id]);
+   if(item){const prepared=await garantirDadosAtivacaoEsim(item);await entregarQrComInstrucoesEBotao('wa:'+phone,prepared,item.nome_plano,1,1);}
+  }else if(order.api_provider==='GGSOMA'){
+   const delivered=await get("SELECT delivery_enc FROM ggsoma_orders WHERE pedido_id=? AND state='COMPLETED'",[order.id]);if(delivered?.delivery_enc)await enviarTexto('wa:'+phone,'📦 Entrega do pedido #'+order.id+'\n\n'+ggsoma.decrypt(delivered.delivery_enc));
+  }else if(order.api_provider==='DHRU'){
+   const result=await get('SELECT resultado FROM dhru_orders WHERE pedido_id=? ORDER BY id DESC LIMIT 1',[order.id]);if(result?.resultado)await enviarTexto('wa:'+phone,centralUnlockerFormatarResult(result.resultado));
+  }
+ }
+});
+whatsappMenu.mount(app,page);
 const whatsAppUiTest=createWhatsAppUiTest({run,get,all,html:safeHtml,
  sdk:()=>import('@whiskeysockets/baileys'),
  sessions:async()=>{
@@ -13847,7 +13952,7 @@ app.post('/api/shared-ggsoma/order', async (req,res)=>{
   try { const out=await ggsoma.sharedOrder(req.body?.slug,req.body?.external_order_id); res.json({ok:true,...out}); }
   catch(e){const code=e.code||e.message||'TEMPORARY';const definite=['OUT_OF_STOCK','INSUFFICIENT_BALANCE','PRODUCT_NOT_FOUND','PRODUCT_NOT_ALLOWED','PRODUCT_UNAVAILABLE','UNSUPPORTED_DELIVERY_TYPE','INVALID_QUANTITY','VALIDATION_ERROR','GGSOMA_DISABLED'].includes(code);res.status(definite?409:503).json({ok:false,error:code,request_id:e.requestId||''});}
 });
-const premium = require('./premium')({run,get,all,axios,ggsoma,precoDaRevenda,brl,enviarTexto,enviarImagem,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);}});
+const premium = require('./premium')({run,get,all,axios,ggsoma,visual:async(from,text,imagePath)=>{if(!String(from).startsWith('wa:'))return false;try{return (await whatsappMenu.text(String(from).slice(3),text,{imagePath})).handled;}catch(_){return false;}},precoDaRevenda,brl,enviarTexto,enviarImagem,salvarSessaoPedido,carregarSessaoPedido,apagarSessaoPedido,textoSaldoInsuficiente,bot:()=>tgBot,adminId:()=>ADMIN_TELEGRAM_ID,tgId:tgIdFromJid,voltarWhatsApp:async(from,cliente)=>{await salvarSessaoPedido(from,{etapa:'hub_menu'});await enviarMenuWhatsApp(from,cliente,false,true);}});
 premium.routes(app);
 
 
@@ -16179,7 +16284,7 @@ app.get('/admin/menu-whatsapp',async(req,res)=>{
       <button class="btn green" type="submit">💾 Salvar</button></form></div>`).join('');
     const ativos=itens.filter(x=>x.ativo);
     const previa=ativos.map((x,i)=>`${i+1}️⃣ ${safeHtml(x.emoji)} <b>${safeHtml(x.nome)}</b>`).join('<br>');
-    res.send(page('Menu principal WhatsApp',`<div class="card"><a class="btn green" href="/admin/menu-whatsapp/testes">🧪 Testar menu com botões e Copiar Pix no meu celular</a></div><div class="hero"><h1>☰ Menu principal do WhatsApp</h1><p>Edite nomes, emojis, ordem e visibilidade sem alterar as funções, pagamentos ou o Telegram.</p></div>
+    res.send(page('Menu principal WhatsApp',`<div class="card"><a class="btn purple" href="/admin/menu-whatsapp/modelos">🎨 Modelos e ativação do menu</a> <a class="btn green" href="/admin/menu-whatsapp/testes">🧪 Testar menu com botões e Copiar Pix no meu celular</a></div><div class="hero"><h1>☰ Menu principal do WhatsApp</h1><p>Edite nomes, emojis, ordem e visibilidade sem alterar as funções, pagamentos ou o Telegram.</p></div>
     ${req.query.ok?'<div class="card">✅ Alteração salva.</div>':''}${req.query.erro?`<div class="card">⚠️ ${safeHtml(req.query.erro)}</div>`:''}
     <div class="card"><h2>👁️ Prévia</h2>${previa||'Nenhuma opção visível'}<p class="mini-help">O menu é enviado quando o cliente digita menu. As alterações valem no próximo menu exibido.</p></div>
     ${cards}<div class="card"><form method="post" action="/admin/menu-whatsapp/restaurar" onsubmit="return confirm('Restaurar todos os nomes, emojis, posições e visibilidade padrão?')"><button class="btn gray">↩️ Restaurar padrão</button></form></div>`));
