@@ -1,3 +1,9 @@
+ATUALIZAÇÃO 10.1.14 — TESTE PRIVADO DE BOTÕES WHATSAPP
+Nova página: /admin/menu-whatsapp/testes
+Menu de demonstração e Copiar Pix com texto sem cobrança.
+Os menus e Pix reais dos clientes continuam no formato atual.
+Leia TESTE-BOTOES-WHATSAPP.md e teste no seu celular depois de instalar.
+
 ATUALIZAÇÃO 10.1.13 — PREÇOS E COBRANÇA
 Tela separada por serviços API, próprios, Premium, eSIM e Hero.
 Pré/pós por cliente e serviço, com clientes antigos preservados.

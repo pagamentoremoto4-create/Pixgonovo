@@ -1,5 +1,6 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.13';
+const APP_RELEASE='10.1.14';
+const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
 const {createHub,allowedCallback:communityAllowedCallback}=require('./community-hub');
 const heroProtocol = require('./hero-sms-protocol');
@@ -6281,7 +6282,7 @@ function extrairMensagemWhatsApp(body) {
     } catch (_) {}
   }
 
-  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || respostaInterativa || '';
+  const texto = data?.text || body?.text || msg?.conversation || msg?.extendedTextMessage?.text || whatsAppUiTestReplyId(msg) || respostaInterativa || '';
   const fromMe = Boolean(key?.fromMe || data?.fromMe || body?.fromMe);
   return { numero, nome: pushName, texto: String(texto || '').trim(), fromMe };
 }
@@ -6958,6 +6959,8 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
   const textoOriginal = String(texto || '').trim();
   const lower = textoOriginal.toLowerCase();
   const opcao = normalizarOpcaoTelegram(textoOriginal);
+
+  if(await whatsAppUiTest.handleReply({numero:numeroNorm,texto:textoOriginal,sessaoId}))return;
 
   // Comandos administrativos: funcionam no número principal e em qualquer
   // WhatsApp ativo cadastrado como destinatário de avisos. São tratados antes
@@ -10958,6 +10961,7 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 
 
 function textoMensagemBaileys(message = {}) {
+  const testId=whatsAppUiTestReplyId(message);if(testId)return testId;
   // V96: mensagens enviadas pelo próprio celular podem chegar embrulhadas
   // em deviceSentMessage/ephemeral/viewOnce. Desembrulha antes de ler o texto.
   let m = message || {};
@@ -13764,6 +13768,23 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
+const whatsAppUiTest=createWhatsAppUiTest({run,get,all,html:safeHtml,
+ sdk:()=>import('@whiskeysockets/baileys'),
+ sessions:async()=>{
+   const rows=Array.from(whatsappSessoes.values()).filter(x=>x.ativo&&x.funcaoBot).map(x=>({id:String(x.id),name:x.nome||('Sessão #'+x.id),number:x.numero||'',connected:!!(x.conectado&&x.socket)}));
+   if(conectado&&whatsappSocket&&!rows.some(x=>x.connected))rows.push({id:'services',name:'Bot de serviços',number:whatsappNumeroConectado,connected:true});
+   return rows;
+ },
+ session:async id=>{
+   const s=Array.from(whatsappSessoes.values()).find(x=>String(x.id)===String(id)&&x.ativo&&x.funcaoBot);
+   if(s)return {id:String(s.id),number:s.numero,connected:!!s.conectado,socket:s.socket};
+   if(id==='services'&&conectado&&whatsappSocket)return {id:'services',number:whatsappNumeroConectado,connected:true,socket:whatsappSocket};
+   return null;
+ },
+ resolve:(phone,socket)=>resolverJidWhatsAppEnvio(phone,socket),
+ sameNumber:(a,b)=>variantesNumero(a).some(n=>variantesNumero(b).includes(n))
+});
+whatsAppUiTest.mount(app,page);
 const customerBilling=createCustomerBilling({run,get,all,filename:DB_PATH,legacyMode:modalidadeServicoRevenda,esimMode:modalidadeEsimRevenda,html:safeHtml,brl});
 const communityHub=createHub({run,get,all,adminId:ADMIN_TELEGRAM_ID,bot:()=>tgBot,
  socket:async()=> (await sessaoParaAnuncios())?.socket||null,groups:listarGruposAnuncios,
@@ -16158,7 +16179,7 @@ app.get('/admin/menu-whatsapp',async(req,res)=>{
       <button class="btn green" type="submit">💾 Salvar</button></form></div>`).join('');
     const ativos=itens.filter(x=>x.ativo);
     const previa=ativos.map((x,i)=>`${i+1}️⃣ ${safeHtml(x.emoji)} <b>${safeHtml(x.nome)}</b>`).join('<br>');
-    res.send(page('Menu principal WhatsApp',`<div class="hero"><h1>☰ Menu principal do WhatsApp</h1><p>Edite nomes, emojis, ordem e visibilidade sem alterar as funções, pagamentos ou o Telegram.</p></div>
+    res.send(page('Menu principal WhatsApp',`<div class="card"><a class="btn green" href="/admin/menu-whatsapp/testes">🧪 Testar menu com botões e Copiar Pix no meu celular</a></div><div class="hero"><h1>☰ Menu principal do WhatsApp</h1><p>Edite nomes, emojis, ordem e visibilidade sem alterar as funções, pagamentos ou o Telegram.</p></div>
     ${req.query.ok?'<div class="card">✅ Alteração salva.</div>':''}${req.query.erro?`<div class="card">⚠️ ${safeHtml(req.query.erro)}</div>`:''}
     <div class="card"><h2>👁️ Prévia</h2>${previa||'Nenhuma opção visível'}<p class="mini-help">O menu é enviado quando o cliente digita menu. As alterações valem no próximo menu exibido.</p></div>
     ${cards}<div class="card"><form method="post" action="/admin/menu-whatsapp/restaurar" onsubmit="return confirm('Restaurar todos os nomes, emojis, posições e visibilidade padrão?')"><button class="btn gray">↩️ Restaurar padrão</button></form></div>`));
