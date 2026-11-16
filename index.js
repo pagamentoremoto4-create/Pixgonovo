@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.16';
+const APP_RELEASE='10.1.17';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -1715,7 +1715,7 @@ async function dhruAvisarProcesso(pedido,cliente){
     if((await getConfig(key,'0'))==='1')continue;
     try{
       const editado=await dhruEditarPendenteWhatsApp(pedido.id,destino);
-      const ok=editado||await enviarTexto(destino,mensagem);
+      const ok=editado||await enviarTexto(destino,mensagem,{deliveryOrderId:pedido.id});
       if(ok!==false)await setConfig(key,'1');
     }catch(e){console.log('⚠️ DHRU aviso em processo',pedido.id,e.message);}
   }
@@ -1796,7 +1796,7 @@ async function processarFeedbackDhruInterno(body){
       const servicoAtual=await get('SELECT * FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
       const dadosPt=servicoAtual?await dhruEntradaPedidoPt(servicoAtual,pedido):`${dhruCampoIconePt(pedido.entrada_label||'Entrada')} ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const texto=centralUnlockerMensagem(pedido,servicoAtual?nomeServicoWhatsApp(servicoAtual):dhruNomeServicoPt(pedido.servico_nome),dadosPt,'FINALIZADO',resultadoLimpo);
-      await enviarParaCanaisCliente(clienteAtual||cliente,texto+`\n💳 Saldo: ${brl(clienteAtual?.saldo||0)}`,pedido.revenda_jid||'');
+      await enviarParaCanaisCliente(clienteAtual||cliente,texto+`\n💳 Saldo: ${brl(clienteAtual?.saldo||0)}`,pedido.revenda_jid||'',{deliveryOrderId:pedido.id});
     }
   } else if(fase==='CANCELADO'){
     const atual=await get('SELECT * FROM pedidos WHERE id=?',[pedidoId]);
@@ -1810,7 +1810,7 @@ async function processarFeedbackDhruInterno(body){
     if(cliente){
       const dados=servicoRejeitado?await dhruEntradaPedidoPt(servicoRejeitado,pedido):`🔎 ${dhruCampoLabelPt(pedido.entrada_label||'Entrada')}: ${pedido.entrada_valor||pedido.imei||'-'}`;
       const texto=centralUnlockerMensagem(pedido,servicoRejeitado?nomeServicoWhatsApp(servicoRejeitado):dhruNomeServicoPt(pedido.servico_nome),dados,'CANCELADO',centralUnlockerMotivoPt(replay));
-      await enviarParaCanaisCliente(cliente,texto+`\n${estornoRealizado?'💰 Valor estornado ao saldo.':'💰 Nenhum valor a estornar.'}`,pedido.revenda_jid||'');
+      await enviarParaCanaisCliente(cliente,texto+`\n${estornoRealizado?'💰 Valor estornado ao saldo.':'💰 Nenhum valor a estornar.'}`,pedido.revenda_jid||'',{deliveryOrderId:pedido.id});
     }
   } else if(fase==='EM PROCESSO'){
     await setConfig(`dhru_v238_iniciado_${pedidoId}`,'1');
@@ -3655,7 +3655,8 @@ async function heroCheckout(jid,cliente,key,method){
   }catch(e){
     await run("UPDATE hero_sms_orders SET status='payment_reconciliation',last_error='Pix criado; vínculo do pagamento pendente' WHERE id=?",[id]);throw e;
   }
-  verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
+  const startHeroMonitoring=()=>verificarPagamento(pix.paymentId,cliente.id,jid,amount,'SERVICO',context,gateway);
+  try {
   if(String(jid).startsWith('wa:')){
     const phone=String(jid).slice(3);
     if(await whatsappMenu.pixReady?.(phone,{paymentId:pix.paymentId,gateway,amount,code:pix.qrCode,progress:heroPixProgress,detail:'📦 Pedido #'+id+' • '+offer.pais+'\nA compra do número ocorre após a confirmação.'}))return id;
@@ -3676,6 +3677,7 @@ async function heroCheckout(jid,cliente,key,method){
   await enviarTexto(jid,'📋 PIX Copia e Cola:');
   if(!String(jid).startsWith('wa:')||!await whatsappMenu.copyPix(String(jid).slice(3),heroPixCode))await enviarTexto(jid,heroPixCode);
   return id;
+  } finally {startHeroMonitoring();}
   } finally { heroCheckoutInFlight.delete(jid); }
 }
 async function heroBuyPaid(id){
@@ -3777,7 +3779,7 @@ async function heroEditOrderMessage(reference,card){
       await sock.sendMessage(reference.key.remoteJid,{text:card.text,edit:reference.key});
       return;
     }catch(error){
-      if(/message.*(not found|not editable|too old)|edit.*(expired|not allowed)/i.test(String(error.message||'')))error.cannotEdit=true;
+      if(reference.pixCard||/message.*(not found|not editable|too old)|edit.*(expired|not allowed)/i.test(String(error.message||'')))error.cannotEdit=true;
       throw error;
     }
   }
@@ -3796,7 +3798,15 @@ async function heroUpdateOrderCard(id,options={}){
     },
     loadReference:async orderId=>{
       const r=await get('SELECT reference_json,fingerprint FROM hero_sms_message_refs WHERE order_id=?',[orderId]);
-      if(!r)return null;
+      if(!r){
+        const order=await get('SELECT customer_jid,payment_id FROM hero_sms_orders WHERE id=?',[orderId]);
+        if(String(order?.customer_jid||'').startsWith('wa:')&&order.payment_id){
+          const payment=await get('SELECT gateway FROM pix_pedidos WHERE payment_id=?',[order.payment_id]);
+          const ref=await whatsappMenu.pixReference?.(String(order.customer_jid).slice(3),payment?.gateway,order.payment_id);
+          if(ref)return {reference:ref,fingerprint:null};
+        }
+        return null;
+      }
       return {reference:JSON.parse(r.reference_json),fingerprint:r.fingerprint};
     },
     saveReference:(orderId,reference,fingerprint)=>run('INSERT INTO hero_sms_message_refs(order_id,reference_json,fingerprint) VALUES(?,?,?) ON CONFLICT(order_id) DO UPDATE SET reference_json=excluded.reference_json,fingerprint=excluded.fingerprint,updated_at=CURRENT_TIMESTAMP',[orderId,JSON.stringify(reference),fingerprint]),
@@ -4323,6 +4333,8 @@ async function enviarWhatsAppTexto(numero, text, opcoes = {}) {
       }
       const destino = await resolverJidWhatsAppEnvio(number, sock);
       if (!destino) throw new Error('Não foi possível localizar o JID do destinatário');
+      const deliveryOrderId=Number(opcoes.deliveryOrderId||opcoes.dhruPedidoId||0);
+      if(deliveryOrderId&&await whatsappMenu.pixDeliverOrder?.(number,deliveryOrderId,String(text||'')))return true;
       if(!opcoes.messageReference){try{const visual=await whatsappMenu.text(number,String(text||''),opcoes);if(visual.handled)return true;}catch(e){console.log('MENU_VISUAL_FALLBACK',e.code||'UNAVAILABLE');}}
       const envio = await sock.sendMessage(destino, { text: String(text || '') });
       if(opcoes.dhruPedidoId && envio?.key?.id){
@@ -4686,6 +4698,13 @@ async function mostrarTutorialEsimWhatsApp(from, cliente, sess) {
 async function enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, pedidoId) {
   const qrPath = caminhoArquivoEsim(item.arquivo_qr);
   if (!fs.existsSync(qrPath)) throw new Error('QR Code do eSIM não encontrado no estoque.');
+  if(String(destino).startsWith('wa:')&&pedidoId){
+    const text=`✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd||'-'}\n📦 Pedido #${pedidoId}\n⚠️ QR Code de uso único.\n\n🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`;
+    if(await whatsappMenu.pixDeliverOrder?.(String(destino).slice(3),pedidoId,text,fs.readFileSync(qrPath))){
+      const old=await carregarSessaoPedido(destino);const ids=old?.etapa==='esim_entregue'?(old.esim_ids||[]):[];
+      await salvarSessaoPedido(destino,{etapa:'esim_entregue',esim_ids:[...new Set([...ids,Number(item.id)])]});return true;
+    }
+  }
   const qrEnviado = await enviarImagem(destino, qrPath, `✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd || '-'}${pedidoId ? `\n📦 Pedido #${pedidoId}` : ''}\n⚠️ QR Code de uso único.`);
   if (!qrEnviado) {
     await avisarAdminTelegram(`⚠️ Falha ao enviar QR do eSIM #${item.id} para ${destino}. Pedido preservado; reenviar o mesmo QR, sem nova cobrança.`);
@@ -10495,6 +10514,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   const valor = Number(sess.valor_pix || 0);
   const paymentId = pix?.paymentId;
   const qrCode = pix?.qrCode;
+  let startMonitoring=null;
   if (paymentId) {
     const tipoPagamento = sess.tipo_pix === 'SERVICO' ? 'SERVICO' : (sess.tipo_pix === 'ASSINATURA' ? 'ASSINATURA' : 'SALDO');
     const contextoJson = tipoPagamento === 'SERVICO'
@@ -10502,8 +10522,9 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
       : (tipoPagamento === 'ASSINATURA' ? JSON.stringify(sess.contexto_assinatura || {}) : null);
     await run('INSERT OR REPLACE INTO pix_pedidos (payment_id, revenda_id, revenda_jid, cliente_jid, valor, status, tipo_pagamento, contexto_json, gateway) VALUES (?, ?, ?, ?, ?, "pending", ?, ?, ?)',
       [paymentId, cliente.id, chave, chave, valor, tipoPagamento, contextoJson, gateway]);
-    verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
+    startMonitoring=()=>verificarPagamento(paymentId, cliente.id, chave, valor, tipoPagamento, contextoJson, gateway);
   }
+  try {
   // Apagar somente apos o pagamento ter sido gerado e registrado.
   // Se o gateway falhar, o cliente pode tentar novamente sem perder o pedido.
   await apagarSessaoPedido(chave);
@@ -10572,6 +10593,7 @@ async function finalizarGeracaoPix(chave, sess, cliente, enviarMensagem, codigoM
   const copyCode=qrCode?String(codigo).replace(/[\r\n\t]/g,'').trim():'';
   if(!String(chave).startsWith('wa:')||!copyCode||!await whatsappMenu.copyPix(String(chave).slice(3),copyCode))await enviarMensagem(copyCode||codigo);
   return true;
+  } finally {if(startMonitoring)startMonitoring();}
 }
 
 async function iniciarFluxoPagamento(chave, sess, cliente, enviarMensagem, codigoMonoespacado=false) {
@@ -10724,7 +10746,7 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
   return true;
 }
 
-async function entregarEsimPagoDireto(revendaId,jid,contexto) {
+async function entregarEsimPagoDireto(revendaId,jid,contexto,pixPresentation=null) {
   const plano=contexto?.plano||{};
   const ddd=normalizarDddEsim(contexto?.ddd||'');
   const total=Number(contexto?.totalPedido||0);
@@ -10746,6 +10768,7 @@ async function entregarEsimPagoDireto(revendaId,jid,contexto) {
       VALUES ('REVENDA',?,?,?,?,?,?,'OUTRO','eSIM PIX',?,'FINALIZADO',1,CURRENT_TIMESTAMP)`,[rev.id,rev.nome,jid,rev.whatsapp||jidToNumber(jid),`eSIM ${plano.nome_plano}`,plano.nome_plano,total]);
     await run(`UPDATE esim_estoque SET status='VENDIDO',revenda_id=?,revenda_nome=?,pedido_id=?,dispositivo_entrega='QR_MANUAL',vendido_em=CURRENT_TIMESTAMP WHERE id=? AND status='RESERVADO'`,[rev.id,rev.nome,ins.lastID,item.id]);
     pronto.pedido_id=ins.lastID;
+    if(pixPresentation&&String(jid).startsWith('wa:'))await whatsappMenu.pixLinkOrder?.(String(jid).slice(3),ins.lastID,pixPresentation.gateway,pixPresentation.paymentId);
     await entregarQrComInstrucoesEBotao(jid,pronto,plano.nome_plano,1,1);
     notificarPainel('esim','📱 eSIM vendido por PIX',`${rev.nome} - ${plano.nome_plano} - DDD ${ddd}`);
     return true;
@@ -10757,11 +10780,11 @@ async function entregarEsimPagoDireto(revendaId,jid,contexto) {
   }
 }
 
-async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
+async function criarPedidoPagoDireto(revendaId, jid, contextoJson, pixPresentation=null) {
   let contexto;
   try { contexto = typeof contextoJson === 'string' ? JSON.parse(contextoJson) : contextoJson; } catch (_) { contexto = null; }
   if (String(contexto?.tipoCompra || '').toUpperCase() === 'ESIM') {
-    return entregarEsimPagoDireto(revendaId, jid, contexto);
+    return entregarEsimPagoDireto(revendaId, jid, contexto, pixPresentation);
   }
   if (!contexto?.servicoId || !Array.isArray(contexto.entradas) || !contexto.entradas.length) return false;
   const cliente = await get('SELECT * FROM revendas WHERE id=?', [revendaId]);
@@ -10770,7 +10793,7 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
   if(servico.api_provider==='PREMIUM'){
     try{await premium.purchase(cliente,contexto.premiumId,jid,contexto.premiumToken);}catch(e){await enviarTexto(jid,String(e.message).includes('PREMIUM_OUT_OF_STOCK')?'⛔ A assinatura esgotou. O valor pago permanece na sua carteira.':String(e.message).includes('PREMIUM_INSUFFICIENT_BALANCE')?'Saldo insuficiente para concluir. O valor pago permanece na sua carteira.':'Não foi possível concluir a assinatura. O valor pago permanece na carteira.');}return true;
   }
-  if(servico.api_provider==='GGSOMA'){await ggsoma.purchase(cliente,servico,jid,contexto.ggsomaToken||('pix-'+crypto.createHash('sha256').update(String(contextoJson)).digest('hex')));return true;}
+  if(servico.api_provider==='GGSOMA'){await ggsoma.purchase(cliente,servico,jid,contexto.ggsomaToken||('pix-'+crypto.createHash('sha256').update(String(contextoJson)).digest('hex')),pixPresentation);return true;}
   const tipoEntrada = normalizarTipoEntrada(servico.tipo_entrada);
   const invalidos=tipoEntrada==='IMEI'?contexto.entradas.filter(i=>!imeiLuhnValido(i)):[];
   const entradas=tipoEntrada==='IMEI'?contexto.entradas.filter(imeiLuhnValido):contexto.entradas;
@@ -10795,6 +10818,7 @@ async function criarPedidoPagoDireto(revendaId, jid, contextoJson) {
     const ins = await run(`INSERT INTO pedidos (tipo, revenda_id, revenda_nome, revenda_jid, revenda_numero, servico_id, servico_nome, imei, entrada_valor, tipo_entrada, entrada_label, lote_id, valor, status, cobrado)
       VALUES ('REVENDA', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 1)`, [cliente.id, cliente.nome, jid, cliente.telegram_id || jidToNumber(jid), servico.id, servico.nome, imeiBanco, entrada, tipoEntrada, entradaLabel, loteId, valorUnitario]);
     criados.push({ id: ins.lastID, entrada });
+    if(pixPresentation&&String(jid).startsWith('wa:'))await whatsappMenu.pixLinkOrder?.(String(jid).slice(3),ins.lastID,pixPresentation.gateway,pixPresentation.paymentId);
   }
   if (!criados.length) { await enviarTexto(jid, '⚠️ O pagamento foi confirmado, mas o IMEI já possui um pedido em andamento.'); return true; }
   for (const criado of criados) {
@@ -10812,7 +10836,7 @@ ${servico.api_provider==='DHRU' ? await dhruEntradaPedidoPt(servico,criados[0]?.
 📦 Quantidade: ${criados.length}
 💰 Valor: ${brl(total)}
 
-📍 Status: PENDENTE`, jid, {dhruPedidoId:servico.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
+📍 Status: PENDENTE`, jid, {deliveryOrderId:criados.length===1?criados[0].id:null,dhruPedidoId:servico.api_provider==='DHRU'&&criados.length===1?criados[0].id:null});
   if (['DHRU','GGSOMA'].includes(servico.api_provider)) {
     for (const criado of criados) { try { await executarPedidoDhru(criado.id); } catch(e) { console.log('❌ DHRU pedido', criado.id, e.message); } }
   }
@@ -10886,7 +10910,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
        try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
        if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
          if(!pixCardUpdated)await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
-         const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim);
+         const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim,{paymentId,gateway});
          await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',[ok?'delivered':'delivery_pending',paymentId]);
          return;
        }
@@ -10913,9 +10937,9 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
 
 🔄 Seu pedido foi liberado para processamento.`);
 
-        await criarPedidoPagoDireto(revendaId, jid, contextoJson);
+        await criarPedidoPagoDireto(revendaId, jid, contextoJson,{paymentId,gateway});
 
-        if (revendaId) {
+        if (revendaId&&!pixCardUpdated) {
           const contaAtual = await get('SELECT saldo FROM revendas WHERE id=?', [revendaId]);
           const pedidosAbertos = await get(`SELECT COUNT(*) AS total FROM pedidos
             WHERE revenda_id=? AND status IN ('PENDENTE','EM PROCESSO')`, [revendaId]);
@@ -11052,7 +11076,7 @@ async function notificarPedido(pedido, tipo, motivo = '') {
 📝 Motivo: ${motivo || 'Não informado'}`;
   if (!mensagem) return;
   for (const destino of destinos) {
-    try { await enviarTexto(destino, mensagem); }
+    try { await enviarTexto(destino, mensagem,{deliveryOrderId:pedido.id}); }
     catch (e) { console.log('⚠️ FALHA NOTIFICAÇÃO DUPLA:', destino, e.message); }
   }
 }
@@ -13952,7 +13976,7 @@ async function communityResume(msg,payload){
  const {cliente}=await cadastrarClienteTelegram(msg.from);return enviarMenuTelegram(id,cliente);
 }
 
-const ggsoma = require('./ggsoma')({run,get,all,DB_PATH,billingMode:(customer,service)=>customerBilling.catalogMode(customer,{...service,api_provider:'GGSOMA'}),getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
+const ggsoma = require('./ggsoma')({run,get,all,DB_PATH,onPresentationOrder:async(orderId,jid,presentation)=>{if(presentation&&String(jid).startsWith('wa:'))await whatsappMenu.pixLinkOrder?.(String(jid).slice(3),orderId,presentation.gateway,presentation.paymentId);},billingMode:(customer,service)=>customerBilling.catalogMode(customer,{...service,api_provider:'GGSOMA'}),getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
 // Hero SMS compartilhada: mesma URL/chave do estoque eSIM; habilitação independente.

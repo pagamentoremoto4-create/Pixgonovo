@@ -1,3 +1,10 @@
+ATUALIZAÇÃO 10.1.17 — PIX INDEPENDENTE E EDIÇÕES
+Menu principal em texto preservado, sem aplicar modelos novos.
+Painel: /admin/menu-whatsapp/modelos — Pix possui ativação e telefone próprios.
+Comece com menu visual desativado e Pix somente no telefone de teste.
+Laboratório: /admin/menu-whatsapp/testes — nova Lista tradicional para iPhone.
+Leia PIX-INDEPENDENTE-E-EDICOES.md. Compatibilidade visual ainda precisa do celular.
+
 ATUALIZAÇÃO 10.1.16 — TESTE IPHONE E PIX COMPACTO
 Painel: /admin/menu-whatsapp/modelos
 Use Teste somente no seu número, Lista sem imagem e Pix compacto.

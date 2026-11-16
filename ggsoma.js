@@ -207,17 +207,18 @@ module.exports = function createGgsoma(d) {
     const items=Array.isArray(response.lines)?response.lines:[response.delivery];
     return items.map(x=>{if(!x)return '';return [x.link||x.code||x.content,x.instructions].filter(Boolean).join('\n\n');}).filter(Boolean).join('\n\n');
   }
-  async function purchase(client,service,destination,token=crypto.randomUUID()){
+  async function purchase(client,service,destination,token=crypto.randomUUID(),presentation=null){
     if(await getConfig('ggsoma_enabled','0')!=='1')throw new Error('A venda de produtos digitais está temporariamente desativada.');
     const active=await get("SELECT id FROM servicos_catalogo WHERE id=? AND ativo=1 AND api_provider='GGSOMA'",[service.id]);
     if(!active)throw new Error('Produto indisponível.');
     const old=await get('SELECT id,revenda_id FROM pedidos WHERE ggsoma_checkout_token=?',[token]);
-    if(old){if(old.revenda_id!==client.id)throw new Error('Pedido inválido.');await execute(old.id);return old.id;}
+    if(old){if(old.revenda_id!==client.id)throw new Error('Pedido inválido.');if(presentation&&d.onPresentationOrder)await d.onPresentationOrder(old.id,destination,presentation);await execute(old.id);return old.id;}
     const price=await d.precoDaRevenda(client.id,service.id);
     if(!Number.isFinite(Number(price))||price<=0)throw new Error('Preço do produto inválido.');
     const billingMode=d.billingMode?await d.billingMode(client.id,service):'PRE_PAGO';
     await run(`INSERT OR IGNORE INTO pedidos(tipo,revenda_id,revenda_nome,revenda_jid,servico_id,servico_nome,entrada_valor,tipo_entrada,entrada_label,valor,status,cobrado,ggsoma_checkout_token,billing_mode) VALUES('REVENDA',?,?,?,?,?,'Compra digital','TEXTO','Compra',?,'PENDENTE',?,?,?)`,[client.id,client.nome,destination,service.id,service.nome,price,billingMode==='POS_PAGO'?0:1,token,billingMode]);
     const created=await get('SELECT id FROM pedidos WHERE ggsoma_checkout_token=?',[token]);
+    if(presentation&&d.onPresentationOrder)await d.onPresentationOrder(created.id,destination,presentation);
     await execute(created.id);return created.id;
   }
   async function execute(id){
@@ -277,7 +278,7 @@ module.exports = function createGgsoma(d) {
     if(!o.notified){
       const client=await get('SELECT * FROM revendas WHERE id=?',[p.revenda_id]);
       // Only verified private destinations; never pass a group as fallback.
-      if(client){const n=await d.enviarParaCanaisCliente(client,`✅ Produto entregue\n\nPedido #${p.id}\n${p.servico_nome}\n\n${decrypt(o.delivery_enc)}`);if(n>0)await run('UPDATE ggsoma_orders SET notified=1 WHERE pedido_id=?',[p.id]);}
+      if(client){const n=await d.enviarParaCanaisCliente(client,`✅ Produto entregue\n\nPedido #${p.id}\n${p.servico_nome}\n\n${decrypt(o.delivery_enc)}`,'',{deliveryOrderId:p.id});if(n>0)await run('UPDATE ggsoma_orders SET notified=1 WHERE pedido_id=?',[p.id]);}
     }
   }
   async function tick(){
