@@ -1,3 +1,15 @@
+ATUALIZAÇÃO 10.1.13 — PREÇOS E COBRANÇA
+Tela separada por serviços API, próprios, Premium, eSIM e Hero.
+Pré/pós por cliente e serviço, com clientes antigos preservados.
+Leia PRECOS-E-COBRANCA.md antes de atualizar.
+Mantenha seu banco, disco persistente e sessões.
+
+ATUALIZAÇÃO 10.1.12 — AVISOS PÚBLICOS
+Sem preço e sem referência interna nos avisos de compra.
+Cancelamentos removem o aviso original quando permitido pela plataforma.
+Telegram: só o botão Comprar também, sem URL repetida.
+Veja CANAIS-E-VENDAS.md para atualização dos avisos antigos.
+
 ATUALIZAÇÃO 10.1.11 — CANAIS E VENDAS
 Leia CANAIS-E-VENDAS.md. Nova configuração em /admin/comunidade.
 Preserve seu banco, variáveis e sessões. Configure os destinos depois de atualizar.

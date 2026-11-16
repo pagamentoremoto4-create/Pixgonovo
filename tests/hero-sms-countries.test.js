@@ -39,7 +39,7 @@ test('WhatsApp and Telegram selectors paginate enabled countries and preserve cu
  const vm=require('node:vm');const source=fs.readFileSync(path.join(__dirname,'../index.js'),'utf8');
  const start=source.indexOf('async function heroSmsWaPaises('),end=source.indexOf('// Hero SMS: checkout with',start);
  const rows=Array.from({length:23},(_,i)=>({country:String(i),service:'wa',pais:'Country '+i,preco:25,stock:10}));
- let session,text,keyboard;const context=vm.createContext({heroSmsVisivel:async()=>true,heroSmsVitrine:async(_,key)=>key?rows.filter(r=>r.country===key.country):rows,get:async()=>({saldo:50}),heroPrecoCliente:async id=>id===7?19:25,brl:n=>'R$ '+n,salvarSessaoPedido:async(_,s)=>session=s,enviarTexto:async(_,s)=>text=s,tgBtn:(label,callback)=>({text:label,callback_data:callback}),atualizarCardTelegram:async(_,__,s,k)=>{text=s;keyboard=k;}});
+ let session,text,keyboard;const context=vm.createContext({customerBilling:{heroMode:async()=>'PRE_PAGO'},heroSmsVisivel:async()=>true,heroSmsVitrine:async(_,key)=>key?rows.filter(r=>r.country===key.country):rows,get:async()=>({saldo:50}),heroPrecoCliente:async id=>id===7?19:25,brl:n=>'R$ '+n,salvarSessaoPedido:async(_,s)=>session=s,enviarTexto:async(_,s)=>text=s,tgBtn:(label,callback)=>({text:label,callback_data:callback}),atualizarCardTelegram:async(_,__,s,k)=>{text=s;keyboard=k;}});
  vm.runInContext(source.slice(start,end),context);
  await context.heroSmsWaPaises('client','WhatsApp','preco_asc',2,{id:7});
  assert.equal(session.heroPaises.length,3);assert.equal(session.heroPaises[0].country,'20');assert.match(text,/R\$ 19/);

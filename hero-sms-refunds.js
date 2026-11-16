@@ -25,6 +25,10 @@ async function creditHeroRefund(filename,orderId,{requireReceipt=true}={}){
     }
     const amount=Number(order.price_brl);
     if(!Number.isFinite(amount)||amount<=0)throw new Error('Valor de estorno inválido.');
+    if(order.payment_method==='postpaid'&&!await get('SELECT order_id FROM hero_sms_wallet_debits WHERE order_id=?',[orderId])){
+      await run("UPDATE hero_sms_orders SET status='canceled',refund_status='not_charged',last_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",[orderId]);
+      await run('COMMIT');transaction=false;return {credited:false,notCharged:true,amount:0};
+    }
     const existing=await get('SELECT order_id FROM hero_sms_refund_ledger WHERE order_id=?',[orderId]);
     if(existing)throw new Error('Registro de estorno inconsistente; conferência necessária.');
     await run('INSERT INTO hero_sms_refund_ledger(order_id,customer_id,amount_brl,source) VALUES(?,?,?,?)',[order.id,order.customer_id,amount,requireReceipt?'ACCESS_CANCEL':'history_status_10']);
@@ -61,3 +65,15 @@ async function debitHeroOrder(filename,orderId){
  finally{await new Promise(resolve=>db.close(()=>resolve()));}
 }
 module.exports.debitHeroOrder=debitHeroOrder;
+
+// Postpaid authorization is not a debit. Only newly created postpaid orders use this path.
+async function authorizePostpaidHero(filename,id){
+ const {transaction}=require('./customer-billing');
+ return transaction(filename,async({run,get})=>{const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);if(!o||o.payment_method!=='postpaid')throw Error('Pedido pós-pago inválido.');const saved=await get('SELECT order_id FROM hero_sms_postpaid WHERE order_id=?',[id]);if(saved)return {authorized:true};if(o.status!=='awaiting_payment'||!Number.isFinite(Number(o.price_brl))||Number(o.price_brl)<=0)throw Error('Estado de autorização inválido.');await run('INSERT INTO hero_sms_postpaid(order_id,customer_id,amount_brl) VALUES(?,?,?)',[id,o.customer_id,o.price_brl]);await run("UPDATE hero_sms_orders SET status='paid' WHERE id=? AND status='awaiting_payment'",[id]);return {authorized:true};});
+}
+async function settlePostpaidHero(filename,id){
+ const {transaction}=require('./customer-billing');
+ return transaction(filename,async({run,get})=>{const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);if(!o||o.payment_method!=='postpaid'||o.status!=='finished')return {charged:false};const a=await get('SELECT * FROM hero_sms_postpaid WHERE order_id=?',[id]);if(!a||a.customer_id!==o.customer_id||Number(a.amount_brl)!==Number(o.price_brl))throw Error('Autorização pós-paga divergente.');if(a.charged_at)return {charged:true,alreadyCharged:true};const prior=await get('SELECT * FROM hero_sms_wallet_debits WHERE order_id=?',[id]);if(prior)throw Error('Débito pós-pago sem marca de conclusão: conferir conta.');const result=await run('UPDATE revendas SET saldo=COALESCE(saldo,0)-?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[o.price_brl,o.customer_id]);if(!result.changes)throw Error('Cliente não encontrado para cobrança.');await run('INSERT INTO hero_sms_wallet_debits(order_id,customer_id,amount_brl) VALUES(?,?,?)',[id,o.customer_id,o.price_brl]);await run('UPDATE hero_sms_postpaid SET charged_at=CURRENT_TIMESTAMP WHERE order_id=?',[id]);return {charged:true,alreadyCharged:false};});
+}
+module.exports.authorizePostpaidHero=authorizePostpaidHero;
+module.exports.settlePostpaidHero=settlePostpaidHero;

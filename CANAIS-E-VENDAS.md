@@ -1,4 +1,4 @@
-# CENTRALUNLOCKER 10.1.11 — primeiro bot
+# CENTRALUNLOCKER 10.1.13 — primeiro bot
 
 ## Configuração
 
@@ -20,9 +20,9 @@
 - Publicações de vendas cobrem pedidos genéricos pagos/debitados (eSIM, DHRU, serviços próprios e GGSOMA/Premium), pedidos Hero locais com comprovante de débito ou Pix e assinaturas ConsultaVIP com pagamento confirmado.
 - Criar Pix, criar pedido manual ainda sem cobrança ou fazer recarga não gera aviso de venda. As vendas do bot parceiro não são incluídas como se fossem compras do primeiro bot.
 - Ao ativar pela primeira vez, pedidos históricos ficam fora das publicações. Um pedido novo que aguarda pagamento pode ser anunciado quando a cobrança se confirma.
-- O aviso contém serviço, valor, referência e nome/telefone parcialmente ocultos. IDs Telegram que aparecem em cadastros antigos no campo WhatsApp são omitidos. O telefone comprado na Hero, SMS, credenciais, QR Codes, documentos, IMEI e dados de consulta não são publicados.
-- O botão **Comprar também** do Telegram é um link para o privado, sem botões de compra executados dentro do grupo/canal.
-- A fila verifica mudanças a cada 30 segundos. Cancelamento e crédito devolvido só aparecem conforme os estados registrados pelo fluxo financeiro existente. Este módulo não concede crédito nem altera cobranças.
+- O aviso público contém somente “Compra realizada”, o serviço e o nome/telefone parcialmente ocultos. Valores, referências internas e informações de devolução ficam no privado e no painel. IDs Telegram que aparecem em cadastros antigos no campo WhatsApp são omitidos. O telefone comprado na Hero, SMS, credenciais, QR Codes, documentos, IMEI e dados de consulta não são publicados.
+- No Telegram aparece somente o botão **Comprar também**, que abre o privado. A URL não se repete no texto, inclusive nos anúncios enviados por esta fila. No WhatsApp o link continua no texto.
+- A fila verifica mudanças a cada 30 segundos. Pedido cancelado não gera publicação. Se já existir um aviso, o bot solicita sua exclusão utilizando a referência original da mensagem; não publica aviso de cancelamento nem de devolução. Este módulo não concede crédito nem altera cobranças.
 
 ## Fila e recuperação
 
@@ -31,14 +31,21 @@ Os eventos usam referências separadas (`pedido:`, `hero:`, `consulta:`), e cada
 - `pending`: aguardando processamento.
 - `retry`: indisponibilidade confirmada antes do envio ou limitação explícita da API.
 - `sent`: referência retornada pelo provedor.
+- `removed`: aviso cancelado antes de enviar, exclusão solicitada com sucesso ou mensagem já ausente no Telegram.
 - `failed`: rejeição explícita da API. Corrija permissões/configuração e utilize a ação do painel.
 - `uncertain`: conexão interrompida, timeout ou processo interrompido durante o envio. A mensagem pode ter chegado. Confira o destino antes de clicar **Reenviar após conferir**; **Arquivar sem reenviar** encerra esse registro.
 
-Cancelamentos e devoluções tentam editar o aviso original. O WhatsApp impõe limites de edição, e o Telegram exige permissões. Uma edição recusada fica registrada; não é enviada automaticamente uma sequência de mensagens substitutas. O histórico das campanhas identifica os canais públicos como **fila**; a confirmação efetiva aparece em Canais e vendas.
+Cancelamentos solicitam a remoção do aviso original em Telegram e WhatsApp. Uma exclusão recusada fica registrada como falha no painel; não é publicado nenhum texto substituto. Permissões, prazos e regras de cada plataforma podem impedir a remoção, exigindo limpeza manual. Uma exclusão interrompida pode ser repetida com a mesma referência, sem criar mensagens. Um envio antigo sem referência não pode ser localizado e apagado automaticamente: confira o destino e remova-o manualmente. O histórico das campanhas identifica os canais públicos como **fila**; a confirmação efetiva aparece em Canais e vendas.
 
-Mudanças de destino não provocam publicação em massa de vendas antigas. Mensagens dirigidas a um destino anterior ficam suspensas se ele deixar de ser o destino configurado.
+Mudanças de destino não provocam publicação em massa de vendas antigas. Mensagens dirigidas a um destino anterior ficam suspensas se ele deixar de ser o destino configurado; a exclusão de um aviso cancelado utiliza seu destino original, mesmo após a troca do grupo.
 
 Anúncios preservam a imagem selecionada da campanha. O Telegram usa legenda dentro do limite da plataforma e mantém o botão de compra mesmo se a mensagem for longa. Campanhas existentes continuam com seus clientes privados, grupos e Status anteriores.
+
+## Atualização dos avisos existentes
+
+Na inicialização da versão 10.1.12, os avisos públicos existentes na fila são ajustados ao novo formato. Publicações de compras ativas com referências conhecidas recebem uma tentativa de edição para retirar preço e referência interna. Publicações de pedidos cancelados recebem uma solicitação de exclusão. Avisos pendentes também são corrigidos antes do envio. Registros financeiros e mensagens privadas não são alterados.
+
+Avisos antigos sem referência, mensagens fora dos limites de edição/exclusão e permissões insuficientes exigem conferência no painel e possível remoção manual. A migração não anuncia pedidos históricos nem gera novas mensagens para substituir uma edição/exclusão recusada.
 
 ## Verificação desta entrega
 

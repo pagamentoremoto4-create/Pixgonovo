@@ -15,7 +15,7 @@ async function fixture(t){
   const get=(sql,args=[])=>new Promise((resolve,reject)=>db.get(sql,args,(e,r)=>e?reject(e):resolve(r)));
   const all=(sql,args=[])=>new Promise((resolve,reject)=>db.all(sql,args,(e,r)=>e?reject(e):resolve(r)));
   const sent=[];
-  const ctx=vm.createContext({run,get,all,createHeroLifecycle:require('../hero-sms-lifecycle').createHeroLifecycle,heroProtocol:protocol,renderOrderCard,createOrderMessenger,console,URLSearchParams,Date,Number,Map,Set,JSON,String,
+  const ctx=vm.createContext({settlePostpaidHero:async()=>({charged:false}),DB_PATH:':memory:',run,get,all,createHeroLifecycle:require('../hero-sms-lifecycle').createHeroLifecycle,heroProtocol:protocol,renderOrderCard,createOrderMessenger,console,URLSearchParams,Date,Number,Map,Set,JSON,String,
     enviarTexto:async(jid,msg)=>{sent.push({jid,msg});return {transport:'test',messageId:sent.length};},
     isTgJid:jid=>String(jid).startsWith('tg:'),tgIdFromJid:jid=>String(jid).slice(3),salvarSessaoPedido:async()=>{},
     addColumnIfMissing:async()=>{},heroSmsV1:async()=>({data:[],meta:{hasMore:false}}),

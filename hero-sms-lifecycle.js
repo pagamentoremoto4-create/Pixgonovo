@@ -6,7 +6,7 @@ function createHeroLifecycle({run,get,all,api,compat,credit,notify=async()=>{},n
  async function sms(order,entry){
   if(entry.type&&entry.type!=='sms')return false;
   const current=await get('SELECT status,refund_status,activation_id FROM hero_sms_orders WHERE id=?',[order.id]);
-  if(!current||current.status==='test_closed'||['credited','external_pending','credited_external'].includes(current.refund_status)||String(current.activation_id)!==String(order.activation_id))return false;
+  if(!current||current.status==='test_closed'||['credited','external_pending','credited_external','not_charged'].includes(current.refund_status)||String(current.activation_id)!==String(order.activation_id))return false;
   const code=entry.smsCode??entry.code??null,text=entry.smsText??entry.text??null;
   if(!String(code??'').trim()&&!String(text??'').trim())return false;
   const activation=String(order.activation_id),realId=entry.id!=null?String(entry.id):null;
@@ -73,7 +73,7 @@ function createHeroLifecycle({run,get,all,api,compat,credit,notify=async()=>{},n
  }
  async function settleRefund(order){
   const fresh=await get('SELECT * FROM hero_sms_orders WHERE id=?',[order.id]);
-  if(!fresh||String(fresh.activation_id)!==String(order.activation_id)||fresh.status==='test_closed'||fresh.refund_status==='credited')return;
+  if(!fresh||String(fresh.activation_id)!==String(order.activation_id)||fresh.status==='test_closed'||['credited','not_charged'].includes(fresh.refund_status))return;
   if(fresh.sms_received||fresh.sms_code){await run('UPDATE hero_sms_orders SET last_error=? WHERE id=?',['Reembolso com SMS recebido exige conferência administrativa.',order.id]);return;}
   await run('INSERT OR IGNORE INTO hero_sms_refund_receipts(order_id,activation_id,provider_status) VALUES(?,?,10)',[fresh.id,String(fresh.activation_id)]);
   await markCanceled(fresh.id,fresh.activation_id);
@@ -82,7 +82,7 @@ function createHeroLifecycle({run,get,all,api,compat,credit,notify=async()=>{},n
  async function sync(){
   if(syncing)return;syncing=true;
   try{
-   const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status!='test_closed' AND (status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','finish_pending','uncertain','purchasing') OR (status='canceled' AND refund_status NOT IN ('credited','external_pending','credited_external'))) ORDER BY COALESCE(last_reconciled_at,''),id LIMIT 50");
+   const orders=await all("SELECT * FROM hero_sms_orders WHERE activation_id IS NOT NULL AND status!='test_closed' AND (status IN ('number_received','sms_received','replace_pending','replace_uncertain','cancel_pending','finish_pending','uncertain','purchasing') OR (status='canceled' AND refund_status NOT IN ('credited','external_pending','credited_external','not_charged'))) ORDER BY COALESCE(last_reconciled_at,''),id LIMIT 50");
    if(!orders.length)return;
    const map=new Map(orders.map(o=>[String(o.activation_id),o]));
    for(const o of orders)await run('UPDATE hero_sms_orders SET last_reconciled_at=? WHERE id=?',[new Date(now()).toISOString(),o.id]);

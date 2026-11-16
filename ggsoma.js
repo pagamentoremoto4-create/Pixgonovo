@@ -54,15 +54,23 @@ module.exports = function createGgsoma(d) {
     await run(`CREATE TABLE IF NOT EXISTS ggsoma_orders(pedido_id INTEGER PRIMARY KEY,external_id TEXT UNIQUE NOT NULL,request_json TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,attempts INTEGER DEFAULT 0,next_try INTEGER DEFAULT 0,notified INTEGER DEFAULT 0)`);
     await run(`CREATE TABLE IF NOT EXISTS shared_ggsoma_orders(external_id TEXT PRIMARY KEY,slug TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'NEW',order_code TEXT,delivery_enc TEXT,error TEXT,request_id TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
     await d.addColumnIfMissing('pedidos','ggsoma_checkout_token','TEXT');
+    await d.addColumnIfMissing('pedidos','billing_mode','TEXT');
     await run('CREATE UNIQUE INDEX IF NOT EXISTS ggsoma_checkout_unique ON pedidos(ggsoma_checkout_token)');
-    await run(`CREATE TRIGGER IF NOT EXISTS ggsoma_checkout_reserve AFTER INSERT ON pedidos
+    await require('./customer-billing').transaction(d.DB_PATH||path.join(DATA_DIR,'database.db'),async({run})=>{
+    await run('DROP TRIGGER IF EXISTS ggsoma_checkout_reserve');
+    await run('DROP TRIGGER IF EXISTS ggsoma_reserve');
+    await run(`CREATE TRIGGER ggsoma_checkout_reserve AFTER INSERT ON pedidos
       WHEN NEW.cobrado=1 AND NEW.ggsoma_checkout_token IS NOT NULL AND EXISTS(SELECT 1 FROM servicos_catalogo WHERE id=NEW.servico_id AND api_provider='GGSOMA')
-      BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id AND saldo>=NEW.valor) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_BALANCE') END;
+      BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_NOT_FOUND') END;
+      SELECT CASE WHEN COALESCE(NEW.billing_mode,'PRE_PAGO')!='POS_PAGO' AND NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id AND saldo>=NEW.valor) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_BALANCE') END;
       UPDATE revendas SET saldo=saldo-NEW.valor WHERE id=NEW.revenda_id; END`);
-    await run(`CREATE TRIGGER IF NOT EXISTS ggsoma_reserve BEFORE UPDATE OF cobrado ON pedidos
+    await run(`CREATE TRIGGER ggsoma_reserve BEFORE UPDATE OF cobrado ON pedidos
       WHEN NEW.cobrado=1 AND COALESCE(OLD.cobrado,0)=0 AND EXISTS(SELECT 1 FROM servicos_catalogo WHERE id=NEW.servico_id AND api_provider='GGSOMA')
-      BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id AND saldo>=NEW.valor) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_BALANCE') END;
+      BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_NOT_FOUND') END;
+      SELECT CASE WHEN COALESCE(NEW.billing_mode,'PRE_PAGO')!='POS_PAGO' AND NOT EXISTS(SELECT 1 FROM revendas WHERE id=NEW.revenda_id AND saldo>=NEW.valor) THEN RAISE(ABORT,'GGSOMA_CUSTOMER_BALANCE') END;
+      SELECT CASE WHEN NEW.billing_mode='POS_PAGO' AND NOT EXISTS(SELECT 1 FROM ggsoma_orders WHERE pedido_id=NEW.id AND state='COMPLETED') THEN RAISE(ABORT,'GGSOMA_WAIT_DELIVERY') END;
       UPDATE revendas SET saldo=saldo-NEW.valor WHERE id=NEW.revenda_id; END`);
+    });
     await run(`CREATE TRIGGER IF NOT EXISTS ggsoma_refund AFTER UPDATE OF estornado ON pedidos
       WHEN NEW.estornado=1 AND COALESCE(OLD.estornado,0)=0 AND OLD.cobrado=1 AND EXISTS(SELECT 1 FROM servicos_catalogo WHERE id=NEW.servico_id AND api_provider='GGSOMA')
       BEGIN UPDATE revendas SET saldo=saldo+OLD.valor WHERE id=OLD.revenda_id; END`);
@@ -207,7 +215,8 @@ module.exports = function createGgsoma(d) {
     if(old){if(old.revenda_id!==client.id)throw new Error('Pedido inválido.');await execute(old.id);return old.id;}
     const price=await d.precoDaRevenda(client.id,service.id);
     if(!Number.isFinite(Number(price))||price<=0)throw new Error('Preço do produto inválido.');
-    await run(`INSERT OR IGNORE INTO pedidos(tipo,revenda_id,revenda_nome,revenda_jid,servico_id,servico_nome,entrada_valor,tipo_entrada,entrada_label,valor,status,cobrado,ggsoma_checkout_token) VALUES('REVENDA',?,?,?,?,?,'Compra digital','TEXTO','Compra',?,'PENDENTE',1,?)`,[client.id,client.nome,destination,service.id,service.nome,price,token]);
+    const billingMode=d.billingMode?await d.billingMode(client.id,service):'PRE_PAGO';
+    await run(`INSERT OR IGNORE INTO pedidos(tipo,revenda_id,revenda_nome,revenda_jid,servico_id,servico_nome,entrada_valor,tipo_entrada,entrada_label,valor,status,cobrado,ggsoma_checkout_token,billing_mode) VALUES('REVENDA',?,?,?,?,?,'Compra digital','TEXTO','Compra',?,'PENDENTE',?,?,?)`,[client.id,client.nome,destination,service.id,service.nome,price,billingMode==='POS_PAGO'?0:1,token,billingMode]);
     const created=await get('SELECT id FROM pedidos WHERE ggsoma_checkout_token=?',[token]);
     await execute(created.id);return created.id;
   }
@@ -227,7 +236,7 @@ module.exports = function createGgsoma(d) {
       if(o.state==='COMPLETED'){await complete(p,o);return;}
       if(await getConfig('ggsoma_enabled','0')!=='1'||o.next_try>Date.now())return;
       // All paths reserve payment before buying. This includes postpaid resellers.
-      if(!Number(p.cobrado)){
+      if(!Number(p.cobrado)&&p.billing_mode!=='POS_PAGO'){
         const balance=await get('SELECT saldo FROM revendas WHERE id=?',[p.revenda_id]);
         if(!balance||Number(balance.saldo)<Number(p.valor)){await run(`UPDATE ggsoma_orders SET error='Saldo do cliente insuficiente',next_try=? WHERE pedido_id=?`,[Date.now()+60000,id]);return;}
         await run('UPDATE pedidos SET cobrado=1 WHERE id=?',[id]);p.cobrado=1;
@@ -260,9 +269,10 @@ module.exports = function createGgsoma(d) {
   }
   async function settleFailure(p,code){
     const change=await run(`UPDATE pedidos SET status='CANCELADO',estornado=CASE WHEN cobrado=1 THEN 1 ELSE estornado END,motivo_cancelamento=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=? AND status!='CANCELADO'`,['GGSOMA: '+code,p.id]);
-    if(change.changes){const client=await get('SELECT * FROM revendas WHERE id=?',[p.revenda_id]);if(client)await d.enviarParaCanaisCliente(client,`⚠️ Pedido #${p.id} cancelado. O valor foi devolvido ao saldo. Motivo: ${code}`);}
+    if(change.changes){const client=await get('SELECT * FROM revendas WHERE id=?',[p.revenda_id]);if(client)await d.enviarParaCanaisCliente(client,`⚠️ Pedido #${p.id} cancelado. ${Number(p.cobrado)?'O valor foi devolvido ao saldo.':'Nenhum valor foi cobrado.'} Motivo: ${code}`);}
   }
   async function complete(p,o){
+    if(p.billing_mode==='POS_PAGO'&&!Number(p.cobrado)){await run('UPDATE pedidos SET cobrado=1 WHERE id=? AND COALESCE(cobrado,0)=0',[p.id]);p=await get('SELECT * FROM pedidos WHERE id=?',[p.id]);}
     if(p.status!=='FINALIZADO')await d.finalizarPedido(p,{notificarCliente:false});
     if(!o.notified){
       const client=await get('SELECT * FROM revendas WHERE id=?',[p.revenda_id]);

@@ -1,10 +1,11 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.11';
+const APP_RELEASE='10.1.13';
+const {createCustomerBilling}=require('./customer-billing');
 const {createHub,allowedCallback:communityAllowedCallback}=require('./community-hub');
 const heroProtocol = require('./hero-sms-protocol');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
-const {creditHeroRefund,debitHeroOrder}=require('./hero-sms-refunds');
+const {creditHeroRefund,debitHeroOrder,authorizePostpaidHero,settlePostpaidHero}=require('./hero-sms-refunds');
 const {createHeroLifecycle,createHeroWebhook}=require('./hero-sms-lifecycle');
 const {createSharedHeroService,mountSharedHeroRoutes}=require('./hero-sms-shared');
 const {checkoutError,checkoutMessage,checkoutDiagnostic}=require('./hero-sms-checkout-errors');
@@ -2903,6 +2904,7 @@ async function initDB() {
   )`);
   await run(`INSERT OR IGNORE INTO categorias_produtos (nome) SELECT DISTINCT COALESCE(NULLIF(TRIM(categoria),''),'eSIM') FROM esim_planos`);
 
+  await customerBilling.init();
   await ggsoma.init();
   await premium.init();
   PAINEL_TEMA = await getConfig('painel_tema', 'central-hacker-pro');
@@ -3533,7 +3535,7 @@ async function heroSmsWaOferta(from,key,cliente=null){
   const customer=cliente?.id?cliente:await clientePorJidHero(from);
   const price=await heroPrecoCliente(customer?.id);
   const detail=String(row.country)==='73'?'\n🇧🇷 DDD aleatório (sem escolha de DDD).':'';
-  await enviarTexto(from,`🔓 *CENTRALUNLOCKER — WHATSAPP SMS*\n\n📱 Aplicativo: *WhatsApp*\n🌎 País: *${row.pais}*${detail}\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(price)}*\n💳 Seu saldo: ${brl((await get('SELECT saldo FROM revendas WHERE id=?',[customer?.id]))?.saldo||0)}\n\n1️⃣ Pagar com saldo\n2️⃣ Pagar com Pix\n0️⃣ Voltar`);
+  await enviarTexto(from,`🔓 *CENTRALUNLOCKER — WHATSAPP SMS*\n\n📱 Aplicativo: *WhatsApp*\n🌎 País: *${row.pais}*${detail}\n📦 Estoque: ${row.stock}\n💰 Valor: *${brl(price)}*\n💳 Seu saldo: ${brl((await get('SELECT saldo FROM revendas WHERE id=?',[customer?.id]))?.saldo||0)}\n\n1️⃣ ${await customerBilling.heroMode(customer?.id)==='POS_PAGO'?'Comprar pós-pago':'Pagar com saldo'}\n2️⃣ Pagar com Pix\n0️⃣ Voltar`);
 }
 async function heroTelegramPaises(chatId,message,from,cliente,pagina=0,sort='asc'){
   if(!await heroSmsVisivel('whatsapp'))return atualizarCardTelegram(chatId,message,'⚠️ Serviço desativado.',[[tgBtn('⬅️ Voltar','hero_sms_apps','danger')]]);
@@ -3605,6 +3607,7 @@ async function heroCheckout(jid,cliente,key,method){
   if(String(offer.service).toLowerCase()!=='wa'&&!/whats\s?app/i.test(String(offer.nome||'')))throw checkoutError('SERVICE_NOT_ALLOWED','Somente números WhatsApp estão disponíveis.');
   if(!['saldo','pix'].includes(method))throw checkoutError('INVALID_METHOD','Forma de pagamento inválida.');
   const amount=await heroPrecoCliente(cliente.id);
+  const billingMethod=method==='saldo'&&await customerBilling.heroMode(cliente.id)==='POS_PAGO'?'postpaid':method;
   let gateway=null,documento='';
   if(method==='pix'){
     const paymentConfig=await gatewaysPagamentoAtivos();
@@ -3623,8 +3626,9 @@ async function heroCheckout(jid,cliente,key,method){
   // Uma compra paga em processamento/incerta exige conciliacao antes de outra.
   const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain','payment_creating','payment_reconciliation') ORDER BY id DESC LIMIT 1",[jid]);
   if(active)throw checkoutError('ORDER_RECONCILIATION','Pedido #'+active.id+' com pagamento ou compra em verificação. Confira seus pedidos antes de comprar novamente.');
-  const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),method]);
+  const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),billingMethod]);
   const id=r.lastID;
+  if(billingMethod==='postpaid'){await authorizePostpaidHero(DB_PATH,id);await heroBuyPaid(id);return id;}
   if(method==='saldo'){
     const debit=await debitHeroOrder(DB_PATH,id);
     if(!debit?.changes){await run("UPDATE hero_sms_orders SET status='insufficient_balance' WHERE id=?",[id]);throw checkoutError('INSUFFICIENT_BALANCE','Saldo insuficiente para pagar '+brl(amount)+'. Seu saldo atual é '+brl((await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]))?.saldo||0)+'. Escolha Pix ou adicione saldo.');}
@@ -3695,7 +3699,7 @@ async function heroCancelOrder(jid,orderId){
   if(o.status==='cancel_pending'){
     const receipt=await get('SELECT activation_id FROM hero_sms_cancel_receipts WHERE order_id=?',[o.id]);
     if(receipt&&String(receipt.activation_id)===String(o.activation_id)){
-      try{await heroCreditConfirmedRefund(o,true);return '✅ Pedido #'+o.id+' cancelado. '+brl(o.price_brl)+' devolvidos à carteira.';}
+      try{const outcome=await heroCreditConfirmedRefund(o,true);return outcome?.notCharged?'✅ Pedido #'+o.id+' cancelado. Nenhum valor foi cobrado.':'✅ Pedido #'+o.id+' cancelado. '+brl(o.price_brl)+' devolvidos à carteira.';}
       catch(e){return '⏳ Cancelamento confirmado; crédito na carteira ainda em conferência.';}
     }
     return '⏳ Cancelamento do pedido #'+o.id+' em conferência. Aguarde o suporte.';
@@ -3726,7 +3730,7 @@ async function heroCancelOrder(jid,orderId){
     await run("UPDATE hero_sms_orders SET last_error=? WHERE id=?",['Cancelamento confirmado; estorno pendente: '+String(e.message).slice(0,180),o.id]);
     return '⚠️ O fornecedor confirmou o cancelamento, mas o crédito na carteira está pendente de conferência.';
   }
-  return '✅ CENTRALUNLOCKER\nPedido #'+o.id+' cancelado pelo fornecedor.\n💰 '+brl(o.price_brl)+' devolvidos à sua carteira.';
+  return (await get('SELECT refund_status FROM hero_sms_orders WHERE id=?',[o.id]))?.refund_status==='not_charged'?'✅ CENTRALUNLOCKER\nPedido #'+o.id+' cancelado. Nenhum valor foi cobrado.':'✅ CENTRALUNLOCKER\nPedido #'+o.id+' cancelado pelo fornecedor.\n💰 '+brl(o.price_brl)+' devolvidos à sua carteira.';
 }
 function heroWaitSeconds(o){
   const value=String(o.number_received_at||o.created_at||'').replace(' ','T');
@@ -3921,6 +3925,9 @@ async function heroPixConfirmed(paymentId,ctx,verification=null){
 let heroPixRecoveryRunning=false;
 async function heroRecoverPaidWallet(){
   await heroPedidosInit();
+  const postpaid=await all("SELECT o.id,o.status FROM hero_sms_orders o JOIN hero_sms_postpaid a ON a.order_id=o.id WHERE o.payment_method='postpaid' AND (o.status='paid' OR (o.status='finished' AND a.charged_at IS NULL)) LIMIT 100");
+  for(const o of postpaid){if(o.status==='paid')await heroBuyPaid(o.id);else await settlePostpaidHero(DB_PATH,o.id);}
+
   const orders=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_wallet_debits d ON d.order_id=o.id WHERE o.status='paid' AND o.payment_method='saldo' LIMIT 50");
   for(const o of orders)await heroBuyPaid(o.id);
 }
@@ -4001,7 +4008,7 @@ function heroSharedService(){
 }
 let heroLifecycleInstance=null;
 function heroLifecycle(){
-  if(!heroLifecycleInstance)heroLifecycleInstance=createHeroLifecycle({run,get,all,api:(...args)=>heroSmsV1(...args),compat:(...args)=>heroSmsApi(...args),credit:(o,requireReceipt)=>heroCreditConfirmedRefund(o,requireReceipt),notify:heroQueueExternalUpdate});
+  if(!heroLifecycleInstance)heroLifecycleInstance=createHeroLifecycle({run,get,all,api:(...args)=>heroSmsV1(...args),compat:(...args)=>heroSmsApi(...args),credit:(o,requireReceipt)=>heroCreditConfirmedRefund(o,requireReceipt),notify:async id=>{await settlePostpaidHero(DB_PATH,id);await heroQueueExternalUpdate(id);}});
   return heroLifecycleInstance;
 }
 async function heroSmsPage(jid,id,page){
@@ -4611,15 +4618,15 @@ function simboloOperadoraEsim(nome) {
   const n=String(nome||'').toUpperCase();
   return /TIM/.test(n)?'🔵':/CLARO/.test(n)?'🔴':/VIVO/.test(n)?'🟣':'📱';
 }
-function textoConfirmacaoEsimWhatsApp(plano, ddd, saldo, unidades) {
+function textoConfirmacaoEsimWhatsApp(plano, ddd, saldo, unidades,modalidade='PRE_PAGO') {
   const preco=Number(plano.preco_revenda||0);
-  const comSaldo=Number(saldo||0)>=preco;
-  return `🛒 *CONFIRMAR eSIM*\n📱 ${simboloOperadoraEsim(plano.nome_plano)} ${plano.nome_plano} • ${ddd?`DDD ${ddd}`:'DDD ALEATÓRIO'}\n📦 Disponíveis: ${Number(unidades||0)} unidade(s)\n💰 ${brl(preco)}\n💳 Saldo: ${brl(saldo||0)}\n\n*PAGAMENTO*\n${comSaldo?'1️⃣ Usar saldo\n2️⃣ Pagar PIX\n3️⃣ Trocar DDD\n0️⃣ Voltar':'1️⃣ Pagar PIX\n2️⃣ Trocar DDD\n0️⃣ Voltar'}`;
+  const comSaldo=modalidade==='POS_PAGO'||Number(saldo||0)>=preco;
+  return `🛒 *CONFIRMAR eSIM*\n📱 ${simboloOperadoraEsim(plano.nome_plano)} ${plano.nome_plano} • ${ddd?`DDD ${ddd}`:'DDD ALEATÓRIO'}\n📦 Disponíveis: ${Number(unidades||0)} unidade(s)\n💰 ${brl(preco)}\n💳 Saldo: ${brl(saldo||0)}\n\n*PAGAMENTO*\n${comSaldo?(modalidade==='POS_PAGO'?'1️⃣ Comprar pós-pago\n2️⃣ Pagar PIX\n3️⃣ Trocar DDD\n0️⃣ Voltar':'1️⃣ Usar saldo\n2️⃣ Pagar PIX\n3️⃣ Trocar DDD\n0️⃣ Voltar'):'1️⃣ Pagar PIX\n2️⃣ Trocar DDD\n0️⃣ Voltar'}`;
 }
 async function confirmarEsimTexto(from, plano, ddd, revenda) {
   const r=await get('SELECT saldo FROM revendas WHERE id=?',[revenda.id]);
   const qtd=await contarEsimPorDdd(plano,ddd);
-  await enviarTexto(from,textoConfirmacaoEsimWhatsApp(plano,ddd,r?.saldo||0,qtd));
+  await enviarTexto(from,textoConfirmacaoEsimWhatsApp(plano,ddd,r?.saldo||0,qtd,await modalidadeEsimRevenda(revenda)));
 }
 async function pagarEsimDiretoPix(from, revenda, plano, ddd) {
   const atual=await get('SELECT * FROM esim_planos WHERE id=?',[plano.id]);
@@ -5914,8 +5921,22 @@ Envie este código para o WhatsApp da CentralUnlocker:
   const communitySession=await carregarSessaoPedido(from);
   const communityReadOnly=(['3','4','6'].includes(opcao)&&(!communitySession||communitySession.etapa==='menu'))||/^(?:historico|histórico|pedidos|meus pedidos|saldo|conta|suporte|ajuda|cancelar|voltar|sair|menu|0)$/.test(texto);
   const communityPaidSession=/^(?:hero_(?:order|status|codes)|suporte|historico|atendimento)/.test(communitySession?.etapa||'');
-  const communityPurchaseText=/^(?:comprar|solicitar|assinar|esim|premium|serviços|servicos|pagar|\/pagar)(?:\s|$)/i.test(texto)||/^\d+$/.test(opcao)||/^(?:premium_|esim_|hero_(?:cpf|tg_search)|aguardando_(?:imei|cpf|pagamento|gateway)|saldo_insuficiente|servico_|dhru_campo|entrada)/.test(communitySession?.etapa||'');
+  const communityPurchaseText=/^(?:comprar|solicitar|assinar|esim|premium|serviços|servicos|pagar|\/pagar)(?:\s|$)/i.test(texto)||/^\d+$/.test(opcao)||/^(?:premium_|esim_|hero_(?:cpf|tg_search)|aguardando_(?:imei|cpf|pagamento|gateway)|saldo_insuficiente|servico_|dhru_campo|entrada|confirmacao_servico)/.test(communitySession?.etapa||'');
   if(communityPurchaseText&&!communityReadOnly&&!communityPaidSession&&!await communityHub.access(msg.from.id))return;
+  if(communitySession?.etapa==='confirmacao_servico'){
+    const sess=communitySession,service=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[sess.servicoId]);
+    if(!service){await apagarSessaoPedido(from);return enviarTexto(from,'Serviço indisponível.');}
+    if(sess.confirmacaoModo!=='dhru'){await apagarSessaoPedido(from);return enviarTexto(from,'Reabra o serviço para confirmar os dados.');}
+    if(opcao==='0'){await apagarSessaoPedido(from);return enviarMenuTelegram(msg.chat.id,cliente);}
+    if(opcao==='2'){
+      const fields=Array.isArray(sess.dhruCampos)?sess.dhruCampos:dhruFieldsUsuario(await dhruProductForService(service.id));
+      if(!fields.length)return enviarTexto(from,'Campos indisponíveis. Reabra o serviço.');
+      await salvarSessaoPedido(from,{...sess,etapa:'dhru_campo',dhruCampos:fields,dhruValores:[],dhruIndice:0,confirmacaoEntradas:undefined});return enviarTexto(from,dhruPromptCampo(fields[0],0,fields.length));
+    }
+    if(opcao!=='1')return enviarTexto(from,'Escolha 1 para confirmar, 2 para corrigir ou 0 para voltar.');
+    if(Date.now()-Number(sess.confirmacaoEmMs||0)>30*60*1000){await apagarSessaoPedido(from);return enviarTexto(from,'Confirmação expirada. Reabra o serviço.');}
+    return processarEntradaDhruColetadaWhatsApp(from,cliente,service,sess.confirmacaoEntradas?.[0]||'',true);
+  }
   const sessHeroTelegram=await carregarSessaoPedido(from);
   if(await heroHandlePixDocument(from,cliente,sessHeroTelegram,textoOriginal))return;
   if(sessHeroTelegram?.etapa==='hero_tg_search'){
@@ -6083,7 +6104,7 @@ Digite *menu* para voltar.`);
   if (sess?.etapa === 'esim_confirmar') {
     const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
     const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
-    const temSaldo=Number(r?.saldo||0)>=valor;
+    const temSaldo=await modalidadeEsimRevenda(r)==='POS_PAGO'||Number(r?.saldo||0)>=valor;
     if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
     if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
     if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
@@ -7990,7 +8011,7 @@ Você pode colar vários IMEIs juntos, mesmo com outros textos. O bot localizar�
   if (sess?.etapa === 'esim_confirmar') {
     const r=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
     const valor=await precoEsimDaRevenda(cliente.id,sess.plano.id);
-    const temSaldo=Number(r?.saldo||0)>=valor;
+    const temSaldo=await modalidadeEsimRevenda(r)==='POS_PAGO'||Number(r?.saldo||0)>=valor;
     if(opcao==='0'||opcao==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
     if(opcao===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
     if(opcao==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||cliente,sess.plano,'UNIVERSAL',sess.ddd);}
@@ -8144,7 +8165,11 @@ ${servico.api_provider==='DHRU' && criados.length===1 ? await dhruEntradaPedidoP
 
 
 
+const dhruCheckoutLocks=new Set();
 async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entradaSerializada,confirmado=false){
+  if(confirmado&&dhruCheckoutLocks.has(from))return true;
+  if(confirmado)dhruCheckoutLocks.add(from);
+  try{
   const erroDhru=await dhruErroImeiAntesPedido(servico,[entradaSerializada]);
   if(erroDhru){await enviarTexto(from,erroDhru);return true;}
   if(!confirmado){
@@ -8171,6 +8196,7 @@ async function processarEntradaDhruColetadaWhatsApp(from,cliente,servico,entrada
   await enviarParaCanaisCliente(cliente,`📦 *PEDIDO RECEBIDO*\n\n📋 Pedido: #${ins.lastID}\n🛠 Serviço: ${nomeServicoWhatsApp(servico)}\n${dadosPt}\n💰 Valor: ${brl(valor)}\n\n📍 *Status: PENDENTE*`,from,{dhruPedidoId:ins.lastID});
   try{await executarPedidoDhru(ins.lastID);}catch(e){console.log('❌ DHRU pedido',ins.lastID,e.message);}
   return true;
+  }finally{if(confirmado)dhruCheckoutLocks.delete(from);}
 }
 
 function textoProdutoCampanha(p) {
@@ -8749,7 +8775,7 @@ Digite /menu para solicitar serviços pelo Telegram.`);
           const row=key?(await heroSmsVitrine('',key)).find(x=>String(x.country)===String(key.country)&&String(x.service)===String(key.service)):null;
           if(!row || String(row.service).toLowerCase()!=='wa'||ss?.heroApp!=='WhatsApp')return atualizarCardTelegram(chatId,q.message,'Oferta indisponível.',[[tgBtn('Voltar','hero_sms_apps','danger')]]);
           await salvarSessaoPedido(from,{etapa:'hero_tg_offer',heroApp:'WhatsApp',heroOferta:{country:row.country,service:row.service}});
-          return atualizarCardTelegram(chatId,q.message,`🔓 CENTRALUNLOCKER\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(await heroPrecoCliente(cliente.id))}\n💳 Seu saldo: ${brl((await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]))?.saldo||0)}\n\nEscolha o pagamento:`,[[tgBtn('💳 Saldo','hero_sms_pay_saldo','primary'),tgBtn('💠 Pix','hero_sms_pay_pix','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
+          return atualizarCardTelegram(chatId,q.message,`🔓 CENTRALUNLOCKER\n\n📱 ${row.nome}\n🌎 ${row.pais}\n📦 Estoque: ${row.stock}\n💰 ${brl(await heroPrecoCliente(cliente.id))}\n💳 Seu saldo: ${brl((await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]))?.saldo||0)}\n\nEscolha o pagamento:`,[[tgBtn(await customerBilling.heroMode(cliente.id)==='POS_PAGO'?'💳 Comprar pós-pago':'💳 Saldo','hero_sms_pay_saldo','primary'),tgBtn('💠 Pix','hero_sms_pay_pix','primary')],[tgBtn('Voltar','hero_sms_apps','danger')]]);
         }
         if(data==='hero_sms_pay_saldo'||data==='hero_sms_pay_pix'){
           const ss=await carregarSessaoPedido(from);
@@ -8996,7 +9022,7 @@ Exemplo:
           if(!disponivel)return tgBot.sendMessage(chatId,'❌ Este DDD acabou de ficar sem estoque. Escolha outro.');
           await salvarSessaoPedido(from,{etapa:'esim_quantidade',plano,ddd,quantidade:1});
            const revAtual=await get('SELECT saldo FROM revendas WHERE id=?',[cliente.id]);
-           return atualizarCardTelegram(chatId,q.message,textoConfirmacaoEsimWhatsApp(plano,ddd,revAtual?.saldo||0,disponivel),tecladoQuantidadeEsim(plano.id,1,Number(revAtual?.saldo||0)>=Number(plano.preco_revenda||0)));
+           return atualizarCardTelegram(chatId,q.message,textoConfirmacaoEsimWhatsApp(plano,ddd,revAtual?.saldo||0,disponivel,await modalidadeEsimRevenda(cliente)),tecladoQuantidadeEsim(plano.id,1,await modalidadeEsimRevenda(cliente)==='POS_PAGO'||Number(revAtual?.saldo||0)>=Number(plano.preco_revenda||0),await modalidadeEsimRevenda(cliente)==='POS_PAGO'));
         }
         const qtyMatch = data.match(/^esim_qty_(minus|plus)_(\d+)$/);
         if (qtyMatch) {
@@ -9009,7 +9035,7 @@ Exemplo:
           let quantidade=Math.max(1,Number(sess.quantidade||1));
           quantidade=qtyMatch[1]==='plus'?Math.min(disponivel,quantidade+1):Math.max(1,quantidade-1);
           await salvarSessaoPedido(from,{...sess,etapa:'esim_quantidade',plano,quantidade});
-          return atualizarCardTelegram(chatId,q.message,textoQuantidadeEsim(plano,sess.ddd,quantidade,disponivel,cliente),tecladoQuantidadeEsim(plano.id,quantidade));
+          return atualizarCardTelegram(chatId,q.message,textoQuantidadeEsim(plano,sess.ddd,quantidade,disponivel,cliente),tecladoQuantidadeEsim(plano.id,quantidade,true,await modalidadeEsimRevenda(cliente)==='POS_PAGO'));
         }
         const payEsimMatch = data.match(/^esim_pay_(saldo|pix)_(\d+)$/);
         if (payEsimMatch) {
@@ -9023,7 +9049,7 @@ Exemplo:
           if(disponivel<quantidade)return tgBot.sendMessage(chatId,`❌ Estoque insuficiente. Restam ${disponivel} eSIM(s) na modalidade ${sess.ddd||'DDD ALEATÓRIO'}.`);
           if(payEsimMatch[1]==='saldo'){
             const revAtual=await get('SELECT * FROM revendas WHERE id=?',[cliente.id]);
-            if(Number(revAtual?.saldo||0)<total){
+            if(await modalidadeEsimRevenda(cliente)==='PRE_PAGO'&&Number(revAtual?.saldo||0)<total){
               return tgBot.sendMessage(chatId,`❌ Saldo insuficiente.\n\n💰 Total: ${brl(total)}\n💳 Seu saldo: ${brl(revAtual?.saldo||0)}\n\nUse *Pagar com PIX* para concluir a compra.`,{parse_mode:'Markdown'});
             }
             await apagarSessaoPedido(from);
@@ -9226,7 +9252,7 @@ async function tratarWhatsAppLegadoDesativado(msg, from, textoOriginal, texto, a
   if (sess?.etapa === 'esim_confirmar') {
     const r=await get('SELECT * FROM revendas WHERE id=?',[revenda.id]);
     const valor=await precoEsimDaRevenda(revenda.id,sess.plano.id);
-    const temSaldo=Number(r?.saldo||0)>=valor;
+    const temSaldo=await modalidadeEsimRevenda(r)==='POS_PAGO'||Number(r?.saldo||0)>=valor;
     if(texto==='0'||texto==='cancelar'){await apagarSessaoPedido(from);await enviarTexto(from,'✅ Compra de eSIM cancelada.');return;}
     if(texto===(temSaldo?'3':'2')){await salvarSessaoPedido(from,{etapa:'esim_ddd',plano:sess.plano});await enviarEscolhaDddEsim(from,sess.plano,r?.saldo||0);return;}
     if(texto==='1'&&temSaldo){await apagarSessaoPedido(from);return entregarEsimRevenda(from,r||revenda,sess.plano,'UNIVERSAL',sess.ddd);}
@@ -10520,9 +10546,9 @@ function textoQuantidadeEsim(plano,ddd,quantidade,disponivel,cliente){
   const unit=Number(plano?.preco_revenda||0), total=unit*quantidade;
   return `📦 *QUANTIDADE DE eSIM*\n\n📱 ${plano.nome_plano}\n📍 DDD: *${ddd||'ALEATÓRIO'}*\n\nSelecione a quantidade:\n\n➖   *${quantidade}*   ➕\n\n💰 Unitário: ${brl(unit)}\n💵 Total: *${brl(total)}*\n📦 Disponível: ${disponivel}\n💳 Seu saldo: ${brl(cliente?.saldo||0)}`;
 }
-function tecladoQuantidadeEsim(planoId,quantidade,comSaldo=true){
+function tecladoQuantidadeEsim(planoId,quantidade,comSaldo=true,postpaid=false){
   return [
-    ...(comSaldo?[[tgBtn('USAR SALDO',`esim_pay_saldo_${planoId}`,'success','TG_ICON_SALDO','💰')]]:[]),
+    ...(comSaldo?[[tgBtn(postpaid?'COMPRAR PÓS-PAGO':'USAR SALDO',`esim_pay_saldo_${planoId}`,'success','TG_ICON_SALDO','💰')]]:[]),
     [tgBtn('PAGAR COM PIX',`esim_pay_pix_${planoId}`,'primary','TG_ICON_PIX','💠')],
     [tgBtn('Trocar DDD',`comprar_esim_${planoId}`,'danger','TG_ICON_VOLTAR','⬅️')]
   ];
@@ -10577,7 +10603,7 @@ async function entregarEsimsQuantidade(revendaId,jid,ctx){
     preparados.push(pronto);
   }
   const saldoAtual=Number(cliente.saldo||0);
-  if(saldoAtual<total){
+  if(await modalidadeEsimRevenda(cliente)==='PRE_PAGO'&&saldoAtual<total){
     await enviarTexto(jid,`❌ Saldo insuficiente para concluir.\n\n💰 Total: ${brl(total)}\n💳 Saldo: ${brl(saldoAtual)}`);
     return false;
   }
@@ -10848,7 +10874,8 @@ async function finalizarPedido(pedido, opcoes = {}) {
     // Reserva a cobrança de forma condicional. Assim, mesmo que o botão de
     // finalizar seja acionado duas vezes, o saldo será debitado apenas uma vez.
     const cobranca = await run('UPDATE pedidos SET cobrado=1 WHERE id=? AND COALESCE(cobrado,0)=0', [pedido.id]);
-    if (Number(cobranca?.changes || 0) > 0) {
+    const billingService=await get('SELECT api_provider FROM servicos_catalogo WHERE id=?',[pedido.servico_id]);
+    if (Number(cobranca?.changes || 0) > 0 && billingService?.api_provider!=='GGSOMA') {
       await run('UPDATE revendas SET saldo=saldo-?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [Number(pedido.valor || 0), pedido.revenda_id]);
     }
   }
@@ -13737,6 +13764,7 @@ function consultaLoginStatus(){
 
 // Todas as rotas administrativas, inclusive os dados internos e downloads, exigem login.
 app.use('/admin', basicAuth);
+const customerBilling=createCustomerBilling({run,get,all,filename:DB_PATH,legacyMode:modalidadeServicoRevenda,esimMode:modalidadeEsimRevenda,html:safeHtml,brl});
 const communityHub=createHub({run,get,all,adminId:ADMIN_TELEGRAM_ID,bot:()=>tgBot,
  socket:async()=> (await sessaoParaAnuncios())?.socket||null,groups:listarGruposAnuncios,
  links:communityPurchaseLinks,orderPayload:communityOrderPayload,adLinks:async c=>communityPurchaseLinks(communityCampaignPayload(c))});
@@ -13777,7 +13805,7 @@ async function communityResume(msg,payload){
  const {cliente}=await cadastrarClienteTelegram(msg.from);return enviarMenuTelegram(id,cliente);
 }
 
-const ggsoma = require('./ggsoma')({run,get,all,getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
+const ggsoma = require('./ggsoma')({run,get,all,DB_PATH,billingMode:(customer,service)=>customerBilling.catalogMode(customer,{...service,api_provider:'GGSOMA'}),getConfig,setConfig,axios,DATA_DIR,addColumnIfMissing,precoDaRevenda,safeHtml,page,clienteAuth,clientePage,finalizarPedido,cancelarPedidoComEstorno,enviarParaCanaisCliente,listWhatsAppGroups:consultaListarGruposWhatsApp,getWhatsAppSalesNumber:async()=>{const s=await sessaoParaAnuncios();return normalizarNumeroWhatsApp(s?.numero||whatsappNumeroConectado||'');},sendWhatsAppGroup:async(grupo,texto,imagePath='')=>{const sock=await consultaObterSocketWhatsApp(grupo);if(!sock)throw new Error('Nenhuma sessão WhatsApp conectada possui o grupo selecionado.');if(imagePath&&fs.existsSync(imagePath))return sock.sendMessage(grupo,{image:fs.readFileSync(imagePath),caption:String(texto)});return sock.sendMessage(grupo,{text:String(texto)});}});
 ggsoma.routes(app);
 
 // Hero SMS compartilhada: mesma URL/chave do estoque eSIM; habilitação independente.
@@ -15688,70 +15716,13 @@ app.post('/admin/revenda/:id/editar', async (req, res) => {
   await run("UPDATE revendas SET nome=?, whatsapp=?, telegram_id=?, jid=?, login=?, senha=?, status=?, pix_documento=?, gateway_pagamento=?, perfil_bot='NORMAL', atualizado_em=CURRENT_TIMESTAMP WHERE id=?", [req.body.nome, w || null, telegramId || null, jid || (w ? `wa:${w}` : null), req.body.login, req.body.senha, req.body.status, pixDocumento, gatewayPagamento, req.params.id]);
   res.redirect('/admin/revendas');
 });
-app.get('/admin/revenda/:id/precos', async (req, res) => {
-  const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
-  if (!r) return res.redirect('/admin/revendas');
-  const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1 ORDER BY id ASC');
-  const planos = await all('SELECT * FROM esim_planos WHERE ativo=1 ORDER BY nome_plano COLLATE NOCASE ASC, id ASC');
-  let html = `<h1>💰 Preços e cobrança</h1>
-  <div class="card"><h2>${safeHtml(r.nome)}</h2>
-  <p class="muted">Todos os clientes usam perfil REVENDA. Defina abaixo o preço e se cada serviço será pré-pago ou pós-pago.</p></div>
-  <form method="post">
-  <div class="card"><h2>🛠 Serviços</h2>
-  <table><tr><th>Serviço</th><th>Preço padrão</th><th>Preço deste cliente</th><th>Cobrança</th></tr>`;
-  for (const sv of servs) {
-    const pr = await get('SELECT preco FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [r.id, sv.id]);
-    const mod = await modalidadeServicoRevenda(r.id, sv.id);
-    const preco = pr ? Number(pr.preco || 0) : 0;
-    html += `<tr><td><b>${safeHtml(sv.nome)}</b><br><span class="muted">${safeHtml(labelEntradaServico(sv))}</span></td><td>${brl(sv.preco_padrao)}</td><td><input name="preco_${sv.id}" value="${preco || ''}" placeholder="Padrão ${Number(sv.preco_padrao||0).toFixed(2).replace('.',',')}"></td><td><select name="modalidade_${sv.id}"><option value="PRE_PAGO" ${mod==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${mod==='POS_PAGO'?'selected':''}>Pós-pago</option></select></td></tr>`;
-  }
-  html += `</table></div>
-  <div class="card"><h2>📱 eSIM</h2>
-  <p><b>Forma de cobrança de todos os eSIMs deste cliente:</b></p>
-  <select name="modalidade_esim"><option value="PRE_PAGO" ${await modalidadeEsimRevenda(r)==='PRE_PAGO'?'selected':''}>Pré-pago</option><option value="POS_PAGO" ${await modalidadeEsimRevenda(r)==='POS_PAGO'?'selected':''}>Pós-pago</option></select>
-  <p class="muted">Essa escolha vale para todos os planos eSIM. Os preços podem continuar personalizados por plano.</p>`;
-  if (planos.length) {
-    html += `<table><tr><th>Plano eSIM</th><th>Preço padrão</th><th>Preço deste cliente</th></tr>`;
-    for (const pl of planos) {
-      const pr = await get('SELECT preco FROM precos_esim_revenda WHERE revenda_id=? AND plano_id=?', [r.id, pl.id]);
-      const preco = pr ? Number(pr.preco || 0) : 0;
-      html += `<tr><td>${safeHtml(pl.nome_plano)}</td><td>${brl(pl.preco_revenda)}</td><td><input name="preco_esim_${pl.id}" value="${preco || ''}" placeholder="Padrão ${Number(pl.preco_revenda||0).toFixed(2).replace('.',',')}"></td></tr>`;
-    }
-    html += `</table>`;
-  } else html += `<p class="muted">Nenhum plano eSIM cadastrado.</p>`;
-  await run(`CREATE TABLE IF NOT EXISTS hero_sms_precos_cliente (revenda_id INTEGER PRIMARY KEY, preco REAL NOT NULL CHECK(preco>0))`);
-  const heroPr=await get('SELECT preco FROM hero_sms_precos_cliente WHERE revenda_id=?',[r.id]);
-  html += `<div class="card"><h2>🇧🇷 Hero SMS — WhatsApp SMS</h2><p>Preço padrão: <b>R$ 25,00</b>. Deixe vazio para usar o padrão.</p><label>Preço personalizado deste cliente (R$)</label><input name="preco_hero_sms" value="${heroPr?Number(heroPr.preco).toFixed(2).replace('.',','):''}" placeholder="25,00"></div>`;
-  html += `</div><button class="btn green">💾 Salvar configurações</button> <a class="btn gray" href="/admin/revendas">Voltar</a></form>`;
-  res.send(page('Preços e cobrança', html));
+app.get('/admin/revenda/:id/precos', async(req,res)=>{
+ try{res.send(page('Preços e cobrança',await customerBilling.render(Number(req.params.id))));}
+ catch(e){res.status(400).send(page('Preços e cobrança',`<p>${safeHtml(e.message)}</p><a href="/admin/revendas">Voltar</a>`));}
 });
-app.post('/admin/revenda/:id/precos', async (req, res) => {
-  const id = Number(req.params.id);
-  const servs = await all('SELECT * FROM servicos_catalogo WHERE ativo=1');
-  for (const sv of servs) {
-    const raw = String(req.body[`preco_${sv.id}`] || '').trim();
-    const preco = Number(raw.replace(',', '.'));
-    if (!raw || !Number.isFinite(preco) || preco <= 0) await run('DELETE FROM precos_revenda WHERE revenda_id=? AND servico_id=?', [id, sv.id]);
-    else await run('INSERT OR REPLACE INTO precos_revenda (revenda_id, servico_id, preco) VALUES (?, ?, ?)', [id, sv.id, preco]);
-    const modalidade = normalizarTipoRevenda(req.body[`modalidade_${sv.id}`] || 'PRE_PAGO');
-    await run('INSERT OR REPLACE INTO modalidades_servico_revenda (revenda_id, servico_id, modalidade) VALUES (?, ?, ?)', [id, sv.id, modalidade]);
-  }
-  await run(`CREATE TABLE IF NOT EXISTS hero_sms_precos_cliente (revenda_id INTEGER PRIMARY KEY, preco REAL NOT NULL CHECK(preco>0))`);
-  const heroRaw=String(req.body.preco_hero_sms||'').trim();
-  const heroVal=Number(heroRaw.replace(',','.'));
-  if(!heroRaw)await run('DELETE FROM hero_sms_precos_cliente WHERE revenda_id=?',[id]);
-  else if(Number.isFinite(heroVal)&&heroVal>0&&heroVal<=100000)await run('INSERT OR REPLACE INTO hero_sms_precos_cliente(revenda_id,preco) VALUES(?,?)',[id,heroVal]);
-  else return res.status(400).send('Preço Hero SMS inválido.');
-  const modalidadeEsim = normalizarTipoRevenda(req.body.modalidade_esim || 'PRE_PAGO');
-  await run('UPDATE revendas SET modalidade_esim=?, atualizado_em=CURRENT_TIMESTAMP WHERE id=?', [modalidadeEsim, id]);
-  const planos = await all('SELECT * FROM esim_planos WHERE ativo=1');
-  for (const pl of planos) {
-    const raw = String(req.body[`preco_esim_${pl.id}`] || '').trim();
-    const preco = Number(raw.replace(',', '.'));
-    if (!raw || !Number.isFinite(preco) || preco <= 0) await run('DELETE FROM precos_esim_revenda WHERE revenda_id=? AND plano_id=?', [id, pl.id]);
-    else await run('INSERT OR REPLACE INTO precos_esim_revenda (revenda_id, plano_id, preco) VALUES (?, ?, ?)', [id, pl.id, preco]);
-  }
-  res.redirect(`/admin/revenda/${id}/precos?ok=${encodeURIComponent('Preços e formas de cobrança atualizados')}`);
+app.post('/admin/revenda/:id/precos', async(req,res)=>{
+ try{await customerBilling.save(Number(req.params.id),req.body);res.redirect(`/admin/revenda/${Number(req.params.id)}/precos?ok=${encodeURIComponent('Bloco atualizado. As demais configurações foram preservadas.')}`);}
+ catch(e){res.status(400).send(page('Configuração não salva',`<p>${safeHtml(e.message)}</p><a href="/admin/revenda/${Number(req.params.id)}/precos">Voltar</a>`));}
 });
 app.get('/admin/revenda/:id/conta', async (req, res) => {
   const r = await get('SELECT * FROM revendas WHERE id=?', [req.params.id]);
@@ -17093,6 +17064,7 @@ async function heroPedidosInit(){
   for(const [column,type] of Object.entries({sms_received:'INTEGER NOT NULL DEFAULT 0',expires_at:'TEXT',provider_created_at:'TEXT',provider_cost:'REAL',provider_currency:'TEXT',provider_status:'INTEGER',last_reconciled_at:'TEXT',last_polled_at:'TEXT',display_sms_page:'INTEGER NOT NULL DEFAULT -1'}))await addColumnIfMissing('hero_sms_orders',column,type);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_sms_events(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,activation_id TEXT NOT NULL,event_key TEXT NOT NULL,code TEXT,text TEXT,received_at TEXT NOT NULL,UNIQUE(order_id,activation_id,event_key))`);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_wallet_debits(order_id INTEGER PRIMARY KEY,customer_id INTEGER NOT NULL,amount_brl REAL NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_postpaid(order_id INTEGER PRIMARY KEY,customer_id INTEGER NOT NULL,amount_brl REAL NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,charged_at TEXT)`);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_refund_receipts(order_id INTEGER PRIMARY KEY,activation_id TEXT NOT NULL,provider_status INTEGER NOT NULL,confirmed_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run('CREATE INDEX IF NOT EXISTS idx_hero_sms_events_order ON hero_sms_sms_events(order_id,received_at,id)');
   await run("UPDATE hero_sms_orders SET sms_received=1 WHERE sms_code IS NOT NULL AND sms_received=0");

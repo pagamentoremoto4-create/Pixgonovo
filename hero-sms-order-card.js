@@ -24,7 +24,8 @@ function renderOrderCard(order, waitSeconds=0, telegram=false) {
     });
   }else if(order.status==='number_received')lines.push('📩 Os códigos aparecerão nesta mensagem automaticamente.');
   if(order.status==='canceled'){
-    if(order.refund_status==='credited'){
+    if(order.refund_status==='not_charged'||(order.payment_method==='postpaid'&&order.refund_status==='none')){lines.push('Nenhum valor foi cobrado da sua conta.');}
+    else if(order.refund_status==='credited'){
       lines.push('💰 Valor devolvido à sua carteira: '+money(order.price_brl));
       if(order.wallet_balance!=null)lines.push('💳 Saldo atual: '+money(order.wallet_balance));
     }else lines.push('⏳ Devolução do crédito em verificação.');
