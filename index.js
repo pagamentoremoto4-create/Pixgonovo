@@ -1,6 +1,6 @@
 const {purchasePhrase,parsePurchasePhrase,availableEsimPlan}=require('./purchase-short-links');
 require('dotenv').config();
-const APP_RELEASE='10.1.21';
+const APP_RELEASE='10.1.22';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -4666,7 +4666,7 @@ async function entregarEsimPorDispositivo(destino, item, dispositivo, nomePlano)
     throw new Error('Não foi possível extrair os dados de ativação deste QR Code.');
   }
   if (String(destino).startsWith('wa:')) {
-    await enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
+    return enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
     return;
   }
   if (tipo === 'IPHONE') {
@@ -4730,33 +4730,16 @@ async function mostrarTutorialEsimWhatsApp(from, cliente, sess) {
   await salvarSessaoPedido(from, { ...sess, etapa: 'esim_instalacao' });
   await enviarTexto(from, '0️⃣ Voltar à entrega');
 }
-async function enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, pedidoId) {
-  const qrPath = caminhoArquivoEsim(item.arquivo_qr);
-  if (!fs.existsSync(qrPath)) throw new Error('QR Code do eSIM não encontrado no estoque.');
-  if(String(destino).startsWith('wa:')&&pedidoId){
-    const text=`✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd||'-'}\n📦 Pedido #${pedidoId}\n⚠️ QR Code de uso único.\n\n🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`;
-    if(await whatsappMenu.pixDeliverOrder?.(String(destino).slice(3),pedidoId,text,fs.readFileSync(qrPath))){
-      const old=await carregarSessaoPedido(destino);const ids=old?.etapa==='esim_entregue'?(old.esim_ids||[]):[];
-      await salvarSessaoPedido(destino,{etapa:'esim_entregue',esim_ids:[...new Set([...ids,Number(item.id)])]});return true;
-    }
-  }
-  const qrEnviado = await enviarImagem(destino, qrPath, `✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd || '-'}${pedidoId ? `\n📦 Pedido #${pedidoId}` : ''}\n⚠️ QR Code de uso único.`);
-  if (!qrEnviado) {
-    await avisarAdminTelegram(`⚠️ Falha ao enviar QR do eSIM #${item.id} para ${destino}. Pedido preservado; reenviar o mesmo QR, sem nova cobrança.`);
-    await enviarTexto(destino, `⚠️ O envio do QR Code falhou. Seu pedido foi salvo e não será cobrado novamente. Acione o suporte para reenviar o mesmo eSIM.`);
-    return false;
-  }
-  if(String(destino).startsWith('wa:')&&await whatsappMenu.enabled(String(destino).slice(3))){
-    const previous=await carregarSessaoPedido(destino),ids=previous?.etapa==='esim_entregue'?(previous.esim_ids||[]):[];
-    await salvarSessaoPedido(destino,{etapa:'esim_entregue',esim_ids:[...new Set([...ids,Number(item.id)])]});
-    await enviarTexto(destino,`🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`);return true;
-  }
-  const textoEnviado = await enviarTexto(destino, `🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}\n\n${menuEntregaEsimWhatsApp()}`);
-  if (!textoEnviado) await avisarAdminTelegram(`⚠️ QR do eSIM #${item.id} enviado, mas falhou a mensagem de instalação para ${destino}.`);
-  // Manter contexto de entregas múltiplas na mesma compra, inclusive após reinício.
-  const anterior = await carregarSessaoPedido(destino);
-  const ids = anterior?.etapa === 'esim_entregue' ? (anterior.esim_ids || []) : [];
-  await salvarSessaoPedido(destino, { etapa: 'esim_entregue', esim_ids: [...new Set([...ids, Number(item.id)])] });
+async function enviarEntregaCompactaEsimWhatsApp(destino,item,nomePlano,pedidoId){
+  const qrPath=caminhoArquivoEsim(item.arquivo_qr);
+  if(!fs.existsSync(qrPath))throw new Error('QR Code do eSIM não encontrado no estoque.');
+  const text=`✅ *eSIM ENTREGUE!*\n📱 ${nomePlano} | DDD ${item.ddd||'-'}${pedidoId?`\n📦 Pedido #${pedidoId}`:''}\n⚠️ QR Code de uso único. Não apague o eSIM após instalar.\n\n🔐 SM-DP+: ${item.smdp}\n🔑 Código: ${item.codigo_ativacao}${item.codigo_confirmacao?`\n🔒 Confirmação: ${item.codigo_confirmacao}`:''}\n\n${menuEntregaEsimWhatsApp()}`;
+  let enviado=false;
+  if(String(destino).startsWith('wa:')&&pedidoId)enviado=await whatsappMenu.pixDeliverOrder?.(String(destino).slice(3),pedidoId,text,fs.readFileSync(qrPath));
+  if(!enviado)enviado=await enviarImagem(destino,qrPath,text);
+  if(!enviado){await avisarAdminTelegram(`⚠️ Falha ao enviar QR do eSIM #${item.id}. Pedido #${pedidoId||'-'} preservado; reenviar a mesma unidade, sem nova cobrança.`);return false;}
+  const old=await carregarSessaoPedido(destino),ids=old?.etapa==='esim_entregue'?(old.esim_ids||[]):[];
+  await salvarSessaoPedido(destino,{etapa:'esim_entregue',esim_ids:[...new Set([...ids,Number(item.id)])]});return true;
 }
 
 function textoEscolhaDispositivoEsim() {
@@ -10742,9 +10725,9 @@ async function entregarQrComInstrucoesEBotao(destino,item,nomePlano,indice,total
       [tgBtn('INSTALAÇÃO MANUAL',`esim_manual_${item.id}`,'primary','TG_ICON_ESIM','⌨️')],
       [tgBtn('SUPORTE','menu_suporte','primary','TG_ICON_SUPORTE','👨‍💻'),tgBtn('MENU','menu_voltar','primary','TG_ICON_MENU','🏠')]
     ]}});
-    return;
+    return true;
   }
-  await enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
+  return enviarEntregaCompactaEsimWhatsApp(destino, item, nomePlano, item.pedido_id);
 }
 async function entregarEsimsQuantidade(revendaId,jid,ctx){
   const cliente=await get('SELECT * FROM revendas WHERE id=?',[revendaId]);
@@ -10822,7 +10805,8 @@ async function entregarEsimPagoDireto(revendaId,jid,contexto,pixPresentation=nul
     await run(`UPDATE esim_estoque SET status='VENDIDO',revenda_id=?,revenda_nome=?,pedido_id=?,dispositivo_entrega='QR_MANUAL',vendido_em=CURRENT_TIMESTAMP WHERE id=? AND status='RESERVADO'`,[rev.id,rev.nome,ins.lastID,item.id]);
     pronto.pedido_id=ins.lastID;
     if(pixPresentation&&String(jid).startsWith('wa:'))await whatsappMenu.pixLinkOrder?.(String(jid).slice(3),ins.lastID,pixPresentation.gateway,pixPresentation.paymentId);
-    await entregarQrComInstrucoesEBotao(jid,pronto,plano.nome_plano,1,1);
+    const entregue=await entregarQrComInstrucoesEBotao(jid,pronto,plano.nome_plano,1,1);
+    if(entregue!==true)throw new Error('Envio do QR não confirmado; preservar a unidade já vinculada ao pedido.');
     notificarPainel('esim','📱 eSIM vendido por PIX',`${rev.nome} - ${plano.nome_plano} - DDD ${ddd}`);
     return true;
   }catch(e){
@@ -10962,7 +10946,7 @@ async function verificarPagamento(paymentId, revendaId, jid, valorPix, tipoPagam
        let contextoEsim=null;
        try { contextoEsim=typeof contextoJson==='string'?JSON.parse(contextoJson):contextoJson; } catch(_) {}
        if(pagamentoServico && String(contextoEsim?.tipoCompra||'').toUpperCase()==='ESIM') {
-         if(!pixCardUpdated)await enviarTexto(jid,`✅ PIX confirmado: ${brl(valorPix)}\n📱 ${contextoEsim.plano?.nome_plano||'eSIM'} • DDD ${contextoEsim.ddd||'-'}\n⏳ Preparando entrega...`);
+         // eSIM: a própria entrega confirma o pagamento; nenhuma mensagem extra de preparação.
          const ok=await entregarEsimPagoDireto(revendaId,jid,contextoEsim,{paymentId,gateway});
          await run('UPDATE pix_pedidos SET status=? WHERE payment_id=?',[ok?'delivered':'delivery_pending',paymentId]);
          return;
@@ -14178,7 +14162,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="grid"><div class="card"><h3>Assinantes ativos</h3><p><b>${totalAtivos}</b></p></div><div class="card"><h3>Receita de assinaturas no mês</h3><p><b>${safeHtml(brl(receitaMes?.total||0))}</b></p></div><div class="card"><h3>Consultas Yan no mês</h3><p><b>${Number(consultasMes?.total||0)}</b></p></div></div>
   <div class="card"><h2>🏆 Ranking de utilização</h2><table><tr><th>#</th><th>Cliente</th><th>Consultas</th><th>Último uso</th></tr>${rankingRows}</table></div>
   <div class="card"><h2>💰 Histórico de pagamentos das assinaturas</h2><table><tr><th>Cliente</th><th>Plano</th><th>Valor</th><th>Gateway</th><th>Status</th><th>Data</th></tr>${pagamentosAssRows}</table></div>
-  <link rel="stylesheet" href="/css/dhru-command-picker.css?v=10.1.21"><div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Busque por nome, ID local ou UUID da API. Confira os campos exigidos e o custo no fornecedor antes de selecionar. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><h3>➕ Cadastrar comando</h3><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="dhru-service-form"><label>Comando<input name="comando" placeholder="/apple" required></label><label>Nome do comando<input name="nome_exibicao" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" placeholder="Exemplo: /apple 350000000000000"></label>${dhruCommandPicker.render(null,safeHtml)}<button class="btn green">➕ Cadastrar comando</button></form><div style="overflow-x:auto"><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div><script src="/js/dhru-command-picker.js?v=10.1.21" defer></script></div>
+  <link rel="stylesheet" href="/css/dhru-command-picker.css?v=10.1.22"><div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Busque por nome, ID local ou UUID da API. Confira os campos exigidos e o custo no fornecedor antes de selecionar. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><h3>➕ Cadastrar comando</h3><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="dhru-service-form"><label>Comando<input name="comando" placeholder="/apple" required></label><label>Nome do comando<input name="nome_exibicao" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" placeholder="Exemplo: /apple 350000000000000"></label>${dhruCommandPicker.render(null,safeHtml)}<button class="btn green">➕ Cadastrar comando</button></form><div style="overflow-x:auto"><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div><script src="/js/dhru-command-picker.js?v=10.1.22" defer></script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });

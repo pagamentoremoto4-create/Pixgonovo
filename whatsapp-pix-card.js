@@ -21,6 +21,13 @@ function createPixCard(d){
   const row=await d.get('SELECT * FROM whatsapp_pix_cards WHERE gateway=? AND payment_id=? AND phone=?',[gateway,String(id),phone]);
   const p=await proof(phone,gateway,id);if(!p||row&&Number(p.valor)!==Number(row.amount)||!confirmed(p)&&!['expired','cancelled','refunded'].includes(p.status))return false;
   const state=confirmed(p)?'confirmed':p.status;
+  let purchaseContext=null;try{purchaseContext=typeof p.contexto_json==='string'?JSON.parse(p.contexto_json):p.contexto_json;}catch(_){}
+  if(state==='confirmed'&&String(purchaseContext?.tipoCompra||'').toUpperCase()==='ESIM'){
+    if(row?.shown_status==='confirmed')return true;
+    if(row?.reference){try{const ref=JSON.parse(row.reference),c=await original(ref,phone);if(c&&now()-Number(ref.sentAt)<=14*60000)await c.socket.sendMessage(ref.key.remoteJid,{text:'✅ Pagamento confirmado!\n💰 Valor: '+d.brl(p.valor),edit:ref.key});}catch(_){log('ESIM_CONFIRM_EDIT_FAILED');}}
+    if(row)await d.run('UPDATE whatsapp_pix_cards SET shown_status=? WHERE gateway=? AND payment_id=? AND phone=?',['confirmed',gateway,String(id),phone]);
+    log('ESIM_AWAIT_DELIVERY');return true;
+  }
   if(state==='confirmed'){
     // A standalone TEXT receipt works independently from media-card editing.
     const claim=await d.run("INSERT OR IGNORE INTO whatsapp_pix_notices(gateway,payment_id,kind,phone,state,created_ms) VALUES(?,?,'confirmed',?,'sending',?)",[gateway,String(id),phone,now()]);
@@ -61,7 +68,7 @@ function createPixCard(d){
 
  async function write(phone,reference,content){
   const c=await d.connection(phone);if(!c?.socket)throw Error('DISCONNECTED');
-  if(reference&&String(c.id)===String(reference.sessionId)&&now()-Number(reference.sentAt)<=14*60000){try{await c.socket.sendMessage(reference.key.remoteJid,{...content,edit:reference.key});return reference;}catch(_){log('DELIVERY_EDIT_FAILED');}}
+  if(!content.image&&reference&&String(c.id)===String(reference.sessionId)&&now()-Number(reference.sentAt)<=14*60000){try{await c.socket.sendMessage(reference.key.remoteJid,{...content,edit:reference.key});return reference;}catch(_){log('DELIVERY_EDIT_FAILED');}}
   const to=await d.resolve(phone,c.socket);if(!/^\d+(?::\d+)?@(?:lid|s\.whatsapp\.net)$/.test(to||''))throw Error('INVALID_DESTINATION');
   const result=await c.socket.sendMessage(to,content);if(!result?.key?.id)throw Error('NO_REFERENCE');
   return {transport:'whatsapp',key:result.key,sessionId:c.id,sentAt:now()};
