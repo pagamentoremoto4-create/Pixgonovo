@@ -35,9 +35,10 @@ function createPixCard(d){
   // Build the QR from the exact full copy code, never from a visual mockup.
   const buffer=await d.qrBuffer(code);if(!buffer?.length)throw Error('QR_EMPTY');
   const body='💰 Valor: '+d.brl(amount)+'\n⏳ Aguardando pagamento'+(detail?'\n'+detail:'')+'\n\nEscaneie o QR Code para pagar ou copie o código Pix abaixo.\n\n'+code;
-  let sent=null;
-  if(progress){try{sent=await d.sendNative(phone,body,code,buffer,progress);}catch(_){log('CARD_EDIT_FAILED');}}
-  if(!sent?.handled){sent=await d.sendNative(phone,body,code,buffer);if(!sent?.handled)return false;if(progress)await endProgress(phone,progress,'ℹ️ Pix gerado. Confira os dados na mensagem seguinte.');}
+  // iPhone can accept a protocol edit without displaying its new media type.
+  // Always create the complete card as a new message; progress receives text only.
+  const sent=await d.sendNative(phone,body,code,buffer);if(!sent?.handled)return false;
+  if(progress)await endProgress(phone,progress,'✅ Pix gerado. Confira abaixo.');
 
   try{await d.run('INSERT INTO whatsapp_pix_cards(gateway,payment_id,phone,reference,amount,created_ms) VALUES(?,?,?,?,?,?)',[gateway,String(paymentId),phone,JSON.stringify(sent.reference),Number(amount),now()]);}catch(_){log('REFERENCE_SAVE_FAILED');}
   await update(phone,gateway,paymentId);log('READY',{id:sent.reference?.key?.id});return true;

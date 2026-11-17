@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.17';
+const APP_RELEASE='10.1.18';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -13918,7 +13918,7 @@ const whatsappMenu=createWhatsAppMenu({run,get,all,getConfig,setConfig,brl,html:
  }
 });
 whatsappMenu.mount(app,page);
-const whatsAppUiTest=createWhatsAppUiTest({run,get,all,html:safeHtml,
+const whatsAppUiTest=createWhatsAppUiTest({run,get,all,html:safeHtml,qrBuffer:code=>QRCode.toBuffer(code,{width:620,margin:2,errorCorrectionLevel:'M'}),
  sdk:()=>import('@whiskeysockets/baileys'),
  sessions:async()=>{
    const rows=Array.from(whatsappSessoes.values()).filter(x=>x.ativo&&x.funcaoBot).map(x=>({id:String(x.id),name:x.nome||('Sessão #'+x.id),number:x.numero||'',connected:!!(x.conectado&&x.socket)}));

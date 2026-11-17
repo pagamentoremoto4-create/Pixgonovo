@@ -1,3 +1,9 @@
+ATUALIZAÇÃO 10.1.18 — CARTÃO PIX NOVO PARA TESTAR NO IPHONE
+O cartão agora é enviado NOVO; Gerando seu Pix recebe apenas edição de texto.
+Teste SEM COBRANÇA: /admin/menu-whatsapp/testes → Cartão Pix novo com QR.
+Menu em texto preservado. Listas ainda não têm compatibilidade comprovada no iPhone.
+Leia PIX-CARTAO-NOVO-IPHONE.md antes de gerar pagamentos reais.
+
 ATUALIZAÇÃO 10.1.17 — PIX INDEPENDENTE E EDIÇÕES
 Menu principal em texto preservado, sem aplicar modelos novos.
 Painel: /admin/menu-whatsapp/modelos — Pix possui ativação e telefone próprios.
