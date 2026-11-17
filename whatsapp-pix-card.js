@@ -8,19 +8,31 @@ function createPixCard(d){
   gateway TEXT NOT NULL,payment_id TEXT NOT NULL,phone TEXT NOT NULL,
   reference TEXT NOT NULL,amount REAL NOT NULL,created_ms INTEGER NOT NULL,
   shown_status TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(gateway,payment_id)
- )`);await d.run(`CREATE TABLE IF NOT EXISTS whatsapp_pix_order_refs(order_id INTEGER PRIMARY KEY,phone TEXT NOT NULL,gateway TEXT NOT NULL,payment_id TEXT NOT NULL,reference TEXT,fingerprint TEXT)`);})().catch(e=>{schema=null;throw e;});return schema;}
+ )`);await d.run(`CREATE TABLE IF NOT EXISTS whatsapp_pix_notices(gateway TEXT NOT NULL,payment_id TEXT NOT NULL,kind TEXT NOT NULL,phone TEXT NOT NULL,state TEXT NOT NULL,reference TEXT,created_ms INTEGER NOT NULL,PRIMARY KEY(gateway,payment_id,kind))`);await d.run(`CREATE TABLE IF NOT EXISTS whatsapp_pix_order_refs(order_id INTEGER PRIMARY KEY,phone TEXT NOT NULL,gateway TEXT NOT NULL,payment_id TEXT NOT NULL,reference TEXT,fingerprint TEXT)`);})().catch(e=>{schema=null;throw e;});return schema;}
  async function eligible(phone){return await d.enabled(phone)&&(await d.settings()).pixFormat==='compact';}
  async function begin(phone){try{if(!await eligible(phone))return null;const c=await d.connection(phone);if(!c)return null;const to=await d.resolve(phone,c.socket),m=await c.socket.sendMessage(to,{text:'⏳ Gerando seu Pix…'});return m?.key?{key:m.key,sessionId:c.id,sentAt:now()}:null;}catch(_){log('PROGRESS_FAILED');return null;}}
  async function original(reference,phone){const c=await d.connection(phone);return c&&String(c.id)===String(reference.sessionId)?c:null;}
  async function endProgress(phone,reference,text='ℹ️ Confira a atualização do pagamento abaixo.'){if(!reference||!text)return false;try{const c=await original(reference,phone);if(!c||now()-Number(reference.sentAt)>14*60000)return false;await c.socket.sendMessage(reference.key.remoteJid,{text,edit:reference.key});return true;}catch(_){log('PROGRESS_UPDATE_FAILED');return false;}}
- function confirmed(p){return ['completed','delivery_pending','delivered'].includes(String(p?.status));}
+ function confirmed(p){return ['completed','delivery_pending','delivered','wallet_credited'].includes(String(p?.status));}
  async function proof(phone,gateway,id){const p=await d.get('SELECT * FROM pix_pedidos WHERE payment_id=? AND gateway=?',[String(id),gateway]);return p&&p.cliente_jid==='wa:'+phone?p:null;}
- function statusText(p,amount){if(confirmed(p))return '✅ Pagamento confirmado!\n💰 Valor: '+d.brl(amount)+(p.tipo_pagamento==='SERVICO'?'\n📦 Pagamento recebido. Acompanhe a entrega do pedido.':'\n💳 Confira seu saldo na carteira.');return '⌛ Pix '+(p.status==='expired'?'expirado':p.status==='refunded'?'reembolsado':'cancelado')+'.\nNão utilize este código para pagar.';}
+ function statusText(p,amount){if(confirmed(p))return '✅ Pagamento confirmado!\n💰 Valor: '+d.brl(amount)+(p.tipo_pagamento==='SERVICO'?'\n📦 Preparando seu pedido…':'\n💳 Confira seu saldo na carteira.');return '⌛ Pix '+(p.status==='expired'?'expirado':p.status==='refunded'?'reembolsado':'cancelado')+'.\nNão utilize este código para pagar.';}
  const updating=new Set();
  async function update(phone,gateway,id){let lock,acquired=false;try{await init();lock=String(gateway)+':'+String(id);if(updating.has(lock))return false;updating.add(lock);acquired=true;
-  const row=await d.get('SELECT * FROM whatsapp_pix_cards WHERE gateway=? AND payment_id=? AND phone=?',[gateway,String(id),phone]);if(!row)return false;
-  const p=await proof(phone,gateway,id);if(!p||Number(p.valor)!==Number(row.amount)||!confirmed(p)&&!['expired','cancelled','refunded'].includes(p.status))return false;
-  const state=confirmed(p)?'confirmed':p.status;if(row.shown_status===state)return true;
+  const row=await d.get('SELECT * FROM whatsapp_pix_cards WHERE gateway=? AND payment_id=? AND phone=?',[gateway,String(id),phone]);
+  const p=await proof(phone,gateway,id);if(!p||row&&Number(p.valor)!==Number(row.amount)||!confirmed(p)&&!['expired','cancelled','refunded'].includes(p.status))return false;
+  const state=confirmed(p)?'confirmed':p.status;
+  if(state==='confirmed'){
+    // A standalone TEXT receipt works independently from media-card editing.
+    const claim=await d.run("INSERT OR IGNORE INTO whatsapp_pix_notices(gateway,payment_id,kind,phone,state,created_ms) VALUES(?,?,'confirmed',?,'sending',?)",[gateway,String(id),phone,now()]);
+    if(!claim.changes)return true;
+    try{
+      const fresh=await write(phone,null,{text:statusText(p,p.valor)});
+      await d.run("UPDATE whatsapp_pix_notices SET state='sent',reference=? WHERE gateway=? AND payment_id=? AND kind='confirmed'",[JSON.stringify(fresh),gateway,String(id)]);
+      if(row)await d.run('UPDATE whatsapp_pix_cards SET shown_status=?,reference=? WHERE gateway=? AND payment_id=? AND phone=?',[state,JSON.stringify(fresh),gateway,String(id),phone]);
+      log('CONFIRMED_NOTICE_SENT',{id:fresh.key.id});return true;
+    }catch(_){await d.run("UPDATE whatsapp_pix_notices SET state='uncertain' WHERE gateway=? AND payment_id=? AND kind='confirmed'",[gateway,String(id)]);log('CONFIRMED_NOTICE_UNCERTAIN');return true;}
+  }
+  if(!row)return false;if(row.shown_status===state)return true;
   // WhatsApp edits are best effort, bounded by the original message age.
   const reference=JSON.parse(row.reference);const c=await original(reference,phone);const within=now()-Number(reference.sentAt)<=14*60000;
   if(c&&within){try{await c.socket.sendMessage(reference.key.remoteJid,{text:statusText(p,row.amount),edit:reference.key});await d.run('UPDATE whatsapp_pix_cards SET shown_status=? WHERE gateway=? AND payment_id=? AND phone=?',[state,gateway,String(id),phone]);log('EDIT_SUBMITTED',{state,id:reference.key.id});return true;}catch(_){log('EDIT_FAILED');}}
@@ -44,7 +56,9 @@ function createPixCard(d){
   await update(phone,gateway,paymentId);log('READY',{id:sent.reference?.key?.id});return true;
  }catch(_){log('READY_FAILED');return false;}}
 
- async function reference(phone,gateway,id){try{await init();const row=await d.get('SELECT * FROM whatsapp_pix_cards WHERE gateway=? AND payment_id=? AND phone=?',[gateway,String(id),phone]);if(!row)return null;const p=await proof(phone,gateway,id);if(!p||!confirmed(p)||Number(p.valor)!==Number(row.amount))return null;return {...JSON.parse(row.reference),transport:'whatsapp',pixCard:true};}catch(_){return null;}}
+ async function reference(phone,gateway,id){try{await init();const row=await d.get('SELECT * FROM whatsapp_pix_cards WHERE gateway=? AND payment_id=? AND phone=?',[gateway,String(id),phone]);const notice=await d.get("SELECT reference FROM whatsapp_pix_notices WHERE gateway=? AND payment_id=? AND phone=? AND kind='confirmed' AND state='sent'",[gateway,String(id),phone]);
+ const p=await proof(phone,gateway,id);if(!p||!confirmed(p)||row&&Number(p.valor)!==Number(row.amount))return null;const raw=notice?.reference||row?.reference;if(!raw)return null;return {...JSON.parse(raw),transport:'whatsapp',pixCard:!notice};}catch(_){return null;}}
+
  async function write(phone,reference,content){
   const c=await d.connection(phone);if(!c?.socket)throw Error('DISCONNECTED');
   if(reference&&String(c.id)===String(reference.sessionId)&&now()-Number(reference.sentAt)<=14*60000){try{await c.socket.sendMessage(reference.key.remoteJid,{...content,edit:reference.key});return reference;}catch(_){log('DELIVERY_EDIT_FAILED');}}

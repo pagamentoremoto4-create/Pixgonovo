@@ -1,0 +1,13 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {canTransition,validateQuote,parseActivation}=require('../hero-sms-order-guard');
+assert.equal(canTransition('awaiting_payment','paid'),true);
+assert.equal(canTransition('awaiting_payment','purchasing'),false);
+assert.equal(canTransition('purchasing','purchasing'),false);
+assert.equal(canTransition('refunded','refund_pending'),false);
+assert.equal(canTransition('cancel_requested','refunded'),false);
+assert.equal(validateQuote({service:'wa',country:'73',priceCents:2595,customerId:1}).priceCents,2595);
+assert.throws(()=>validateQuote({service:'wa',country:'73',priceCents:NaN,customerId:1}));
+assert.throws(()=>parseActivation({activationId:'',phoneNumber:'123456789'}));
+assert.deepEqual(parseActivation({activationId:12345,phoneNumber:'+5511999999999'}),{activationId:'12345',phoneNumber:'+5511999999999'});
+console.log('Hero SMS: 8 verificações aprovadas');

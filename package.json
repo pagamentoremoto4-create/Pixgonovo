@@ -1,6 +1,6 @@
 {
   "name": "centralunlocker-revendas",
-  "version": "10.1.18",
+  "version": "10.1.19",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

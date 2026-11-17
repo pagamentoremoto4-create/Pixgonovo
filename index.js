@@ -1,10 +1,11 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.18';
+const APP_RELEASE='10.1.19';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
 const {createHub,allowedCallback:communityAllowedCallback}=require('./community-hub');
 const heroProtocol = require('./hero-sms-protocol');
+const heroPurchaseRejection=require('./hero-sms-purchase-rejection');
 const {heroValidCountry,heroCountryLabel,parseSmsOffers,syncCountryOffers}=require('./hero-sms-countries');
 const {renderOrderCard,createOrderMessenger}=require('./hero-sms-order-card');
 const {creditHeroRefund,debitHeroOrder,authorizePostpaidHero,settlePostpaidHero}=require('./hero-sms-refunds');
@@ -3626,7 +3627,7 @@ async function heroCheckout(jid,cliente,key,method){
   }
   // Nao bloquear por Pix pendente nem por numero ja entregue.
   // Uma compra paga em processamento/incerta exige conciliacao antes de outra.
-  const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain','payment_creating','payment_reconciliation') ORDER BY id DESC LIMIT 1",[jid]);
+  const active=await get("SELECT id,status FROM hero_sms_orders WHERE customer_jid=? AND status IN ('paid','purchasing','uncertain','payment_creating','payment_reconciliation','purchase_rejected') ORDER BY id DESC LIMIT 1",[jid]);
   if(active)throw checkoutError('ORDER_RECONCILIATION','Pedido #'+active.id+' com pagamento ou compra em verificação. Confira seus pedidos antes de comprar novamente.');
   const r=await run("INSERT INTO hero_sms_orders(customer_id,customer_jid,service,country,price_brl,cost_at_quote,payment_method) VALUES(?,?,?,?,?,?,?)",[cliente.id,jid,offer.service,String(offer.country),amount,Number(offer.cost),billingMethod]);
   const id=r.lastID;
@@ -3680,6 +3681,18 @@ async function heroCheckout(jid,cliente,key,method){
   } finally {startHeroMonitoring();}
   } finally { heroCheckoutInFlight.delete(jid); }
 }
+async function heroApplyPurchaseRejection(id,error){
+  if(!heroPurchaseRejection.noNumbersProof(error))return false;
+  if(!await heroPurchaseRejection.recordPurchaseRejection(DB_PATH,id,error))return false;
+  const order=await get('SELECT * FROM hero_sms_orders WHERE id=?',[Number(id)]);
+  // Stop showing the refused snapshot at this cost. A later catalog sync can restore it.
+  try{await run("UPDATE hero_sms_catalog SET stock=0,updated_at=CURRENT_TIMESTAMP WHERE country=? AND service=? AND cost=?",[order.country,order.service,order.cost_at_quote]);}catch(e){console.log('HERO_STOCK_INVALIDATE',e.code||'UNAVAILABLE');}
+  try{await heroPurchaseRejection.settlePurchaseRejection(DB_PATH,id);}
+  catch(e){console.log('HERO_REJECTED_CREDIT_PENDING',JSON.stringify(checkoutDiagnostic(e,'HERO-REJECTION-'+id)));}
+  await heroQueueExternalUpdate(id);
+  if(order.payment_method!=='external')try{await heroWhatsMenuPedido(order.customer_jid,id);}catch(e){console.log('HERO_REJECTED_NOTICE',e.code||'UNAVAILABLE');}
+  return true;
+}
 async function heroBuyPaid(id){
   const claim=await run("UPDATE hero_sms_orders SET status='purchasing' WHERE id=? AND status='paid'",[id]);if(!claim?.changes)return;
   const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[id]);
@@ -3694,7 +3707,10 @@ async function heroBuyPaid(id){
   }catch(e){
     const diagnostic=checkoutDiagnostic(e,'HERO-PURCHASE-'+id);
     console.log('HERO_PURCHASE',JSON.stringify(diagnostic));
-    await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=?",[diagnostic.message,id]);
+    if(o.payment_method!=='external'&&heroPurchaseRejection.noNumbersProof(e)){
+      try{if(await heroApplyPurchaseRejection(id,e))return;}catch(rejectionError){console.log('HERO_REJECTION_RECORD_FAILED',JSON.stringify(checkoutDiagnostic(rejectionError,'HERO-REJECTION-'+id)));}
+    }
+    await run("UPDATE hero_sms_orders SET status='uncertain',last_error=? WHERE id=? AND status='purchasing'",[diagnostic.message,id]);
     if(o.payment_method!=='external')await enviarTexto(o.customer_jid,'⚠️ Pedido #'+id+' sob verificação. Não tente comprar novamente até o suporte conferir a ativação.');return;
   }
   if(o.payment_method==='external')return;
@@ -3875,6 +3891,7 @@ async function heroSmsV1(method,path,payload=undefined){
       : heroProtocol.providerErrorSummary(response.data);
     const error=new Error('Hero SMS recusou a operação (HTTP '+response.status+'): '+reason.slice(0,600));
     error.httpStatus=response.status;
+    error.providerBody=response.data;
     error.code=String(response.data?.title||'HERO_HTTP_'+response.status);
     throw error;
   }
@@ -3952,6 +3969,10 @@ async function heroPixConfirmed(paymentId,ctx,verification=null){
   return delivered;
 }
 let heroPixRecoveryRunning=false;
+async function heroRecoverRejectedPurchases(){
+  const pending=await all("SELECT o.id,o.customer_jid FROM hero_sms_orders o JOIN hero_sms_purchase_rejections r ON r.order_id=o.id WHERE o.status='purchase_rejected' AND o.payment_method!='external' ORDER BY o.id LIMIT 100");
+  for(const o of pending)try{await heroPurchaseRejection.settlePurchaseRejection(DB_PATH,o.id);await heroQueueExternalUpdate(o.id);}catch(e){console.log('HERO_REJECTED_RECOVERY',JSON.stringify(checkoutDiagnostic(e,'HERO-REJECTION-'+o.id)));}
+}
 async function heroRecoverPaidWallet(){
   await heroPedidosInit();
   const postpaid=await all("SELECT o.id,o.status FROM hero_sms_orders o JOIN hero_sms_postpaid a ON a.order_id=o.id WHERE o.payment_method='postpaid' AND (o.status='paid' OR (o.status='finished' AND a.charged_at IS NULL)) LIMIT 100");
@@ -3965,6 +3986,7 @@ async function heroRecoverPix(){
   heroPixRecoveryRunning=true;
   try{
     await heroPedidosInit();
+    await heroRecoverRejectedPurchases();
     const rows=await all(`SELECT p.* FROM pix_pedidos p JOIN hero_sms_orders o ON o.payment_id=p.payment_id WHERE o.payment_method='pix' AND p.status IN ('pending','expired','completed','delivery_pending') AND o.status IN ('awaiting_payment','payment_expired','paid','purchasing','uncertain','number_received','sms_received','finished') ORDER BY p.criado_em DESC LIMIT 50`);
     for(const p of rows){
       const context=parseHeroPixContext(p.contexto_json);if(!context)continue;
@@ -4010,6 +4032,17 @@ async function heroQueueExternalUpdate(id){
     delivered=CASE WHEN hero_sms_external_events.state=excluded.state THEN hero_sms_external_events.delivered ELSE 0 END,
     updated_at=CURRENT_TIMESTAMP`,[id,state]);
 }
+async function heroReviewRejectedPix(id){
+  await heroPedidosInit();const o=await get('SELECT * FROM hero_sms_orders WHERE id=?',[Number(id)]);
+  if(!o||o.payment_method!=='pix'||o.status!=='uncertain'||o.activation_id||o.phone||o.sms_code||o.sms_received||!heroPurchaseRejection.legacyNoNumbers(o.last_error))throw Error('Este pedido não possui uma recusa NO_NUMBERS inequívoca para conferência.');
+  const verified=await consultarStatus(String(o.payment_id),(await get('SELECT gateway FROM pix_pedidos WHERE payment_id=?',[o.payment_id]))?.gateway);
+  // This method revalidates amount, customer and transaction. An uncertain order is never purchased again.
+  await heroPixConfirmed(o.payment_id,{tipoCompra:'HERO_SMS',heroOrderId:o.id},verified);
+  const proof={code:'NO_NUMBERS',httpStatus:400,providerBody:{title:'NO_NUMBERS'}};
+  if(!await heroPurchaseRejection.recordPurchaseRejection(DB_PATH,o.id,proof,{legacyReviewed:true}))throw Error('O pedido mudou durante a conferência.');
+  await heroPurchaseRejection.settlePurchaseRejection(DB_PATH,o.id);await heroQueueExternalUpdate(o.id);await heroWhatsMenuPedido(o.customer_jid,o.id);
+  return 'Pagamento conferido, compra recusada e crédito único registrado na carteira. Nenhuma nova compra ou Pix foi criado.';
+}
 async function heroReconcileExternalCancellation(orderId,activationId){
   await heroPedidosInit();
   const id=Number(orderId),activation=String(activationId||'').trim();
@@ -4053,6 +4086,7 @@ async function heroStatusUpdates(){
   heroStatusUpdatesRunning=true;
   try{
     await heroPedidosInit();
+    await heroRecoverRejectedPurchases();
     const confirmed=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_cancel_receipts c ON c.order_id=o.id AND c.activation_id=o.activation_id WHERE o.refund_status='none' AND o.status IN ('cancel_pending','canceled') LIMIT 100");
     for(const o of confirmed)try{await heroCreditConfirmedRefund(o,true);}catch(e){console.log('Hero estorno pendente #'+o.id,String(e.message).slice(0,120));}
     const historyRefunds=await all("SELECT o.id FROM hero_sms_orders o JOIN hero_sms_refund_receipts r ON r.order_id=o.id AND r.activation_id=o.activation_id WHERE o.refund_status='none' AND r.provider_status=10 AND o.status!='test_closed' LIMIT 100");
@@ -17267,6 +17301,7 @@ async function heroPedidosInit(){
     order_id INTEGER PRIMARY KEY, reference_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await run(`CREATE TABLE IF NOT EXISTS hero_sms_purchase_rejections(order_id INTEGER PRIMARY KEY,code TEXT NOT NULL,http_status INTEGER NOT NULL,source TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS hero_sms_status_outbox(
     order_id INTEGER PRIMARY KEY, last_status TEXT, pending_status TEXT,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -17524,6 +17559,11 @@ app.post('/admin/herosms/pedidos/:id/encerrar-teste',async(req,res)=>{
     res.redirect('/admin/herosms/pedidos/'+id+'?erro='+encodeURIComponent(checkoutDiagnostic(e,'HERO-TEST-'+id).message));
   }
 });
+app.post('/admin/herosms/pedidos/:id/conferir-sem-numero',async(req,res)=>{
+ const id=Number(req.params.id);if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página do pedido antes de confirmar.');
+ try{if(!Number.isSafeInteger(id)||id<1)throw Error('Pedido inválido.');if(req.body?.confirmar_ausencia!=='sim')throw Error('Confirme que não existe ativação nem crédito manual para este pagamento.');const message=await heroReviewRejectedPix(id);res.redirect('/admin/herosms/pedidos/'+id+'?ok='+encodeURIComponent(message));}
+ catch(e){if(!Number.isSafeInteger(id)||id<1)return res.status(400).send('Pedido inválido');res.redirect('/admin/herosms/pedidos/'+id+'?erro='+encodeURIComponent(checkoutDiagnostic(e,'HERO-REJECTION-'+id).message));}
+});
 app.post('/admin/herosms/pedidos/:id/conferir-cancelamento',async(req,res)=>{
   const id=Number(req.params.id);
   if(req.body?.token!==heroAdminReconcileToken)return res.status(403).send('Atualize a página do pedido antes de confirmar.');
@@ -17560,9 +17600,11 @@ app.get('/admin/herosms/pedidos/:id',async(req,res)=>{
     const notice=req.query.ok?`<p>${safeHtml(req.query.ok)}</p>`:req.query.erro?`<p>${safeHtml(req.query.erro)}</p>`:'';
     const canReconcile=!o.sms_received&&!o.sms_code&&['uncertain','purchasing','paid','number_received','cancel_pending','canceled'].includes(o.status);
     const syncForm=canReconcile?`<h3>Cancelado manualmente na Hero SMS?</h3><p>Informe o ID da ativação no fornecedor. Esta ação consulta o cancelamento e atualiza o cliente, sem executar outro cancelamento. O crédito é liberado após confirmação do reembolso no histórico.</p><form method="post" action="/admin/herosms/pedidos/${id}/conferir-cancelamento"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label>ID da ativação Hero SMS</label><input name="activation_id" value="${safeHtml(o.activation_id||'')}" inputmode="numeric" pattern="[0-9]{1,30}" required><label><input type="checkbox" name="confirmar_vinculo" value="sim" required> Confirmo que esta ativação pertence ao pedido #${id}</label><button type="submit">Conferir cancelamento e atualizar cliente</button></form>`:'';
-    const canCloseTest=o.status==='uncertain'&&!o.activation_id&&!o.phone&&!o.sms_code;
+    const canReviewRejected=o.payment_method==='pix'&&o.status==='uncertain'&&!o.activation_id&&!o.phone&&!o.sms_received&&!o.sms_code&&heroPurchaseRejection.legacyNoNumbers(o.last_error);
+    const rejectedForm=canReviewRejected?`<h3>Compra recusada: NO_NUMBERS</h3><p>Para pedidos antigos pagos, confira primeiro o histórico da Hero e os créditos manuais. Esta ação revalida o Pix no gateway e registra devolução única na carteira; não devolve ao banco, não compra outro número e não cria outro Pix.</p><form method="post" action="/admin/herosms/pedidos/${id}/conferir-sem-numero"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label><input type="checkbox" name="confirmar_ausencia" value="sim" required> Conferi que não existe ativação e que este valor não foi creditado manualmente</label><button>Conferir Pix e resolver recusa</button></form>`:'';
+    const canCloseTest=o.status==='uncertain'&&!o.activation_id&&!o.phone&&!o.sms_code&&!canReviewRejected;
     const closeForm=canCloseTest?`<h3>Encerrar pedido de teste</h3><p>Use apenas se este pedido foi um teste já encerrado no fornecedor. Remove o bloqueio deste pedido e para sua recuperação automática. Não gera compra, não altera o pagamento Pix e não credita nem debita saldo.</p><form method="post" action="/admin/herosms/pedidos/${id}/encerrar-teste"><input type="hidden" name="token" value="${heroAdminReconcileToken}"><label><input type="checkbox" name="confirmar_teste" value="sim" required> Confirmo que este pedido é um teste já encerrado no fornecedor</label><button type="submit">Encerrar teste e liberar novas compras</button></form>`:'';
-    res.send(page('Pedido Hero SMS #'+id,`<div class="hero"><h1>📦 Pedido Hero SMS #${id}</h1></div><div class="card">${notice}<p><a href="/admin/herosms/pedidos">Voltar aos pedidos</a></p><p><b>Estado:</b> ${safeHtml(o.status)}</p><p><b>Pagamento:</b> ${safeHtml(o.payment_method)} • ${brl(o.price_brl)}</p><p><b>Ativação:</b> ${safeHtml(o.activation_id||'Não registrada')}</p><p><b>Número:</b> ${safeHtml(o.phone||'Não registrado')}</p><p><b>Crédito na carteira:</b> ${safeHtml(o.refund_status)}</p>${payment?`<p><b>Pix:</b> ${safeHtml(payment.gateway)} • ${safeHtml(payment.status)} • ${brl(payment.valor)}</p>`:''}<p><b>Expiração na Hero:</b> ${safeHtml(o.expires_at||'Em sincronização')}</p><p><b>Estado na Hero:</b> ${safeHtml(o.provider_status??'Em sincronização')}</p><p><b>SMS recebido:</b> ${o.sms_received?'Sim':'Não confirmado'}</p><p><b>Última conferência:</b> ${safeHtml(o.last_reconciled_at||'Ainda não realizada')}</p><h3>Motivo registrado</h3><pre style="white-space:pre-wrap">${safeHtml(diagnostic)}</pre><p>Se o pedido estiver em verificação, confira o histórico da Hero SMS antes de repetir a compra ou liberar saldo.</p>${syncForm}${closeForm}</div>`));
+    res.send(page('Pedido Hero SMS #'+id,`<div class="hero"><h1>📦 Pedido Hero SMS #${id}</h1></div><div class="card">${notice}<p><a href="/admin/herosms/pedidos">Voltar aos pedidos</a></p><p><b>Estado:</b> ${safeHtml(o.status)}</p><p><b>Pagamento:</b> ${safeHtml(o.payment_method)} • ${brl(o.price_brl)}</p><p><b>Ativação:</b> ${safeHtml(o.activation_id||'Não registrada')}</p><p><b>Número:</b> ${safeHtml(o.phone||'Não registrado')}</p><p><b>Crédito na carteira:</b> ${safeHtml(o.refund_status)}</p>${payment?`<p><b>Pix:</b> ${safeHtml(payment.gateway)} • ${safeHtml(payment.status)} • ${brl(payment.valor)}</p>`:''}<p><b>Expiração na Hero:</b> ${safeHtml(o.expires_at||'Em sincronização')}</p><p><b>Estado na Hero:</b> ${safeHtml(o.provider_status??'Em sincronização')}</p><p><b>SMS recebido:</b> ${o.sms_received?'Sim':'Não confirmado'}</p><p><b>Última conferência:</b> ${safeHtml(o.last_reconciled_at||'Ainda não realizada')}</p><h3>Motivo registrado</h3><pre style="white-space:pre-wrap">${safeHtml(diagnostic)}</pre><p>Se o pedido estiver em verificação, confira o histórico da Hero SMS antes de repetir a compra ou liberar saldo.</p>${rejectedForm}${syncForm}${closeForm}</div>`));
   }catch(e){res.status(500).send('Erro ao abrir diagnóstico do pedido Hero SMS');}
 });
 app.get('/admin/herosms/pedidos',async(req,res)=>{

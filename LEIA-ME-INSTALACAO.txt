@@ -1,3 +1,17 @@
+ATUALIZAÇÃO 10.1.19 — CONFIRMAÇÃO PIX, NO_NUMBERS E CANCELAMENTOS
+Aviso de Pix confirmado agora chega em mensagem NOVA de texto.
+Recusa HTTP 400 NO_NUMBERS comprovada recebe tratamento financeiro único.
+Cancelamentos já avisados não são reenviados por mudança de saldo.
+Pedido antigo #34: confira ausência de ativação e crédito manual no painel; use Conferir Pix e resolver recusa.
+Leia CORRECAO-PIX-E-AVISOS-V19.md. Preserve banco, sessões e disco persistente.
+
+ATUALIZAÇÃO 10.1.19 — CONFIRMAÇÃO PIX E RECUSA NO_NUMBERS
+Confirmação do pagamento em mensagem NOVA de texto, sem depender da edição do cartão.
+Recusa inequívoca de compra: crédito único na carteira com prova financeira.
+Cancelamentos antigos não são reenviados só por mudança do saldo.
+Para #34 antigo: leia CORRECAO-PIX-E-AVISOS-V19.md e use a conferência do painel.
+Preserve banco, sessões e disco persistente. Não foi implantado no servidor.
+
 ATUALIZAÇÃO 10.1.18 — CARTÃO PIX NOVO PARA TESTAR NO IPHONE
 O cartão agora é enviado NOVO; Gerando seu Pix recebe apenas edição de texto.
 Teste SEM COBRANÇA: /admin/menu-whatsapp/testes → Cartão Pix novo com QR.
