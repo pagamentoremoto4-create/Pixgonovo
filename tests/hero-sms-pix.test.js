@@ -16,7 +16,7 @@ async function fixture(t,{gateway='depixpay',document='12345678901'}={}){
  const all=(sql,args=[])=>new Promise((resolve,reject)=>db.all(sql,args,(e,r)=>e?reject(e):resolve(r)));
  const messages=[],charges=[],purchases=[],sessions=new Map(),images=[];
  let starts=0;
- const ctx=vm.createContext({whatsappMenu:{copyPix:async()=>false,enabled:async()=>false},run,get,all,...protocol,...errors,heroProtocol,console,Number,String,Set,Date,JSON,Buffer,
+ const ctx=vm.createContext({heroPurchaseRejection:require('../hero-sms-purchase-rejection'),whatsappMenu:{copyPix:async()=>false,enabled:async()=>false},run,get,all,...protocol,...errors,heroProtocol,console,Number,String,Set,Date,JSON,Buffer,
   addColumnIfMissing:async()=>{},heroSmsVitrine:async()=>[{country:'73',service:'wa',cost:1,stock:100,nome:'WhatsApp'}],heroLifecycle:()=>({snapshot:async()=>{}}),heroValidCountry:require('../hero-sms-countries').heroValidCountry,heroPrecoCliente:async()=>25,
   gatewayPagamentoCliente:async()=>assert.fail('Hero must use the panel default, not the customer gateway'),gatewaysPagamentoAtivos:async()=>({lista:[gateway],padrao:gateway}),documentoPixCliente:async()=>String((await get('SELECT pix_documento FROM revendas WHERE id=1'))?.pix_documento||''),
   salvarSessaoPedido:async(jid,s)=>sessions.set(jid,s),apagarSessaoPedido:async jid=>sessions.delete(jid),

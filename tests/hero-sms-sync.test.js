@@ -22,6 +22,7 @@ async function fixture(t){
     heroSmsApi:async()=> 'STATUS_WAIT_CODE',heroWaitSeconds:()=>0,brl:v=>'R$ '+v});
   vm.runInContext(section('async function heroPedidosInit(){','async function heroCatalogInit(){'),ctx);
   vm.runInContext(section('async function heroReplaceOrder(','async function heroOrderHistory('),ctx);
+  vm.runInContext(section('async function heroRecoverRejectedPurchases(){','async function heroRecoverPaidWallet(){'),ctx);
   vm.runInContext(section('async function heroCreditConfirmedRefund(','setInterval(()=>heroPollSms()'),ctx);
   vm.runInContext(section('let heroOrderMessenger=null;','async function heroWhatsListarPedidos('),ctx);
   ctx.heroEditOrderMessage=async(reference,card)=>sent.push({reference,msg:card.text,edit:true});
@@ -181,3 +182,6 @@ test('Telegram user opening an order adopts the message currently visible in tha
  assert.equal(saved.messageId,77);assert.equal(saved.kind,'caption');assert.equal(f.sent.length,1);assert.equal(f.sent[0].edit,true);
  await assert.rejects(f.ctx.heroShowTelegramOrderCard('tg:123',1,{message_id:88,chat:{id:999}}));
 });
+
+test('real polling and restart never replay old cancellation cards when wallet balance changes',async t=>{const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='canceled',refund_status='credited'");await f.ctx.heroUpdateOrderCard(1);await f.run('UPDATE revendas SET saldo=101.5');f.ctx.heroEditOrderMessage=async()=>{throw Object.assign(Error('expired'),{cannotEdit:true});};await f.ctx.heroStatusUpdates();vm.runInContext('heroOrderMessenger=null',f.ctx);await f.ctx.heroStatusUpdates();assert.equal(f.sent.length,1);assert.equal((await f.get('SELECT saldo FROM revendas WHERE id=1')).saldo,101.5);});
+test('polling still notifies a real pending-to-credited cancellation transition once',async t=>{const f=await fixture(t);await f.run("UPDATE hero_sms_orders SET status='canceled',refund_status='none'");await f.ctx.heroUpdateOrderCard(1);await f.run("UPDATE hero_sms_orders SET refund_status='credited'");await f.ctx.heroStatusUpdates();await f.run('UPDATE revendas SET saldo=123');await f.ctx.heroStatusUpdates();assert.equal(f.sent.filter(x=>x.edit).length,1);assert.match(f.sent.find(x=>x.edit).msg,/Valor devolvido/);});

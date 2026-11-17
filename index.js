@@ -1,5 +1,5 @@
 require('dotenv').config();
-const APP_RELEASE='10.1.19';
+const APP_RELEASE='10.1.20';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -14111,19 +14111,20 @@ app.post('/admin/consultavip/licenca-individual',async(req,res)=>{
 app.post('/admin/consultavip/chave',async(req,res)=>{try{const uid=String(req.body.telegram_user_id||'').replace(/\D/g,''),p=await get('SELECT * FROM consulta_assinatura_planos WHERE id=? AND ativo=1',[Number(req.body.plano_id)]);if(!uid||!p)throw new Error('Comprador ou plano inválido.');const chave=consultavipGerarChave();await run(`INSERT INTO consultavip_chaves(chave_hash,chave_final,comprador_telegram_id,plano_id,status) VALUES(?,?,?,?,'DISPONIVEL')`,[consultavipHash(chave),chave.slice(-6),uid,p.id]);res.send(page('Chave criada',`<h1>✅ Chave criada</h1><div class="card"><p>Copie agora. A chave completa não poderá ser consultada novamente:</p><h2>${safeHtml(chave)}</h2><p>Ativação: <b>/ativar ${safeHtml(chave)}</b></p><a class="btn" href="/admin/consultavip">Voltar</a></div>`));}catch(e){res.redirect('/admin/consultavip?erro='+encodeURIComponent(e.message));}});
 app.post('/admin/consultavip/licenca/:id/status',async(req,res)=>{const st=req.body.status==='ATIVA'?'ATIVA':'SUSPENSA';await run('UPDATE consultavip_licencas SET status=?,atualizado_em=CURRENT_TIMESTAMP WHERE id=?',[st,Number(req.params.id)]);res.redirect('/admin/consultavip?ok='+encodeURIComponent('Licença atualizada.'));});
 
+const {createDhruCommandPicker}=require('./dhru-command-picker');
+const dhruCommandPicker=createDhruCommandPicker({get,all});
+app.get('/admin/consultas-assinatura/dhru-servicos-buscar',async(req,res)=>{
+  try{res.json({ok:true,...await dhruCommandPicker.search(req.query)});}
+  catch(e){res.status(400).json({ok:false,error:'Não foi possível buscar os serviços. Verifique os filtros e tente novamente.'});}
+});
 app.get('/admin/consultas-assinatura', async (req,res)=>{
   const ativa=await consultaAtivaConfig(), tgGrupo=await getConfig('consulta_tg_grupo',''), waGrupo=await getConfig('consulta_wa_grupo',''), timeout=await getConfig('consulta_timeout_seg','30');
   const c=await consultaTelegramCredenciais();
   const grupos=await consultaListarGruposWhatsApp();
   const hist=await all('SELECT * FROM consultas_assinatura ORDER BY id DESC LIMIT 30');
   const dhruCmds=await all(`SELECT c.*,s.nome servico_nome FROM consulta_dhru_comandos c LEFT JOIN servicos_catalogo s ON s.id=c.servico_id ORDER BY c.id`);
-  const dhruServicos=await all(`SELECT id,COALESCE(NULLIF(nome_exibicao,''),nome) nome FROM servicos_catalogo WHERE api_provider='DHRU' ORDER BY nome COLLATE NOCASE`);
-  const yanReservados=new Set(CONSULTA_COMANDOS_VALIDOS.flatMap(x=>x.comandos||[]).map(x=>String(x).toLowerCase()));
-  const dhruLabel=(s)=>`${s.nome} (#${s.id})`;
-  const dhruAtual=(sel)=>{const x=dhruServicos.find(s=>Number(s.id)===Number(sel));return x?dhruLabel(x):''};
-  const dhruDataList=`<datalist id="dhru-servicos-lista">${dhruServicos.map(s=>`<option value="${safeHtml(dhruLabel(s))}"></option>`).join('')}</datalist>`;
-  const dhruServiceMap=Object.fromEntries(dhruServicos.map(s=>[dhruLabel(s),Number(s.id)]));
-  const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="forms-inline dhru-service-form"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" value="${safeHtml(dhruAtual(c.servico_id))}" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id" value="${Number(c.servico_id)||''}"><input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome comercial"><input name="exemplo" value="${safeHtml(c.exemplo||'')}" placeholder="Exemplo: /check 350000000000000"><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
+  const dhruPickerItems=new Map(await Promise.all([...new Set(dhruCmds.map(c=>Number(c.servico_id)))].map(async id=>[id,await dhruCommandPicker.lookup(id)])));
+  const dhruRows=dhruCmds.map(c=>`<tr><td><b>${safeHtml(c.comando)}</b></td><td>${safeHtml(c.nome_exibicao||'-')}</td><td><form method="post" action="/admin/consultas-assinatura/dhru-comando/${c.id}/salvar" class="dhru-service-form">${dhruCommandPicker.render(dhruPickerItems.get(Number(c.servico_id)),safeHtml)}<label>Nome do comando<input name="nome_exibicao" value="${safeHtml(c.nome_exibicao||'')}" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" value="${safeHtml(c.exemplo||'')}" placeholder="Exemplo: /check 350000000000000"></label><label><input style="width:auto" type="checkbox" name="ativo" value="1" ${Number(c.ativo)?'checked':''}> Ativo</label><button class="btn green">Salvar vínculo</button></form></td></tr>`).join('')||'<tr><td colspan="3">Nenhum comando Dhru.</td></tr>';
   const assinaturaControle=(await getConfig('consulta_assinaturas_controle_ativo','0'))==='1';
   const assinaturaPlanos=await all(`SELECT * FROM consulta_assinatura_planos ORDER BY ordem,dias,id`);
   const assinaturaAssinantes=await all(`SELECT a.*,p.nome plano_nome,p.dias plano_dias,p.preco plano_preco FROM consulta_assinantes a LEFT JOIN consulta_assinatura_planos p ON p.id=a.plano_id ORDER BY a.id DESC LIMIT 200`);
@@ -14166,7 +14167,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="grid"><div class="card"><h3>Assinantes ativos</h3><p><b>${totalAtivos}</b></p></div><div class="card"><h3>Receita de assinaturas no mês</h3><p><b>${safeHtml(brl(receitaMes?.total||0))}</b></p></div><div class="card"><h3>Consultas Yan no mês</h3><p><b>${Number(consultasMes?.total||0)}</b></p></div></div>
   <div class="card"><h2>🏆 Ranking de utilização</h2><table><tr><th>#</th><th>Cliente</th><th>Consultas</th><th>Último uso</th></tr>${rankingRows}</table></div>
   <div class="card"><h2>💰 Histórico de pagamentos das assinaturas</h2><table><tr><th>Cliente</th><th>Plano</th><th>Valor</th><th>Gateway</th><th>Status</th><th>Data</th></tr>${pagamentosAssRows}</table></div>
-  <div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Cadastre comandos próprios e escolha qual serviço sincronizado da API Dhru cada um executa. Digite parte do nome do serviço para filtrar as opções. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p>${dhruDataList}<form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="forms-inline dhru-service-form"><input name="comando" placeholder="/apple" required><input name="nome_exibicao" placeholder="Nome comercial"><input name="exemplo" placeholder="Exemplo: /apple 350000000000000"><input class="dhru-service-search" list="dhru-servicos-lista" name="servico_busca" placeholder="Digite o nome do serviço Dhru..." autocomplete="off" required><input type="hidden" name="servico_id"><button class="btn green">➕ Cadastrar comando</button></form><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table><script>(function(){var MAP=${JSON.stringify(dhruServiceMap)};function sync(i){var f=i.closest('form'),h=f&&f.querySelector('input[name=servico_id]');if(!h)return;var v=(i.value||'').trim();var id=MAP[v]||'';if(!id){var m=v.match(/\(#(\d+)\)\s*$/);if(m)id=m[1]}h.value=id||''}document.querySelectorAll('.dhru-service-search').forEach(function(i){i.addEventListener('input',function(){sync(i)});i.addEventListener('change',function(){sync(i)});i.addEventListener('blur',function(){sync(i)});sync(i)});document.querySelectorAll('.dhru-service-form').forEach(function(f){f.addEventListener('submit',function(e){var i=f.querySelector('.dhru-service-search'),h=f.querySelector('input[name=servico_id]');sync(i);if(!h.value){e.preventDefault();alert('Selecione um serviço Dhru da lista.')}})})})();</script></div>
+  <link rel="stylesheet" href="/css/dhru-command-picker.css?v=10.1.20"><div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Busque por nome, ID local ou UUID da API. Confira os campos exigidos e o custo no fornecedor antes de selecionar. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><h3>➕ Cadastrar comando</h3><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="dhru-service-form"><label>Comando<input name="comando" placeholder="/apple" required></label><label>Nome do comando<input name="nome_exibicao" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" placeholder="Exemplo: /apple 350000000000000"></label>${dhruCommandPicker.render(null,safeHtml)}<button class="btn green">➕ Cadastrar comando</button></form><div style="overflow-x:auto"><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div><script src="/js/dhru-command-picker.js?v=10.1.20" defer></script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });
@@ -14186,6 +14187,7 @@ app.get('/admin/consultas-assinatura/saude',async(req,res)=>{
 });
 
 async function consultaDhruResolverServicoPainel(body){
+  if(String(body?.picker_version)==='2')return dhruCommandPicker.resolve(body);
   let sid=Number(body?.servico_id||0);
   if(sid){
     const sv=await get(`SELECT id FROM servicos_catalogo WHERE id=? AND api_provider='DHRU'`,[sid]);
