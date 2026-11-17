@@ -1,5 +1,6 @@
+const {purchasePhrase,parsePurchasePhrase,availableEsimPlan}=require('./purchase-short-links');
 require('dotenv').config();
-const APP_RELEASE='10.1.20';
+const APP_RELEASE='10.1.21';
 const {createWhatsAppMenu,replyId:whatsAppMenuReplyId}=require('./whatsapp-menu-premium');
 const {createWhatsAppUiTest,testReplyId:whatsAppUiTestReplyId}=require('./whatsapp-ui-test');
 const {createCustomerBilling}=require('./customer-billing');
@@ -4963,9 +4964,13 @@ async function resolverFraseCompraServicoAnuncio(texto){
 async function resolverFraseCompraEsimAnuncio(texto){
   const alvo=normalizarFraseComercialAnuncio(texto).toLowerCase();
   if(!alvo.startsWith('comprar '))return null;
-  const rows=await all(`SELECT id,nome_plano FROM esim_planos WHERE ativo=1 ORDER BY id`);
+  const rows=await planosEsimDisponiveis();
   const achados=rows.filter(r=>`comprar ${normalizarFraseComercialAnuncio(r.nome_plano)}`.toLowerCase()===alvo);
-  return achados.length===1?achados[0]:null;
+  if(achados.length===1)return achados[0];
+  if(achados.length>1)return null;
+  // Preserve a clear unavailable reply for old links when stock has sold out.
+  const catalogo=await all('SELECT id,nome_plano FROM esim_planos ORDER BY ativo DESC,id');
+  return catalogo.find(r=>`comprar ${normalizarFraseComercialAnuncio(r.nome_plano)}`.toLowerCase()===alvo)||null;
 }
 async function numeroBotServicosAnuncio(){
   const multi=await obterSessaoBotConectada();
@@ -5027,12 +5032,7 @@ async function textoCampanhaPorCanal(campanha,canal){
       }
     }
     if(canal==='whatsapp'){
-      const numero=await numeroBotServicosAnuncio();let frase='';
-      if(tipo==='HERO_SMS')frase='Comprar numero WhatsApp';
-      else if(tipo==='CONSULTAVIP')frase='Assinar ConsultaVIP';
-      else if(tipo==='PREMIUM'&&ref){const p=await premium.product(ref);if(p){let meta={};try{meta=JSON.parse(p.json||'{}')}catch(_){};frase=ggsoma.purchasePhrase(p,meta);}}
-      else if(tipo==='SERVICO'&&ref){const sv=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[ref]);if(sv)frase=fraseCompraServicoAnuncio(sv);}
-      else if(tipo==='ESIM'&&ref){const es=await get('SELECT nome_plano FROM esim_planos WHERE id=? AND ativo=1',[ref]);if(es)frase=`Comprar ${normalizarFraseComercialAnuncio(es.nome_plano)}`;}
+      const numero=await numeroBotServicosAnuncio();const frase=purchasePhrase(communityCampaignPayload(campanha));
       if(numero&&frase)texto+=`\n\n🛒 *COMPRAR AGORA:*\nhttps://wa.me/${numero}?text=${encodeURIComponent(frase)}`;
     }
   }
@@ -7139,6 +7139,25 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     await iniciarFluxoPagamento(from,{valor_pix:valor,tipo_pix:'SALDO'},cliente,async(m)=>enviarTexto(from,m),true);return;
   }
 
+  // Stable product IDs; opening a link never purchases or charges.
+  const compraCurta=parsePurchasePhrase(textoOriginal);
+  if(compraCurta){
+    if(compraCurta.type==='hero'){await apagarSessaoPedido(from);await heroSmsWaPaises(from,'WhatsApp','preco_asc',0,cliente);return;}
+    if(compraCurta.type==='esim'){
+      const alvo=await get('SELECT id,nome_plano FROM esim_planos WHERE id=?',[compraCurta.id]);
+      const plano=alvo?availableEsimPlan(await planosEsimDisponiveis(cliente.id),alvo):null;
+      if(!plano){await enviarTexto(from,'⚠️ Este eSIM não está disponível no momento.');return;}
+      await apagarSessaoPedido(from);await salvarSessaoPedido(from,{etapa:'esim_ddd',plano});await enviarEscolhaDddEsim(from,plano,cliente.saldo);return;
+    }
+    const servico=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[compraCurta.id]);
+    if(!servico){await enviarTexto(from,'⚠️ Este serviço não está disponível no momento.');return;}
+    await apagarSessaoPedido(from);
+    if(['GGSOMA','PREMIUM'].includes(String(servico.api_provider||'').toUpperCase()))await premium.show(from,cliente,servico.id);
+    else if(compraCurta.type==='premium'){await enviarTexto(from,'⚠️ Esta oferta não está disponível no momento.');}
+    else await iniciarServicoWhatsApp(from,cliente,servico);
+    return;
+  }
+
   // Anúncio WhatsApp SMS: abre seleção de países, sem comprar nem cobrar.
   if(/^comprar (?:numero|numeros) whatsapp$/.test(normalizarFraseComercialAnuncio(textoOriginal).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase())){
     await apagarSessaoPedido(from);
@@ -7179,7 +7198,7 @@ async function processarMensagemWhatsApp({ numero, nome, texto, sessaoId=null })
     }
     const esimDireto=await resolverFraseCompraEsimAnuncio(textoOriginal);
     if(esimDireto){
-      const planos=await planosEsimDisponiveis(cliente.id),plano=planos.find(x=>Number(x.id)===Number(esimDireto.id));
+      const planos=await planosEsimDisponiveis(cliente.id),plano=availableEsimPlan(planos,esimDireto);
       if(!plano){await enviarTexto(from,'⚠️ Este eSIM não está disponível no momento.');return;}
       await apagarSessaoPedido(from);
       await salvarSessaoPedido(from,{etapa:'esim_ddd',plano});
@@ -9573,7 +9592,7 @@ async function dddsEsimDisponiveis(plano) {
   const nome = String(plano?.nome_plano || plano || '').trim();
   if (!nome) return [];
   return all(`SELECT ddd, COUNT(*) qtd FROM esim_estoque
-    WHERE status='DISPONIVEL' AND nome_plano=? AND ddd IS NOT NULL AND TRIM(ddd)<>''
+    WHERE status='DISPONIVEL' AND TRIM(UPPER(nome_plano))=TRIM(UPPER(?)) AND ddd IS NOT NULL AND TRIM(ddd)<>''
     GROUP BY ddd ORDER BY CAST(ddd AS INTEGER), ddd`, [nome]);
 }
 
@@ -13988,16 +14007,8 @@ let communityBotIdentity=null;
 async function communityPurchaseLinks(payload){
  let telegram='',whatsapp='';
  try{if(!communityBotIdentity&&tgBot)communityBotIdentity=await tgBot.getMe();const me=communityBotIdentity;if(me?.username)telegram='https://t.me/'+me.username+'?start='+encodeURIComponent(payload);}catch(_){}
- const numero=await numeroBotServicosAnuncio();let phrase='menu';
- if(payload==='hero')phrase='Comprar numero WhatsApp';
- if(payload==='consulta'){
-  phrase='Assinar ConsultaVIP';const user=String(await getConfig('consultavip_bot_username','')).replace(/^@/,'');
-  if(user)telegram='https://t.me/'+user+'?start=planos';
- }
- let m=payload.match(/^(servico|esim|premium)_(\d+)$/);
- if(m){if(m[1]==='servico'){const sv=await get('SELECT * FROM servicos_catalogo WHERE id=? AND ativo=1',[Number(m[2])]);if(sv)phrase=fraseCompraServicoAnuncio(sv);}
- if(m[1]==='esim'){const es=await get('SELECT nome_plano FROM esim_planos WHERE id=? AND ativo=1',[Number(m[2])]);if(es)phrase='Comprar '+normalizarFraseComercialAnuncio(es.nome_plano);}
- if(m[1]==='premium'){const product=await premium.product(Number(m[2]));if(product){let meta={};try{meta=JSON.parse(product.json||'{}');}catch(_){}phrase=ggsoma.purchasePhrase(product,meta);}}}
+ const numero=await numeroBotServicosAnuncio();const phrase=purchasePhrase(payload);
+ if(payload==='consulta'){const user=String(await getConfig('consultavip_bot_username','')).replace(/^@/,'');if(user)telegram='https://t.me/'+user+'?start=planos';}
  if(numero)whatsapp='https://wa.me/'+numero+'?text='+encodeURIComponent(phrase);
  return {telegram,whatsapp};
 }
@@ -14167,7 +14178,7 @@ app.get('/admin/consultas-assinatura', async (req,res)=>{
   <div class="grid"><div class="card"><h3>Assinantes ativos</h3><p><b>${totalAtivos}</b></p></div><div class="card"><h3>Receita de assinaturas no mês</h3><p><b>${safeHtml(brl(receitaMes?.total||0))}</b></p></div><div class="card"><h3>Consultas Yan no mês</h3><p><b>${Number(consultasMes?.total||0)}</b></p></div></div>
   <div class="card"><h2>🏆 Ranking de utilização</h2><table><tr><th>#</th><th>Cliente</th><th>Consultas</th><th>Último uso</th></tr>${rankingRows}</table></div>
   <div class="card"><h2>💰 Histórico de pagamentos das assinaturas</h2><table><tr><th>Cliente</th><th>Plano</th><th>Valor</th><th>Gateway</th><th>Status</th><th>Data</th></tr>${pagamentosAssRows}</table></div>
-  <link rel="stylesheet" href="/css/dhru-command-picker.css?v=10.1.20"><div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Busque por nome, ID local ou UUID da API. Confira os campos exigidos e o custo no fornecedor antes de selecionar. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><h3>➕ Cadastrar comando</h3><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="dhru-service-form"><label>Comando<input name="comando" placeholder="/apple" required></label><label>Nome do comando<input name="nome_exibicao" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" placeholder="Exemplo: /apple 350000000000000"></label>${dhruCommandPicker.render(null,safeHtml)}<button class="btn green">➕ Cadastrar comando</button></form><div style="overflow-x:auto"><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div><script src="/js/dhru-command-picker.js?v=10.1.20" defer></script></div>
+  <link rel="stylesheet" href="/css/dhru-command-picker.css?v=10.1.21"><div class="card"><h2>🔄 Comandos Dhru do grupo</h2><p class="muted">Busque por nome, ID local ou UUID da API. Confira os campos exigidos e o custo no fornecedor antes de selecionar. Os comandos da Yan continuam separados e não podem ser sobrescritos.</p><h3>➕ Cadastrar comando</h3><form method="post" action="/admin/consultas-assinatura/dhru-comando/novo" class="dhru-service-form"><label>Comando<input name="comando" placeholder="/apple" required></label><label>Nome do comando<input name="nome_exibicao" placeholder="Nome do comando"></label><label>Exemplo<input name="exemplo" placeholder="Exemplo: /apple 350000000000000"></label>${dhruCommandPicker.render(null,safeHtml)}<button class="btn green">➕ Cadastrar comando</button></form><div style="overflow-x:auto"><table style="margin-top:14px"><tr><th>Comando</th><th>Nome</th><th>Serviço / configuração</th></tr>${dhruRows}</table></div><script src="/js/dhru-command-picker.js?v=10.1.21" defer></script></div>
   <div class="card"><h2>🧪 Testes</h2><div class="actions"><form method="post" action="/admin/consultas-assinatura/testar-telegram"><button class="btn">Testar conta Telegram</button></form><form method="post" action="/admin/consultas-assinatura/testar-whatsapp"><button class="btn">Testar WhatsApp</button></form><form method="post" action="/admin/consultas-assinatura/liberar-grupo"><button class="btn red">Liberar grupo manualmente</button></form></div></div>
   <div class="card"><h2>📋 Últimas consultas</h2><table><tr><th>ID</th><th>Cliente</th><th>Consulta</th><th>Status</th><th>Data</th></tr>${rows}</table></div>`));
 });

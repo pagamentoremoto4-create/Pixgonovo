@@ -3,8 +3,9 @@ const {test}=require('node:test'),assert=require('node:assert/strict'),fs=requir
 const source=fs.readFileSync(require.resolve('../index.js'),'utf8');
 function section(a,b){const start=source.indexOf(a);assert.ok(start>=0,a);const end=source.indexOf(b,start);assert.ok(end>start,b);return source.slice(start,end);}
 function fixture(){
- const context=vm.createContext({getConfig:async()=>'',numeroBotServicosAnuncio:async()=> '5511999999999',all:async()=>[],premium:{products:async()=>[]},safeHtml:s=>String(s),brl:n=>'R$ '+n});
+ const context=vm.createContext({purchasePhrase:require('../purchase-short-links').purchasePhrase,getConfig:async()=>'',numeroBotServicosAnuncio:async()=> '5511999999999',all:async()=>[],premium:{products:async()=>[]},safeHtml:s=>String(s),brl:n=>'R$ '+n});
  vm.runInContext(section('function tipoCompraCampanha(','async function imagemCampanhaCentralEnvio('),context);
+ vm.runInContext(section('function communityCampaignPayload(','let communityBotIdentity='),context);
  vm.runInContext(section('async function textoCampanhaPorCanal(','async function enviarTelegramCentral('),context);
  vm.runInContext(section('async function opcoesDestinoCompraCentral(','app.get(\'/admin/anuncios\''),context);
  return context;
@@ -21,7 +22,7 @@ test('Telegram Buy button targets the existing enabled-country selector without 
  const ctx=fixture(),options=await ctx.opcoesCompraTelegram({compra_tipo:'HERO_SMS'});const button=options.reply_markup.inline_keyboard[0][0];assert.equal(button.callback_data,'hero_sms_cat_whatsapp');assert.match(button.text,/COMPRAR/);
 });
 test('WhatsApp ad link opens the private services bot with the country-selection phrase and no fixed price',async()=>{
- const ctx=fixture(),text=await ctx.textoCampanhaPorCanal({compra_tipo:'HERO_SMS',mensagem:'Números para WhatsApp'},'whatsapp');const match=text.match(/https:\/\/wa\.me\/\d+\?text=\S+/);assert.ok(match);const url=new URL(match[0]);assert.equal(url.pathname,'/5511999999999');assert.equal(url.searchParams.get('text'),'Comprar numero WhatsApp');assert.doesNotMatch(text,/R\$/);
+ const ctx=fixture(),text=await ctx.textoCampanhaPorCanal({compra_tipo:'HERO_SMS',mensagem:'Números para WhatsApp'},'whatsapp');const match=text.match(/https:\/\/wa\.me\/\d+\?text=\S+/);assert.ok(match);const url=new URL(match[0]);assert.equal(url.pathname,'/5511999999999');assert.equal(url.searchParams.get('text'),'Comprar SMS');assert.doesNotMatch(text,/R\$/);
 });
 test('WhatsApp incoming ad phrase clears old navigation and opens countries using the identified customer, without buying',async()=>{
  const branch=section('  // Anúncio WhatsApp SMS: abre seleção de países, sem comprar nem cobrar.','  // V5.0 GGSOMA');
